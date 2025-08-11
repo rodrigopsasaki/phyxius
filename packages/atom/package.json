@@ -1,8 +1,8 @@
 {
-  "name": "@phyxius/clock",
+  "name": "@phyxius/atom",
   "version": "0.0.0",
   "type": "module",
-  "description": "Deterministic time control for Node.js applications",
+  "description": "Versioned mutable references for Node.js applications",
   "main": "./dist/index.js",
   "module": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -48,13 +48,14 @@
   "repository": {
     "type": "git",
     "url": "https://github.com/rodrigopsasaki/phyxius.git",
-    "directory": "packages/clock"
+    "directory": "packages/atom"
   },
   "keywords": [
-    "clock",
-    "time",
-    "deterministic",
-    "testing",
-    "timer"
+    "atom",
+    "state",
+    "mutable",
+    "versioned",
+    "reference",
+    "reactive"
   ]
 }
