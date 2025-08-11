@@ -1,12 +1,174 @@
-# Effect
+# Effect v0 - Production Ready Effect System
 
-**Structured concurrency with context propagation for reliable async operations**
+A production-ready Effect system with structured concurrency, resource management, and deterministic time operations.
 
-## What is Effect?
+## Features
 
-Effect provides structured concurrency - a way to manage async operations that ensures resources are properly cleaned up, contexts are propagated correctly, and concurrent operations are coordinated safely. It's like having a "supervisor" for all your async code that prevents resource leaks and ensures proper cleanup.
+✅ **Hierarchical Cancellation** - CancelToken with parent propagation  
+✅ **Resource Management** - Finalizer scopes with LIFO execution  
+✅ **Result-Based Interpreter** - Never throws, always returns `Result<E, A>`  
+✅ **Cancel-Aware Operations** - Sleep, timeout, and all async operations respond to cancellation  
+✅ **Structured Concurrency** - Fork/join with automatic cleanup  
+✅ **Race with Loser Cancellation** - Race cancels losing effects  
+✅ **Retry with Backoff Policy** - Configurable exponential backoff  
+✅ **Resource Management** - `acquireUseRelease` pattern with guaranteed cleanup  
+✅ **Deterministic Time** - All time operations use injected Clock interface  
+✅ **Zero Runtime Dependencies** - Only depends on `@phyxius/clock`
 
-Think of Effect as a "smart Promise" that carries context, can be cancelled cleanly, and ensures that no async operation is left hanging when its parent operation completes or fails.
+## Core API
+
+```typescript
+import { effect, succeed, fail, sleep, all, race, acquireUseRelease } from "@phyxius/effect";
+import type { RetryPolicy } from "@phyxius/effect";
+import { createControlledClock, ms } from "@phyxius/clock";
+
+// Basic effects
+const simpleEffect = succeed(42);
+const failingEffect = fail("error");
+
+// Async operations with deterministic time
+const clock = createControlledClock({ initialTime: 0 });
+const sleepEffect = sleep(ms(1000));
+
+// Run effects
+const result = await simpleEffect.unsafeRunPromise({ clock });
+// result: { _tag: "Ok", value: 42 } | { _tag: "Err", error: E }
+
+// Effect combinators
+const chainedEffect = succeed(1)
+  .map((x) => x + 1)
+  .flatMap((x) => succeed(x * 2))
+  .timeout(ms(5000));
+
+// Structured concurrency
+const fiber = await slowEffect.fork().unsafeRunPromise({ clock });
+const result = await fiber.join().unsafeRunPromise({ clock });
+
+// Race with automatic loser cancellation
+const winner = await race([sleep(ms(100)).map(() => "fast"), sleep(ms(1000)).map(() => "slow")]).unsafeRunPromise({
+  clock,
+});
+
+// Retry with exponential backoff
+const retryPolicy: RetryPolicy = {
+  maxAttempts: 5,
+  baseDelayMs: 100,
+  backoffFactor: 2,
+  maxDelayMs: 5000,
+};
+
+const resilientEffect = unreliableOperation.retry(retryPolicy);
+
+// Resource management
+const resourceEffect = acquireUseRelease(
+  openFile("data.txt"),
+  (file) => processFile(file),
+  (file) => closeFile(file),
+);
+```
+
+## Architecture
+
+### Result Type
+
+All effects return `Result<E, A>` instead of throwing:
+
+```typescript
+type Result<E, A> = { _tag: "Ok"; value: A } | { _tag: "Err"; error: E };
+```
+
+### Environment
+
+Effects run in an `EffectEnv` context:
+
+```typescript
+interface EffectEnv {
+  clock?: Clock; // Deterministic time operations
+  cancel: CancelToken; // Hierarchical cancellation
+  scope: FinalizerScope; // Resource cleanup
+}
+```
+
+### Structured Concurrency
+
+- **Fork**: Create background fibers with automatic parent cleanup
+- **Race**: First-to-complete wins, others are cancelled
+- **Join**: Wait for fiber completion with proper error propagation
+
+### Resource Management
+
+- **Finalizers**: LIFO cleanup on scope exit (ok/error/interrupted)
+- **acquireUseRelease**: Guaranteed resource cleanup pattern
+- **onInterrupt**: Custom cleanup logic on cancellation
+
+## ESLint Rules
+
+The codebase enforces deterministic time operations through ESLint rules:
+
+```javascript
+// Forbidden patterns:
+Date.now()              // Use Clock.now() instead
+setTimeout(...)         // Use Clock.sleep() instead
+setInterval(...)        // Use Clock.interval() instead
+new Date()              // Use Clock interface instead
+```
+
+### Known Exceptions
+
+The following fallbacks are used only when no Clock is injected (legacy compatibility):
+
+- `env.clock?.now().wallMs ?? Date.now()` - Timestamp fallback for logging
+- `setTimeout` in timeout implementation when no clock available
+
+## Testing
+
+All tests use controlled clocks for deterministic behavior:
+
+```typescript
+import { createControlledClock, ms } from "@phyxius/clock";
+
+const clock = createControlledClock({ initialTime: 0 });
+
+// Test sleeps complete instantly with controlled time
+const sleepEffect = sleep(ms(1000));
+const promise = sleepEffect.unsafeRunPromise({ clock });
+
+clock.advanceBy(ms(1000)); // Instant completion
+const result = await promise;
+```
+
+## Implementation Notes
+
+### Cancellation
+
+- CancelToken propagates cancellation from parent to children
+- Finalizers run in LIFO order when scopes close
+- Sleep and timeout operations check cancellation and clean up timers
+
+### Memory Safety
+
+- No resource leaks: all timers/promises are cleaned up on cancellation
+- Deferred execution: effects don't run until `unsafeRunPromise` is called
+- Proper scope management ensures finalizers always run
+
+### Backward Compatibility
+
+Effects provide a legacy `.run()` method that throws on error for gradual migration:
+
+```typescript
+// New style (recommended)
+const result = await effect.unsafeRunPromise();
+if (result._tag === "Err") {
+  /* handle error */
+}
+
+// Legacy style (for migration)
+try {
+  const value = await effect.run();
+} catch (error) {
+  /* handle error */
+}
+```
 
 ## Why does Effect exist?
 

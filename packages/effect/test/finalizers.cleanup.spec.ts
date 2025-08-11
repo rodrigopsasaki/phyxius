@@ -110,8 +110,8 @@ describe("Effect Finalizers Cleanup", () => {
           return "should-succeed";
         } finally {
           finalizers.push("inner-finalizer");
-          // eslint-disable-next-line no-unsafe-finally
-          throw new Error("finalizer error");
+
+          throw new Error("finalizer error"); // eslint-disable-line no-unsafe-finally
         }
       } catch (error) {
         finalizers.push("caught-finalizer-error");
