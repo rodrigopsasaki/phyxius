@@ -6,6 +6,11 @@
 
 Clock provides deterministic time control through two implementations: `SystemClock` for real-world time and `ControlledClock` for tests and simulations. Instead of calling `Date.now()` directly, your code uses a clock interface that can be controlled and manipulated.
 
+The `clock.now()` method returns an `Instant` object with two time values:
+
+- **`wallMs`** - Wall clock time (can jump due to system clock changes)
+- **`monoMs`** - Monotonic time (never goes backwards, perfect for measuring intervals)
+
 ## Why does Clock exist?
 
 Time-dependent code is notoriously difficult to test and reason about. Race conditions, timing-dependent bugs, and flaky tests often stem from uncontrolled time progression. Clock solves this by making time explicit and controllable.
@@ -48,13 +53,13 @@ class SessionManager {
   createSession(userId: string): string {
     const sessionId = generateId();
     this.sessions.set(sessionId, {
-      expires: this.clock.now() + 30 * 60 * 1000,
+      expires: this.clock.now().wallMs + 30 * 60 * 1000,
     });
     return sessionId;
   }
 
   cleanupExpired() {
-    const now = this.clock.now();
+    const now = this.clock.now().wallMs;
     for (const [id, session] of this.sessions) {
       if (session.expires < now) {
         this.sessions.delete(id);
@@ -91,14 +96,15 @@ import { createSystemClock, createControlledClock } from "@phyxius/clock";
 
 // Production: real time
 const clock = createSystemClock();
-console.log(clock.now()); // 1704063600000
+console.log(clock.now()); // { wallMs: 1704063600000, monoMs: 42.1 }
 
 // Testing: controlled time
-const testClock = createControlledClock(1000);
-console.log(testClock.now()); // 1000
+const testClock = createControlledClock({ initialTime: 1000 });
+console.log(testClock.now()); // { wallMs: 1000, monoMs: 1000 }
 
-testClock.advance(500);
-console.log(testClock.now()); // 1500
+type Millis = number & { readonly __brand: "millis" };
+await testClock.advanceBy(500 as Millis);
+console.log(testClock.now()); // { wallMs: 1500, monoMs: 1500 }
 ```
 
 ### Rate Limiting
@@ -132,7 +138,8 @@ class RateLimiter {
 }
 
 // Test rate limiting instantly
-const rateLimiter = new RateLimiter(createControlledClock(0), 1000, 3);
+const testClock = createControlledClock({ initialTime: 0 });
+const rateLimiter = new RateLimiter(testClock, 1000, 3);
 
 expect(rateLimiter.isAllowed("user1")).toBe(true);
 expect(rateLimiter.isAllowed("user1")).toBe(true);
@@ -140,7 +147,7 @@ expect(rateLimiter.isAllowed("user1")).toBe(true);
 expect(rateLimiter.isAllowed("user1")).toBe(false); // Rate limited
 
 // Fast-forward past window
-testClock.advance(1001);
+await testClock.advanceBy(1001 as Millis);
 expect(rateLimiter.isAllowed("user1")).toBe(true); // Allowed again
 ```
 
@@ -156,7 +163,7 @@ class TTLCache<T> {
   ) {}
 
   set(key: string, value: T, ttl?: number): void {
-    const expires = this.clock.now() + (ttl ?? this.defaultTTL);
+    const expires = this.clock.now().wallMs + (ttl ?? this.defaultTTL);
     this.cache.set(key, { value, expires });
   }
 
@@ -164,7 +171,7 @@ class TTLCache<T> {
     const entry = this.cache.get(key);
     if (!entry) return undefined;
 
-    if (this.clock.now() > entry.expires) {
+    if (this.clock.now().wallMs > entry.expires) {
       this.cache.delete(key);
       return undefined;
     }
@@ -174,15 +181,16 @@ class TTLCache<T> {
 }
 
 // Test cache expiration without waiting
-const cache = new TTLCache(createControlledClock(0), 1000);
+const testClock = createControlledClock({ initialTime: 0 });
+const cache = new TTLCache(testClock, 1000);
 cache.set("key", "value");
 
 expect(cache.get("key")).toBe("value");
 
-testClock.advance(999);
+await testClock.advanceBy(999 as Millis);
 expect(cache.get("key")).toBe("value"); // Still valid
 
-testClock.advance(2);
+await testClock.advanceBy(2 as Millis);
 expect(cache.get("key")).toBeUndefined(); // Expired
 ```
 

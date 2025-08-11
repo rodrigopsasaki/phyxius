@@ -1,23 +1,25 @@
 import { performance } from "node:perf_hooks";
-import type { Clock, EmitFn, Instant, TimerHandle } from "./types.js";
+import type { Clock, EmitFn, Instant, TimerHandle, Millis, DeadlineTarget } from "./types.js";
 
 /**
  * Real system clock implementation using Node.js timers
  */
-export class SystemClock implements Clock {
+class SystemClock implements Clock {
   private readonly emit: EmitFn | undefined;
+  private readonly startTime: number;
 
   constructor(options?: { emit?: EmitFn }) {
     this.emit = options?.emit;
+    this.startTime = performance.now();
   }
 
   now(): Instant {
-    const monoMs = performance.now();
+    const monoMs = performance.now() - this.startTime;
     const wallMs = Date.now();
     return { wallMs, monoMs };
   }
 
-  async sleep(ms: number): Promise<void> {
+  async sleep(ms: Millis): Promise<void> {
     if (ms <= 0) return;
 
     const startTime = this.now();
@@ -40,35 +42,38 @@ export class SystemClock implements Clock {
     });
   }
 
-  async deadline(at: number): Promise<void> {
+  async timeout(ms: Millis): Promise<void> {
+    return this.sleep(ms);
+  }
+
+  async deadline(target: DeadlineTarget): Promise<void> {
     const now = this.now();
-    const targetWallMs = at < 1_000_000_000_000 ? now.wallMs + at : at;
-    const delayMs = Math.max(0, targetWallMs - now.wallMs);
+    const delayMs = Math.max(0, target.wallMs - now.wallMs);
 
     this.emit?.({
       type: "time:deadline:start",
-      targetMs: targetWallMs,
+      targetMs: target.wallMs,
       delayMs,
       at: now,
     });
 
     if (delayMs > 0) {
-      await this.sleep(delayMs);
+      await this.sleep(delayMs as Millis);
     }
 
     const endTime = this.now();
-    const isLate = endTime.wallMs > targetWallMs;
+    const isLate = endTime.wallMs > target.wallMs;
 
     this.emit?.({
       type: isLate ? "time:deadline:err" : "time:deadline:ok",
-      targetMs: targetWallMs,
+      targetMs: target.wallMs,
       actualMs: endTime.wallMs,
-      driftMs: endTime.wallMs - targetWallMs,
+      driftMs: endTime.wallMs - target.wallMs,
       at: endTime,
     });
   }
 
-  interval(ms: number, callback: () => void | Promise<void>): TimerHandle {
+  interval(ms: Millis, callback: () => void | Promise<void>): TimerHandle {
     if (ms <= 0) {
       throw new Error("Interval must be positive");
     }
@@ -96,7 +101,6 @@ export class SystemClock implements Clock {
       try {
         await callback();
       } catch (error) {
-        // Intervals continue even if callback throws
         this.emit?.({
           type: "time:interval:error",
           intervalMs: ms,
@@ -108,8 +112,7 @@ export class SystemClock implements Clock {
     }, ms);
 
     return {
-      id,
-      clear: () => {
+      cancel: () => {
         clearInterval(id);
         this.emit?.({
           type: "time:interval:cancel",
@@ -120,4 +123,11 @@ export class SystemClock implements Clock {
       },
     };
   }
+}
+
+/**
+ * Create a new system clock instance
+ */
+export function createSystemClock(options?: { emit?: EmitFn }): Clock {
+  return new SystemClock(options);
 }

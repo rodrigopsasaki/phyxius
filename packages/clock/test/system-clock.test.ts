@@ -1,13 +1,14 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { SystemClock } from "../src/system-clock.js";
+import { createSystemClock } from "../src/system-clock.js";
+import type { Clock, Millis, DeadlineTarget } from "../src/types.js";
 
 describe("SystemClock", () => {
-  let clock: SystemClock;
+  let clock: Clock;
   let events: unknown[] = [];
 
   beforeEach(() => {
     events = [];
-    clock = new SystemClock({
+    clock = createSystemClock({
       emit: (event) => events.push(event),
     });
   });
@@ -39,7 +40,7 @@ describe("SystemClock", () => {
   describe("sleep()", () => {
     it("should sleep for the specified duration", async () => {
       const start = Date.now();
-      await clock.sleep(50);
+      await clock.sleep(50 as Millis);
       const elapsed = Date.now() - start;
 
       expect(elapsed).toBeGreaterThanOrEqual(45); // Allow some tolerance
@@ -47,7 +48,7 @@ describe("SystemClock", () => {
     });
 
     it("should emit sleep events", async () => {
-      await clock.sleep(10);
+      await clock.sleep(10 as Millis);
 
       expect(events).toHaveLength(2);
       expect(events[0]).toMatchObject({
@@ -62,8 +63,8 @@ describe("SystemClock", () => {
 
     it("should return immediately for non-positive durations", async () => {
       const start = Date.now();
-      await clock.sleep(0);
-      await clock.sleep(-10);
+      await clock.sleep(0 as Millis);
+      await clock.sleep(-10 as Millis);
       const elapsed = Date.now() - start;
 
       expect(elapsed).toBeLessThan(10);
@@ -72,18 +73,9 @@ describe("SystemClock", () => {
   });
 
   describe("deadline()", () => {
-    it("should wait until relative deadline", async () => {
+    it("should wait until deadline", async () => {
       const start = Date.now();
-      await clock.deadline(50);
-      const elapsed = Date.now() - start;
-
-      expect(elapsed).toBeGreaterThanOrEqual(45);
-      expect(elapsed).toBeLessThan(100);
-    });
-
-    it("should wait until absolute deadline", async () => {
-      const target = Date.now() + 50;
-      const start = Date.now();
+      const target: DeadlineTarget = { wallMs: Date.now() + 50 };
       await clock.deadline(target);
       const elapsed = Date.now() - start;
 
@@ -92,7 +84,8 @@ describe("SystemClock", () => {
     });
 
     it("should emit deadline events", async () => {
-      await clock.deadline(10);
+      const target: DeadlineTarget = { wallMs: Date.now() + 10 };
+      await clock.deadline(target);
 
       const deadlineStart = events.find((e: any) => e.type === "time:deadline:start");
       const deadlineEnd = events.find((e: any) => e.type?.startsWith("time:deadline:"));
@@ -102,7 +95,7 @@ describe("SystemClock", () => {
     });
 
     it("should handle past deadlines", async () => {
-      const past = Date.now() - 1000;
+      const past: DeadlineTarget = { wallMs: Date.now() - 1000 };
       await clock.deadline(past);
 
       const errEvent = events.find((e: any) => e.type === "time:deadline:err");
@@ -113,22 +106,22 @@ describe("SystemClock", () => {
   describe("interval()", () => {
     it("should call callback at intervals", async () => {
       const callbacks: number[] = [];
-      const handle = clock.interval(20, () => {
+      const handle = clock.interval(20 as Millis, () => {
         callbacks.push(Date.now());
       });
 
       await new Promise((resolve) => setTimeout(resolve, 65));
-      handle.clear();
+      handle.cancel();
 
       expect(callbacks.length).toBeGreaterThanOrEqual(2);
       expect(callbacks.length).toBeLessThanOrEqual(4);
     });
 
     it("should emit interval events", async () => {
-      const handle = clock.interval(20, () => {});
+      const handle = clock.interval(20 as Millis, () => {});
 
       await new Promise((resolve) => setTimeout(resolve, 45));
-      handle.clear();
+      handle.cancel();
 
       const setEvent = events.find((e: any) => e.type === "time:interval:set");
       const tickEvents = events.filter((e: any) => e.type === "time:interval:tick");
@@ -141,7 +134,7 @@ describe("SystemClock", () => {
 
     it("should continue on callback errors", async () => {
       let callCount = 0;
-      const handle = clock.interval(20, () => {
+      const handle = clock.interval(20 as Millis, () => {
         callCount++;
         if (callCount === 2) {
           throw new Error("Test error");
@@ -149,7 +142,7 @@ describe("SystemClock", () => {
       });
 
       await new Promise((resolve) => setTimeout(resolve, 65));
-      handle.clear();
+      handle.cancel();
 
       expect(callCount).toBeGreaterThanOrEqual(3);
       const errorEvent = events.find((e: any) => e.type === "time:interval:error");
@@ -157,8 +150,19 @@ describe("SystemClock", () => {
     });
 
     it("should throw for non-positive intervals", () => {
-      expect(() => clock.interval(0, () => {})).toThrow();
-      expect(() => clock.interval(-10, () => {})).toThrow();
+      expect(() => clock.interval(0 as Millis, () => {})).toThrow();
+      expect(() => clock.interval(-10 as Millis, () => {})).toThrow();
+    });
+  });
+
+  describe("timeout()", () => {
+    it("should timeout for the specified duration", async () => {
+      const start = Date.now();
+      await clock.timeout(50 as Millis);
+      const elapsed = Date.now() - start;
+
+      expect(elapsed).toBeGreaterThanOrEqual(45);
+      expect(elapsed).toBeLessThan(100);
     });
   });
 });

@@ -1,3 +1,4 @@
-export type { Clock, Instant, TimerHandle, EmitFn } from "./types.js";
-export { SystemClock } from "./system-clock.js";
-export { ControlledClock } from "./controlled-clock.js";
+export type { Clock, Instant, DeadlineTarget, TimerHandle, EmitFn } from "./types.js";
+export type { Millis } from "./types.js";
+export { createSystemClock } from "./system-clock.js";
+export { createControlledClock } from "./controlled-clock.js";

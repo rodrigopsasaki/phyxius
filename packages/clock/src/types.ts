@@ -1,19 +1,32 @@
 /**
+ * Branded type for milliseconds to prevent mixing different time units
+ */
+export type Millis = number & { readonly __brand: "millis" };
+
+/**
  * Represents a point in time with both wall clock and monotonic time
  */
 export interface Instant {
-  /** Wall clock time in milliseconds since epoch */
+  /** Wall clock time in milliseconds since epoch (can jump due to system changes) */
   readonly wallMs: number;
-  /** Monotonic time in milliseconds for measuring intervals */
+  /** Monotonic time in milliseconds for measuring intervals (never goes backwards) */
   readonly monoMs: number;
 }
 
 /**
- * Timer handle that can be cleared
+ * Target for deadline operations
+ */
+export interface DeadlineTarget {
+  /** When the deadline should fire (wall clock time) */
+  readonly wallMs: number;
+}
+
+/**
+ * Timer handle that can be cancelled
  */
 export interface TimerHandle {
-  readonly id: number | NodeJS.Timeout;
-  clear(): void;
+  /** Cancel the timer */
+  cancel(): void;
 }
 
 /**
@@ -21,28 +34,33 @@ export interface TimerHandle {
  */
 export interface Clock {
   /**
-   * Get the current time
+   * Get the current time as an Instant
    */
   now(): Instant;
 
   /**
    * Sleep for a given duration in milliseconds
    */
-  sleep(ms: number): Promise<void>;
+  sleep(ms: Millis): Promise<void>;
 
   /**
-   * Set a deadline that resolves at a specific time
-   * @param at - Either milliseconds from now or an absolute wall time
+   * Set a timeout that resolves after ms milliseconds
    */
-  deadline(at: number): Promise<void>;
+  timeout(ms: Millis): Promise<void>;
+
+  /**
+   * Set a deadline that resolves at a specific wall time
+   */
+  deadline(target: DeadlineTarget): Promise<void>;
 
   /**
    * Create an interval that fires a callback every ms milliseconds
+   * Returns a handle that can be used to cancel the interval
    */
-  interval(ms: number, callback: () => void | Promise<void>): TimerHandle;
+  interval(ms: Millis, callback: () => void | Promise<void>): TimerHandle;
 }
 
 /**
- * Vision event emitter function type
+ * Event emitter function type
  */
 export type EmitFn = (event: unknown) => void;
