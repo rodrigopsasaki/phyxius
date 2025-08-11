@@ -87,6 +87,32 @@ Speed up or slow down time to test long-running processes quickly.
 
 Makes time dependencies explicit in your code architecture.
 
+## Non-Goals
+
+Clock is **only** about controlling the progression of time. It deliberately does not handle:
+
+- **No timezones or DST handling** - Use date-fns, Luxon, or Temporal for timezone-aware operations
+- **No date parsing or formatting** - Clock works with millisecond timestamps, nothing more
+- **No implicit conversion** between monotonic and wall time - You explicitly choose which time to use
+- **No hidden globals** - Time flows from the `Clock` instance you pass around, making dependencies explicit
+
+Clock abstracts "what time is it now?" so you can control it. That's all.
+
+## How Clock Differs from Other Solutions
+
+**vs. `jest.useFakeTimers()`:**
+
+- Jest replaces global timers system-wide, Clock uses dependency injection
+- Jest can cause interference between tests, Clock instances are isolated
+- Jest requires manual `.tick()` calls, Clock can advance time automatically
+- Clock separates wall time from monotonic time for more realistic testing
+
+**vs. Manual mocks:**
+
+- Clock provides a complete time abstraction, not just `Date.now()` replacement
+- Clock includes timer management (`sleep`, `interval`, `deadline`)
+- Clock maintains consistent relationships between wall time and monotonic time
+
 ## Usage Examples
 
 ### Basic Usage
@@ -321,32 +347,66 @@ expect(stats).toEqual({
 
 ## API Reference
 
+> **Note:** For complete type definitions, see [`src/types.ts`](./src/types.ts)
+
+### Core Types
+
+```typescript
+type Millis = number & { readonly __brand: "millis" };
+
+interface Instant {
+  readonly wallMs: number; // Wall clock time (can jump due to system changes)
+  readonly monoMs: number; // Monotonic time (never goes backwards)
+}
+
+interface DeadlineTarget {
+  readonly wallMs: number; // When the deadline should fire
+}
+
+interface TimerHandle {
+  cancel(): void;
+}
+```
+
 ### Clock Interface
 
 ```typescript
 interface Clock {
-  now(): number;
+  now(): Instant;
+  sleep(ms: Millis): Promise<void>;
+  timeout(ms: Millis): Promise<void>;
+  deadline(target: DeadlineTarget): Promise<void>;
+  interval(ms: Millis, callback: () => void | Promise<void>): TimerHandle;
 }
 ```
 
 ### SystemClock
 
-Uses real system time via `Date.now()`.
+Uses real system time via `Date.now()` and `performance.now()`.
 
 ```typescript
 const clock = createSystemClock();
-clock.now(); // Current timestamp
+const instant = clock.now(); // { wallMs: 1704063600000, monoMs: 42.1 }
 ```
 
 ### ControlledClock
 
-Controllable time for testing and simulation.
+Extends `Clock` with time manipulation methods for testing.
 
 ```typescript
-const clock = createControlledClock(initialTime);
-clock.now(); // Current controlled time
-clock.advance(milliseconds); // Move time forward
-clock.set(timestamp); // Set absolute time
+class ControlledClock implements Clock {
+  // ... Clock methods ...
+
+  // Additional methods for time control:
+  advanceBy(ms: Millis): Promise<void>; // Advance by duration
+  advanceTo(targetMono: number): Promise<void>; // Advance to specific monotonic time
+  jumpWallTime(newWallMs: number): void; // Jump wall time (keep monotonic continuous)
+  tick(): Promise<void>; // Advance to next pending timer
+  getPendingTimerCount(): number; // Number of pending timers
+}
+
+const clock = createControlledClock({ initialTime: 1000 });
+await clock.advanceBy(500 as Millis); // Time manipulation
 ```
 
 ## Testing Patterns
@@ -355,17 +415,17 @@ clock.set(timestamp); // Set absolute time
 
 ```typescript
 describe("SessionTimeout", () => {
-  it("should expire sessions after timeout", () => {
-    const clock = createControlledClock(0);
+  it("should expire sessions after timeout", async () => {
+    const clock = createControlledClock({ initialTime: 0 });
     const session = new SessionManager(clock, 1000); // 1s timeout
 
     const id = session.create("user");
     expect(session.isValid(id)).toBe(true);
 
-    clock.advance(999);
+    await clock.advanceBy(999 as Millis);
     expect(session.isValid(id)).toBe(true);
 
-    clock.advance(2);
+    await clock.advanceBy(2 as Millis);
     expect(session.isValid(id)).toBe(false);
   });
 });
@@ -375,21 +435,22 @@ describe("SessionTimeout", () => {
 
 ```typescript
 describe("ConcurrentOperations", () => {
-  it("should handle operations in precise order", () => {
-    const clock = createControlledClock(1000);
+  it("should handle operations in precise order", async () => {
+    const clock = createControlledClock({ initialTime: 1000 });
     const events: string[] = [];
 
-    setTimeout(() => events.push("A"), 100);
-    setTimeout(() => events.push("B"), 200);
-    setTimeout(() => events.push("C"), 150);
+    // Use Clock's methods instead of global timers
+    clock.sleep(100 as Millis).then(() => events.push("A"));
+    clock.sleep(200 as Millis).then(() => events.push("B"));
+    clock.sleep(150 as Millis).then(() => events.push("C"));
 
-    clock.advance(100);
+    await clock.advanceBy(100 as Millis);
     expect(events).toEqual(["A"]);
 
-    clock.advance(50);
+    await clock.advanceBy(50 as Millis);
     expect(events).toEqual(["A", "C"]);
 
-    clock.advance(50);
+    await clock.advanceBy(50 as Millis);
     expect(events).toEqual(["A", "C", "B"]);
   });
 });
