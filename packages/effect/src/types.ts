@@ -50,7 +50,7 @@ export interface Effect<E, A> {
   withContext<U>(key: string, value: U): Effect<E, A>;
   fork(): Effect<never, Fiber<E, A>>;
   onInterrupt(cleanup: () => Effect<never, void>): Effect<E, A>;
-  retry(policy: RetryPolicy): Effect<E, A>;
+  retry(policy: RetryPolicy): Effect<E | { _tag: "Interrupted" }, A>;
 }
 
 // Legacy Scope interface for backward compatibility with existing code

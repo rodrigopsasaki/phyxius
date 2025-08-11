@@ -7,6 +7,7 @@ export class FiberImpl<E, A> implements Fiber<E, A> {
   private promise: Promise<Result<E, A>>;
   private result: Result<E, A> | undefined;
   private readonly cancelFn: () => void;
+  private interruptPromise: Promise<void> | undefined;
 
   constructor(promise: Promise<Result<E, A>>, cancelFn: () => void) {
     this.id = randomUUID();
@@ -32,9 +33,28 @@ export class FiberImpl<E, A> implements Fiber<E, A> {
 
   interrupt(): Effect<never, void> {
     return effect(async () => {
-      this.cancelFn();
+      if (!this.interruptPromise) {
+        this.interruptPromise = this._performInterrupt();
+      }
+      await this.interruptPromise;
       return { _tag: "Ok", value: undefined };
     });
+  }
+
+  private async _performInterrupt(): Promise<void> {
+    this.cancelFn();
+    // Wait for the fiber's promise to complete (including finalizers)
+    // Use a reasonable timeout to avoid hanging indefinitely
+    try {
+      await Promise.race([
+        this.promise.catch(() => {
+          // Ignore the result, we just want to wait for completion
+        }),
+        new Promise((resolve) => setTimeout(resolve, 100)), // 100ms timeout
+      ]);
+    } catch {
+      // Ignore any errors during interrupt
+    }
   }
 
   poll(): Effect<never, Result<E, A> | undefined> {

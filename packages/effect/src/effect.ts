@@ -27,7 +27,7 @@ export class EffectImpl<E, A> implements Effect<E, A> {
     this.emit?.({
       type: "effect:start",
       effectId: this.id,
-      timestamp: env.clock?.now().wallMs ?? Date.now(),  
+      timestamp: env.clock?.now().wallMs ?? Date.now(),
     });
 
     let result: Result<E, A>;
@@ -42,7 +42,7 @@ export class EffectImpl<E, A> implements Effect<E, A> {
       this.emit?.({
         type: "effect:success",
         effectId: this.id,
-        timestamp: env.clock?.now().wallMs ?? Date.now(),  
+        timestamp: env.clock?.now().wallMs ?? Date.now(),
       });
     } catch (error) {
       result = { _tag: "Err", error: error as E };
@@ -51,7 +51,7 @@ export class EffectImpl<E, A> implements Effect<E, A> {
         type: "effect:error",
         effectId: this.id,
         error,
-        timestamp: env.clock?.now().wallMs ?? Date.now(),  
+        timestamp: env.clock?.now().wallMs ?? Date.now(),
       });
     }
 
@@ -111,7 +111,7 @@ export class EffectImpl<E, A> implements Effect<E, A> {
         type: "effect:timeout:start",
         effectId: this.id,
         timeoutMs: ms,
-        timestamp: env.clock?.now().wallMs ?? Date.now(),  
+        timestamp: env.clock?.now().wallMs ?? Date.now(),
       });
 
       let timeoutHandle: any;
@@ -125,7 +125,7 @@ export class EffectImpl<E, A> implements Effect<E, A> {
             type: "effect:timeout:triggered",
             effectId: this.id,
             timeoutMs: ms,
-            timestamp: env.clock?.now().wallMs ?? Date.now(),  
+            timestamp: env.clock?.now().wallMs ?? Date.now(),
           });
           return { _tag: "Err", error: { _tag: "Timeout" } } as Result<E | { _tag: "Timeout" }, A>;
         });
@@ -133,13 +133,12 @@ export class EffectImpl<E, A> implements Effect<E, A> {
         // Use real setTimeout
         timeoutPromise = new Promise<Result<E | { _tag: "Timeout" }, A>>((resolve) => {
           timeoutHandle = setTimeout(() => {
-             
             childCancel.cancel({ _tag: "Timeout" });
             this.emit?.({
               type: "effect:timeout:triggered",
               effectId: this.id,
               timeoutMs: ms,
-              timestamp: env.clock?.now().wallMs ?? Date.now(),  
+              timestamp: env.clock?.now().wallMs ?? Date.now(),
             });
             resolve({ _tag: "Err", error: { _tag: "Timeout" } });
           }, ms);
@@ -154,7 +153,7 @@ export class EffectImpl<E, A> implements Effect<E, A> {
 
       // Cleanup timeout if it's still running
       if (timeoutHandle) {
-        clearTimeout(timeoutHandle);  
+        clearTimeout(timeoutHandle);
       }
 
       // Cancel child to clean up any remaining operations
@@ -211,15 +210,15 @@ export class EffectImpl<E, A> implements Effect<E, A> {
     }, this.emit);
   }
 
-  retry(policy: RetryPolicy): Effect<E, A> {
-    return new EffectImpl<E, A>(async (env) => {
+  retry(policy: RetryPolicy): Effect<E | { _tag: "Interrupted" }, A> {
+    return new EffectImpl<E | { _tag: "Interrupted" }, A>(async (env) => {
       let lastError: E;
       let attempt = 0;
 
       while (attempt < policy.maxAttempts) {
         // Check if we're cancelled before each attempt
         if (env.cancel.isCanceled()) {
-          return { _tag: "Err", error: lastError! };
+          return { _tag: "Err", error: { _tag: "Interrupted" } };
         }
 
         this.emit?.({
@@ -227,7 +226,7 @@ export class EffectImpl<E, A> implements Effect<E, A> {
           effectId: this.id,
           attempt: attempt + 1,
           maxAttempts: policy.maxAttempts,
-          timestamp: env.clock?.now().wallMs ?? Date.now(),  
+          timestamp: env.clock?.now().wallMs ?? Date.now(),
         });
 
         const result = await this.fn(env);
@@ -237,7 +236,7 @@ export class EffectImpl<E, A> implements Effect<E, A> {
             type: "effect:retry:success",
             effectId: this.id,
             attempt: attempt + 1,
-            timestamp: env.clock?.now().wallMs ?? Date.now(),  
+            timestamp: env.clock?.now().wallMs ?? Date.now(),
           });
           return result;
         }
@@ -260,15 +259,15 @@ export class EffectImpl<E, A> implements Effect<E, A> {
             effectId: this.id,
             attempt,
             delayMs: delay,
-            timestamp: env.clock?.now().wallMs ?? Date.now(),  
+            timestamp: env.clock?.now().wallMs ?? Date.now(),
           });
 
           // Sleep with the calculated delay
           await sleep(delay).unsafeRunPromise({ clock: env.clock });
 
-          // If sleep was interrupted, return the last error
+          // If sleep was interrupted, return interrupted
           if (env.cancel.isCanceled()) {
-            return { _tag: "Err", error: lastError };
+            return { _tag: "Err", error: { _tag: "Interrupted" } };
           }
         }
       }
@@ -277,7 +276,7 @@ export class EffectImpl<E, A> implements Effect<E, A> {
         type: "effect:retry:exhausted",
         effectId: this.id,
         attempts: policy.maxAttempts,
-        timestamp: env.clock?.now().wallMs ?? Date.now(),  
+        timestamp: env.clock?.now().wallMs ?? Date.now(),
       });
 
       return { _tag: "Err", error: lastError! };
@@ -325,7 +324,22 @@ export class EffectImpl<E, A> implements Effect<E, A> {
     const result = await this.unsafeRunPromise({ clock });
 
     if (result._tag === "Err") {
-      throw result.error;
+      // For backward compatibility, throw a proper Error object
+      const {error} = result;
+      if (error && typeof error === "object" && "_tag" in error) {
+        if (error._tag === "Timeout") {
+          // Try to extract timeout info from the context if available
+          throw new Error("Effect timed out");
+        } else if (error._tag === "Interrupted") {
+          throw new Error("Effect was interrupted");
+        }
+      }
+      // If it's already an Error, throw it directly
+      if (error instanceof Error) {
+        throw error;
+      }
+      // Otherwise create a new Error with the error as message
+      throw new Error(String(error));
     }
 
     return result.value;
@@ -394,7 +408,6 @@ export function sleep(ms: number, options?: { emit?: EmitFn }): Effect<never, vo
       } else {
         // Fallback to real setTimeout
         const timeoutId = setTimeout(() => {
-           
           if (!completed) {
             completed = true;
             cleanupFns.forEach((cleanup) => cleanup());
@@ -402,7 +415,7 @@ export function sleep(ms: number, options?: { emit?: EmitFn }): Effect<never, vo
           }
         }, ms);
 
-        cleanupFns.push(() => clearTimeout(timeoutId));  
+        cleanupFns.push(() => clearTimeout(timeoutId));
       }
     });
   }, options);
@@ -432,7 +445,7 @@ export function all<T extends readonly Effect<any, any>[]>(
 export function acquireUseRelease<R, E, A, E2>(
   acquire: Effect<E, R>,
   use: (resource: R) => Effect<E2, A>,
-  release: (resource: R) => Effect<never, void>,
+  release: (resource: R, cause: "ok" | "error" | "interrupted") => Effect<never, void>,
   options?: { emit?: EmitFn },
 ): Effect<E | E2, A> {
   return effect(async (env) => {
@@ -444,10 +457,10 @@ export function acquireUseRelease<R, E, A, E2>(
 
     const resource = acquireResult.value;
 
-    // Register the release to run when the scope closes
-    env.scope.push(async () => {
+    // Register the release to run when the scope closes - with cause propagation
+    env.scope.push(async (cause) => {
       try {
-        await release(resource).unsafeRunPromise({ clock: env.clock });
+        await release(resource, cause).unsafeRunPromise({ clock: env.clock });
       } catch {
         // Ignore release errors - they shouldn't fail the effect
       }

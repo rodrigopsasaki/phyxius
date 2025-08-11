@@ -63,7 +63,7 @@ const resilientEffect = unreliableOperation.retry(retryPolicy);
 const resourceEffect = acquireUseRelease(
   openFile("data.txt"),
   (file) => processFile(file),
-  (file) => closeFile(file),
+  (file, cause) => closeFile(file, cause),
 );
 ```
 

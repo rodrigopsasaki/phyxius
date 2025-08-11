@@ -118,9 +118,9 @@ describe("Resource Management", () => {
             return { _tag: "Ok", value: "result" };
           }),
         // Release
-        (res) =>
+        (res, cause) =>
           effect(async () => {
-            events.push(`release-${res}`);
+            events.push(`release-${res}-${cause}`);
             return { _tag: "Ok", value: undefined };
           }),
       );
@@ -128,7 +128,7 @@ describe("Resource Management", () => {
       const result = await resource.unsafeRunPromise({ clock });
 
       expect(result).toEqual({ _tag: "Ok", value: "result" });
-      expect(events).toEqual(["acquire", "use-resource", "release-resource"]);
+      expect(events).toEqual(["acquire", "use-resource", "release-resource-ok"]);
     });
 
     it("should release resource even when use fails", async () => {
@@ -148,9 +148,9 @@ describe("Resource Management", () => {
             return { _tag: "Err", error: "use-failed" };
           }),
         // Release
-        (res) =>
+        (res, cause) =>
           effect(async () => {
-            events.push(`release-${res}`);
+            events.push(`release-${res}-${cause}`);
             return { _tag: "Ok", value: undefined };
           }),
       );
@@ -158,7 +158,7 @@ describe("Resource Management", () => {
       const result = await resource.unsafeRunPromise({ clock });
 
       expect(result).toEqual({ _tag: "Err", error: "use-failed" });
-      expect(events).toEqual(["acquire", "use-resource", "release-resource"]);
+      expect(events).toEqual(["acquire", "use-resource", "release-resource-error"]);
     });
 
     it("should not call use or release if acquire fails", async () => {
@@ -178,9 +178,9 @@ describe("Resource Management", () => {
             return { _tag: "Ok", value: "result" };
           }),
         // Release
-        (res) =>
+        (res, cause) =>
           effect(async () => {
-            events.push(`release-${res}`);
+            events.push(`release-${res}-${cause}`);
             return { _tag: "Ok", value: undefined };
           }),
       );
@@ -211,9 +211,9 @@ describe("Resource Management", () => {
             return { _tag: "Ok", value: "result" };
           }),
         // Release
-        (res) =>
+        (res, cause) =>
           effect(async () => {
-            events.push(`release-${res}`);
+            events.push(`release-${res}-${cause}`);
             return { _tag: "Ok", value: undefined };
           }),
       ).timeout(ms(500));
@@ -232,7 +232,7 @@ describe("Resource Management", () => {
       expect(events).toEqual([
         "acquire",
         "use-resource-start",
-        "release-resource", // Should be called even though interrupted
+        "release-resource-interrupted", // Should be called even though interrupted
       ]);
     });
 
@@ -261,16 +261,16 @@ describe("Resource Management", () => {
                 return { _tag: "Ok", value: "nested-result" };
               }),
             // Release inner
-            (inner) =>
+            (inner, cause) =>
               effect(async () => {
-                events.push(`release-${inner}`);
+                events.push(`release-${inner}-${cause}`);
                 return { _tag: "Ok", value: undefined };
               }),
           ),
         // Release outer
-        (outer) =>
+        (outer, cause) =>
           effect(async () => {
-            events.push(`release-${outer}`);
+            events.push(`release-${outer}-${cause}`);
             return { _tag: "Ok", value: undefined };
           }),
       );
@@ -282,8 +282,8 @@ describe("Resource Management", () => {
         "acquire-outer",
         "acquire-inner",
         "use-outer-inner",
-        "release-inner", // Inner resource released first (LIFO)
-        "release-outer", // Outer resource released last
+        "release-inner-ok", // Inner resource released first (LIFO)
+        "release-outer-ok", // Outer resource released last
       ]);
     });
   });
