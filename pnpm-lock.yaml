@@ -46,6 +46,10 @@ importers:
         version: 2.1.9(@types/node@22.17.1)
 
   packages/atom:
+    dependencies:
+      '@phyxius/clock':
+        specifier: workspace:*
+        version: link:../clock
     devDependencies:
       '@size-limit/preset-small-lib':
         specifier: ^11.1.7

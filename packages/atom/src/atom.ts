@@ -1,199 +1,147 @@
-import type { Atom, AtomSnapshot, EmitFn } from "./types.js";
+import type { Clock } from "@phyxius/clock";
+import type { Atom, AtomSnapshot, AtomOptions, Change } from "./types.js";
 
 export class AtomImpl<T> implements Atom<T> {
   private value: T;
-  private readonly initialValue: T;
-  private version = 0;
-  private readonly emit: EmitFn | undefined;
-  private readonly history: AtomSnapshot<T>[] = [];
-  private readonly subscribers: Set<(snapshot: AtomSnapshot<T>) => void> = new Set();
-  private readonly maxHistory: number;
+  private _version: number;
+  private readonly clock: Clock;
+  private readonly equals: (a: T, b: T) => boolean;
+  private readonly historyBuffer: AtomSnapshot<T>[] = [];
+  private readonly historySize: number;
+  private readonly subscribers: Set<(change: Change<T>) => void> = new Set();
+  private inNotification = false;
 
-  constructor(initialValue: T, options?: { emit?: EmitFn; maxHistory?: number }) {
-    this.initialValue = initialValue;
+  constructor(initialValue: T, clock: Clock, options: AtomOptions<T> = {}) {
     this.value = initialValue;
-    this.emit = options?.emit;
-    this.maxHistory = options?.maxHistory ?? 100;
+    this._version = options.baseVersion ?? 0;
+    this.clock = clock;
+    this.equals = options.equals ?? Object.is;
+    this.historySize = Math.max(1, options.historySize ?? 1);
 
-    const initialSnapshot = this.createSnapshot();
-    this.history.push(initialSnapshot);
-
-    this.emit?.({
-      type: "atom:create",
-      version: this.version,
-      value: this.value,
-      timestamp: initialSnapshot.timestamp,
-    });
+    // Store initial snapshot
+    const initialSnapshot: AtomSnapshot<T> = {
+      value: initialValue,
+      version: this._version,
+      at: clock.now(),
+    };
+    this.historyBuffer.push(initialSnapshot);
   }
 
-  get(): T {
-    this.emit?.({
-      type: "atom:get",
-      version: this.version,
-      value: this.value,
-      timestamp: Date.now(),
-    });
-
+  deref(): T {
     return this.value;
   }
 
-  set(value: T): void {
-    const oldValue = this.value;
-    const oldVersion = this.version;
-
-    if (Object.is(oldValue, value)) {
-      this.emit?.({
-        type: "atom:set:noop",
-        version: this.version,
-        value,
-        timestamp: Date.now(),
-      });
-      return;
-    }
-
-    this.value = value;
-    this.version++;
-
-    const snapshot = this.createSnapshot();
-    this.addToHistory(snapshot);
-
-    this.emit?.({
-      type: "atom:set",
-      version: this.version,
-      oldVersion,
-      value,
-      oldValue,
-      timestamp: snapshot.timestamp,
-    });
-
-    this.notifySubscribers(snapshot);
+  version(): number {
+    return this._version;
   }
 
-  update(fn: (current: T) => T): T {
+  swap(updater: (current: T) => T, opts?: { cause?: unknown }): T {
+    if (this.inNotification) {
+      throw new Error("Cannot update atom during notification (reentrant update)");
+    }
+
     const oldValue = this.value;
-    const newValue = fn(oldValue);
-    this.set(newValue);
+    const oldVersion = this._version;
+    const newValue = updater(oldValue);
+
+    // No-op if values are equal
+    if (this.equals(oldValue, newValue)) {
+      return oldValue;
+    }
+
+    // Update state
+    this.value = newValue;
+    this._version++;
+
+    const snapshot: AtomSnapshot<T> = {
+      value: newValue,
+      version: this._version,
+      at: this.clock.now(),
+    };
+
+    // Add to history ring buffer
+    this.historyBuffer.push(snapshot);
+    if (this.historyBuffer.length > this.historySize) {
+      this.historyBuffer.shift();
+    }
+
+    // Notify subscribers
+    this.notifyChange({
+      from: oldValue,
+      to: newValue,
+      versionFrom: oldVersion,
+      versionTo: this._version,
+      at: snapshot.at,
+      cause: opts?.cause,
+    });
+
     return newValue;
   }
 
-  swap(fn: (current: T) => T): T {
-    return this.update(fn);
+  reset(next: T, opts?: { cause?: unknown }): T {
+    return this.swap(() => next, opts);
   }
 
-  compareAndSet(expected: T, value: T): boolean {
-    const current = this.value;
-    const matches = Object.is(current, expected);
-
-    if (matches) {
-      this.set(value);
-      this.emit?.({
-        type: "atom:cas:success",
-        version: this.version,
-        expected,
-        value,
-        timestamp: Date.now(),
-      });
-      return true;
-    } else {
-      this.emit?.({
-        type: "atom:cas:failure",
-        version: this.version,
-        expected,
-        actual: current,
-        value,
-        timestamp: Date.now(),
-      });
+  compareAndSet(expected: T, next: T, opts?: { cause?: unknown }): boolean {
+    if (!this.equals(this.value, expected)) {
       return false;
     }
+
+    this.swap(() => next, opts);
+    return true;
   }
 
-  getSnapshot(): AtomSnapshot<T> {
-    return this.createSnapshot();
-  }
-
-  getHistory(): AtomSnapshot<T>[] {
-    return [...this.history];
-  }
-
-  reset(): void {
-    const oldValue = this.value;
-    const oldVersion = this.version;
-
-    this.value = this.initialValue;
-    this.version++;
-
-    const snapshot = this.createSnapshot();
-    this.addToHistory(snapshot);
-
-    this.emit?.({
-      type: "atom:reset",
-      version: this.version,
-      oldVersion,
-      value: this.value,
-      oldValue,
-      timestamp: snapshot.timestamp,
-    });
-
-    this.notifySubscribers(snapshot);
-  }
-
-  subscribe(callback: (snapshot: AtomSnapshot<T>) => void): () => void {
-    this.subscribers.add(callback);
-
-    this.emit?.({
-      type: "atom:subscribe",
-      subscriberCount: this.subscribers.size,
-      timestamp: Date.now(),
-    });
-
-    try {
-      callback(this.getSnapshot());
-    } catch (error) {
-      this.emit?.({
-        type: "atom:subscriber:error",
-        error,
-        version: this.version,
-        timestamp: Date.now(),
-      });
-    }
-
-    return () => {
-      this.subscribers.delete(callback);
-      this.emit?.({
-        type: "atom:unsubscribe",
-        subscriberCount: this.subscribers.size,
-        timestamp: Date.now(),
-      });
-    };
-  }
-
-  private createSnapshot(): AtomSnapshot<T> {
+  snapshot(): AtomSnapshot<T> {
     return {
       value: this.value,
-      version: this.version,
-      timestamp: Date.now(),
+      version: this._version,
+      at: this.clock.now(),
     };
   }
 
-  private addToHistory(snapshot: AtomSnapshot<T>): void {
-    this.history.push(snapshot);
-    if (this.history.length > this.maxHistory) {
-      this.history.shift();
+  watch(fn: (change: Change<T>) => void): () => void {
+    this.subscribers.add(fn);
+
+    return () => {
+      this.subscribers.delete(fn);
+    };
+  }
+
+  history(): readonly AtomSnapshot<T>[] {
+    return [...this.historyBuffer];
+  }
+
+  clearHistory(): void {
+    // Keep only the current snapshot
+    const current = this.historyBuffer[this.historyBuffer.length - 1];
+    this.historyBuffer.length = 0;
+    if (current) {
+      this.historyBuffer.push(current);
     }
   }
 
-  private notifySubscribers(snapshot: AtomSnapshot<T>): void {
-    for (const callback of this.subscribers) {
-      try {
-        callback(snapshot);
-      } catch (error) {
-        this.emit?.({
-          type: "atom:subscriber:error",
-          error,
-          version: this.version,
-          timestamp: Date.now(),
-        });
+  private notifyChange(change: Change<T>): void {
+    if (this.subscribers.size === 0) {
+      return;
+    }
+
+    this.inNotification = true;
+    try {
+      for (const subscriber of this.subscribers) {
+        try {
+          subscriber(change);
+        } catch (error) {
+          // Swallow subscriber errors to prevent cascade failures
+          // In a real implementation, you might want to log this
+          console.error("Atom subscriber error:", error);
+        }
       }
+    } finally {
+      this.inNotification = false;
     }
   }
+}
+
+export function createAtom<T>(initial: T, clock: Clock, opts?: AtomOptions<T>): Atom<T> {
+  return new AtomImpl(initial, clock, opts);
 }

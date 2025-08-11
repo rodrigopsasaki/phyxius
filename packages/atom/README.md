@@ -4,13 +4,13 @@
 
 ## What is Atom?
 
-Atom provides thread-safe mutable references with built-in versioning and change tracking. Unlike simple variables or objects, Atoms maintain a complete history of changes and provide atomic update operations that prevent race conditions and data corruption.
+Atom provides safe mutable references with built-in versioning and change tracking. Unlike simple variables or objects, Atoms maintain a bounded history of changes and provide atomic update operations relative to the JavaScript event loop.
 
 Think of an Atom as a "smart container" for any value that needs to change over time while maintaining complete auditability and consistency.
 
 ## Why does Atom exist?
 
-State management in concurrent applications is fraught with race conditions, lost updates, and inconsistent reads. Traditional approaches either sacrifice performance (locks everywhere) or correctness (hope for the best).
+State management in applications is fraught with race conditions, lost updates, and inconsistent reads. Traditional approaches either sacrifice performance (locks everywhere) or correctness (hope for the best).
 
 **The Problem:**
 
@@ -38,45 +38,46 @@ async function processOrder(order: Order) {
 **The Solution:**
 
 ```typescript
-// Safe: atomic updates, complete history, observable changes
-const userCount = createAtom(0);
-const totalRevenue = createAtom(0);
+// Safe: atomic updates, bounded history, observable changes
+const clock = createSystemClock();
+const userCount = createAtom(0, clock);
+const totalRevenue = createAtom(0, clock);
 
 async function processOrder(order: Order) {
-  // Atomic updates prevent race conditions
-  userCount.update((count) => count + 1);
-  totalRevenue.update((revenue) => revenue + order.amount);
+  // Atomic updates prevent race conditions within the event loop
+  userCount.swap((count) => count + 1);
+  totalRevenue.swap((revenue) => revenue + order.amount);
 
   // Or coordinate multiple updates
   const updates = [
-    () => userCount.update((count) => count + 1),
-    () => totalRevenue.update((revenue) => revenue + order.amount),
+    () => userCount.swap((count) => count + 1),
+    () => totalRevenue.swap((revenue) => revenue + order.amount),
   ];
 
   updates.forEach((update) => update()); // Each update is atomic
 }
 
-// Complete auditability
-console.log(userCount.getHistory()); // Every change recorded
-console.log(userCount.getVersion()); // Current version number
+// Bounded history for recent changes
+console.log(userCount.history()); // Recent changes recorded
+console.log(userCount.version()); // Current version number
 
 // Observable changes
-userCount.subscribe((value) => console.log(`Users: ${value}`));
+userCount.watch((change) => console.log(`Users changed: ${change.from} → ${change.to}`));
 ```
 
 ## Why is Atom good?
 
 ### 1. **Race Condition Prevention**
 
-All updates are atomic and thread-safe. No more lost updates or data corruption.
+All updates are atomic relative to the JavaScript event loop. No more lost updates or data corruption within synchronous execution.
 
-### 2. **Complete Auditability**
+### 2. **Bounded History**
 
-Every change is recorded with timestamps and version numbers. Perfect for debugging and compliance.
+Recent changes are recorded with timestamps and version numbers. Perfect for debugging without memory leaks.
 
 ### 3. **Observable Changes**
 
-Subscribe to value changes for reactive programming patterns.
+Watch value changes with synchronous, ordered notifications for reactive programming patterns.
 
 ### 4. **STM Ready**
 
@@ -92,17 +93,19 @@ Update functions receive the current value and return the new value, making upda
 
 ```typescript
 import { createAtom } from "@phyxius/atom";
+import { createSystemClock } from "@phyxius/clock";
 
-// Simple counter
-const counter = createAtom(0);
+// Simple counter requires a clock for deterministic timestamps
+const clock = createSystemClock();
+const counter = createAtom(0, clock);
 
-console.log(counter.get()); // 0
+console.log(counter.deref()); // 0
 
-counter.set(5);
-console.log(counter.get()); // 5
+counter.reset(5);
+console.log(counter.deref()); // 5
 
-counter.update((n) => n + 1);
-console.log(counter.get()); // 6
+counter.swap((n) => n + 1);
+console.log(counter.deref()); // 6
 ```
 
 ### Configuration Management
@@ -115,28 +118,32 @@ interface AppConfig {
   features: Set<string>;
 }
 
-const config = createAtom<AppConfig>({
-  apiUrl: "https://api.example.com",
-  timeout: 5000,
-  retries: 3,
-  features: new Set(["auth", "logging"]),
-});
+const clock = createSystemClock();
+const config = createAtom<AppConfig>(
+  {
+    apiUrl: "https://api.example.com",
+    timeout: 5000,
+    retries: 3,
+    features: new Set(["auth", "logging"]),
+  },
+  clock,
+);
 
 // Safe updates that preserve type safety
-config.update((cfg) => ({
+config.swap((cfg) => ({
   ...cfg,
   timeout: 10000,
   features: new Set([...cfg.features, "analytics"]),
 }));
 
-// Subscribe to config changes
-config.subscribe((newConfig) => {
-  console.log("Config updated:", newConfig);
+// Watch config changes
+config.watch((change) => {
+  console.log("Config updated:", change.to);
   // Reinitialize services with new config
 });
 
-// Audit trail
-console.log("Config changes:", config.getHistory());
+// Recent history
+console.log("Config changes:", config.history());
 ```
 
 ### User Session Management
@@ -152,14 +159,19 @@ interface UserSession {
 class SessionManager {
   private sessions = new Map<string, Atom<UserSession>>();
 
+  constructor(private clock: Clock) {}
+
   createSession(userId: string, permissions: string[]): string {
     const sessionId = generateId();
-    const session = createAtom<UserSession>({
-      userId,
-      permissions: new Set(permissions),
-      lastActivity: Date.now(),
-      metadata: {},
-    });
+    const session = createAtom<UserSession>(
+      {
+        userId,
+        permissions: new Set(permissions),
+        lastActivity: this.clock.now().wallMs,
+        metadata: {},
+      },
+      this.clock,
+    );
 
     this.sessions.set(sessionId, session);
     return sessionId;
@@ -169,9 +181,9 @@ class SessionManager {
     const session = this.sessions.get(sessionId);
     if (!session) return false;
 
-    session.update((s) => ({
+    session.swap((s) => ({
       ...s,
-      lastActivity: Date.now(),
+      lastActivity: this.clock.now().wallMs,
     }));
 
     return true;
@@ -181,7 +193,7 @@ class SessionManager {
     const session = this.sessions.get(sessionId);
     if (!session) return false;
 
-    session.update((s) => ({
+    session.swap((s) => ({
       ...s,
       permissions: new Set([...s.permissions, permission]),
     }));
@@ -190,17 +202,18 @@ class SessionManager {
   }
 
   getSession(sessionId: string): UserSession | undefined {
-    return this.sessions.get(sessionId)?.get();
+    return this.sessions.get(sessionId)?.deref();
   }
 
-  // Get audit trail for a session
+  // Get recent changes for a session
   getSessionHistory(sessionId: string) {
-    return this.sessions.get(sessionId)?.getHistory() || [];
+    return this.sessions.get(sessionId)?.history() || [];
   }
 }
 
 // Usage
-const sessionManager = new SessionManager();
+const clock = createSystemClock();
+const sessionManager = new SessionManager(clock);
 const sessionId = sessionManager.createSession("user123", ["read"]);
 
 sessionManager.grantPermission(sessionId, "write");
@@ -228,35 +241,43 @@ interface Cart {
 }
 
 class ShoppingCart {
-  private cart = createAtom<Cart>({
-    items: [],
-    total: 0,
-    discountAmount: 0,
-  });
+  private cart: Atom<Cart>;
 
-  constructor() {
-    // Auto-calculate total when cart changes
-    this.cart.subscribe((cart) => {
+  constructor(private clock: Clock) {
+    this.cart = createAtom<Cart>(
+      {
+        items: [],
+        total: 0,
+        discountAmount: 0,
+      },
+      clock,
+    );
+  }
+
+  // Auto-calculate total when cart changes (after constructor)
+  private setupAutoCalculation() {
+    this.cart.watch((change) => {
+      const cart = change.to;
       const itemsTotal = cart.items.reduce((sum, item) => sum + item.quantity * item.price, 0);
       const total = itemsTotal - cart.discountAmount;
 
       // Only update if total changed to avoid infinite loops
       if (cart.total !== total) {
-        this.cart.update((c) => ({ ...c, total }));
+        this.cart.swap((c) => ({ ...c, total }));
       }
     });
   }
 
   addItem(productId: string, price: number, quantity: number = 1) {
-    this.cart.update((cart) => {
+    this.cart.swap((cart) => {
       const existingIndex = cart.items.findIndex((item) => item.productId === productId);
 
       if (existingIndex >= 0) {
         // Update existing item
         const newItems = [...cart.items];
         newItems[existingIndex] = {
-          ...newItems[existingIndex],
-          quantity: newItems[existingIndex].quantity + quantity,
+          ...newItems[existingIndex]!,
+          quantity: newItems[existingIndex]!.quantity + quantity,
         };
         return { ...cart, items: newItems };
       } else {
@@ -270,14 +291,14 @@ class ShoppingCart {
   }
 
   removeItem(productId: string) {
-    this.cart.update((cart) => ({
+    this.cart.swap((cart) => ({
       ...cart,
       items: cart.items.filter((item) => item.productId !== productId),
     }));
   }
 
   applyDiscount(code: string, amount: number) {
-    this.cart.update((cart) => ({
+    this.cart.swap((cart) => ({
       ...cart,
       discountCode: code,
       discountAmount: amount,
@@ -285,27 +306,28 @@ class ShoppingCart {
   }
 
   get() {
-    return this.cart.get();
+    return this.cart.deref();
   }
 
-  // Get complete cart history for analytics
+  // Get recent cart history for analytics
   getHistory() {
-    return this.cart.getHistory();
+    return this.cart.history();
   }
 
-  // Subscribe to cart changes for UI updates
-  subscribe(callback: (cart: Cart) => void) {
-    return this.cart.subscribe(callback);
+  // Watch cart changes for UI updates
+  watch(callback: (change: Change<Cart>) => void) {
+    return this.cart.watch(callback);
   }
 }
 
 // Usage
-const cart = new ShoppingCart();
+const clock = createSystemClock();
+const cart = new ShoppingCart(clock);
 
-// Subscribe to changes for UI updates
-cart.subscribe((cartState) => {
-  updateCartDisplay(cartState);
-  trackAnalytics("cart_changed", cartState);
+// Watch changes for UI updates
+cart.watch((change) => {
+  updateCartDisplay(change.to);
+  trackAnalytics("cart_changed", change.to);
 });
 
 cart.addItem("product-1", 29.99, 2);
@@ -327,57 +349,53 @@ interface AppState {
 }
 
 class UndoableState {
-  private state = createAtom<AppState>(initialState);
+  private state: Atom<AppState>;
   private maxHistorySize = 50;
 
+  constructor(private clock: Clock) {
+    this.state = createAtom<AppState>(initialState, clock);
+  }
+
   getCurrentState() {
-    return this.state.get();
+    return this.state.deref();
   }
 
   updateState(updater: (state: AppState) => AppState) {
-    this.state.update(updater);
-    this.pruneHistory();
+    this.state.swap(updater);
   }
 
   undo(): boolean {
-    const history = this.state.getHistory();
+    const history = this.state.history();
     if (history.length < 2) return false; // Need at least current + previous
 
-    const previousState = history[history.length - 2].value;
-    this.state.set(previousState);
+    const previousState = history[history.length - 2]!.value;
+    this.state.reset(previousState);
     return true;
   }
 
   canUndo(): boolean {
-    return this.state.getHistory().length > 1;
+    return this.state.history().length > 1;
   }
 
   getHistory() {
-    return this.state.getHistory();
+    return this.state.history();
   }
 
-  private pruneHistory() {
-    const history = this.state.getHistory();
-    if (history.length > this.maxHistorySize) {
-      // In a real implementation, you'd want more sophisticated pruning
-      // For now, this shows the concept
-    }
-  }
-
-  // Subscribe to state changes
-  subscribe(callback: (state: AppState) => void) {
-    return this.state.subscribe(callback);
+  // Watch state changes
+  watch(callback: (change: Change<AppState>) => void) {
+    return this.state.watch(callback);
   }
 }
 
 // Usage
-const appState = new UndoableState();
+const clock = createSystemClock();
+const appState = new UndoableState(clock);
 
-// Subscribe to state changes for UI updates
-appState.subscribe((state) => {
-  renderCanvas(state.canvas);
-  updateToolbar(state.currentTool);
-  updateLayerPanel(state.layers, state.selectedLayer);
+// Watch state changes for UI updates
+appState.watch((change) => {
+  renderCanvas(change.to.canvas);
+  updateToolbar(change.to.currentTool);
+  updateLayerPanel(change.to.layers, change.to.selectedLayer);
 });
 
 // Make changes
@@ -402,123 +420,44 @@ if (appState.canUndo()) {
 
 ```typescript
 // Create atoms for different stages of data processing
-const rawData = createAtom<number[]>([]);
-const filteredData = createAtom<number[]>([]);
-const processedData = createAtom<number[]>([]);
-const stats = createAtom({ count: 0, average: 0, max: 0 });
+const clock = createSystemClock();
+const rawData = createAtom<number[]>([], clock);
+const filteredData = createAtom<number[]>([], clock);
+const processedData = createAtom<number[]>([], clock);
+const stats = createAtom({ count: 0, average: 0, max: 0 }, clock);
 
 // Set up reactive pipeline
-rawData.subscribe((data) => {
+rawData.watch((change) => {
   // Filter out negative numbers
-  const filtered = data.filter((n) => n >= 0);
-  filteredData.set(filtered);
+  const filtered = change.to.filter((n) => n >= 0);
+  filteredData.reset(filtered);
 });
 
-filteredData.subscribe((data) => {
+filteredData.watch((change) => {
   // Apply processing (e.g., normalization)
-  const processed = data.map((n) => Math.round(n * 100) / 100);
-  processedData.set(processed);
+  const processed = change.to.map((n) => Math.round(n * 100) / 100);
+  processedData.reset(processed);
 });
 
-processedData.subscribe((data) => {
+processedData.watch((change) => {
   // Calculate statistics
+  const data = change.to;
   const count = data.length;
   const average = count > 0 ? data.reduce((a, b) => a + b) / count : 0;
   const max = count > 0 ? Math.max(...data) : 0;
 
-  stats.set({ count, average, max });
+  stats.reset({ count, average, max });
 });
 
-// Subscribe to final results
-stats.subscribe((s) => {
+// Watch final results
+stats.watch((change) => {
+  const s = change.to;
   console.log(`Processed ${s.count} items, avg: ${s.average}, max: ${s.max}`);
 });
 
 // Feed data into pipeline
-rawData.set([1.234, -5, 3.456, 8.9, -2, 10.1]);
+rawData.reset([1.234, -5, 3.456, 8.9, -2, 10.1]);
 // Triggers the entire pipeline automatically
-```
-
-### Multi-User Counter (Conflict Resolution)
-
-```typescript
-interface CounterState {
-  value: number;
-  lastUpdatedBy: string;
-  conflictResolution: "latest" | "sum";
-}
-
-class DistributedCounter {
-  private counter = createAtom<CounterState>({
-    value: 0,
-    lastUpdatedBy: "",
-    conflictResolution: "latest",
-  });
-
-  constructor(private userId: string) {}
-
-  increment(amount: number = 1) {
-    this.counter.update((state) => {
-      // Simple conflict resolution: always add
-      if (state.conflictResolution === "sum") {
-        return {
-          ...state,
-          value: state.value + amount,
-          lastUpdatedBy: this.userId,
-        };
-      } else {
-        // Latest writer wins
-        return {
-          ...state,
-          value: state.value + amount,
-          lastUpdatedBy: this.userId,
-        };
-      }
-    });
-  }
-
-  // Merge state from another instance (for distributed sync)
-  mergeState(otherState: CounterState) {
-    this.counter.update((currentState) => {
-      if (currentState.conflictResolution === "sum") {
-        // Add both values
-        return {
-          value: currentState.value + otherState.value,
-          lastUpdatedBy: `${currentState.lastUpdatedBy},${otherState.lastUpdatedBy}`,
-          conflictResolution: "sum",
-        };
-      } else {
-        // Use latest (could use vector clocks in real implementation)
-        return otherState;
-      }
-    });
-  }
-
-  get() {
-    return this.counter.get();
-  }
-
-  getHistory() {
-    return this.counter.getHistory();
-  }
-
-  subscribe(callback: (state: CounterState) => void) {
-    return this.counter.subscribe(callback);
-  }
-}
-
-// Usage in distributed system
-const counter1 = new DistributedCounter("user1");
-const counter2 = new DistributedCounter("user2");
-
-counter1.increment(5);
-counter2.increment(3);
-
-// Simulate syncing between instances
-counter1.mergeState(counter2.get());
-
-console.log("Final state:", counter1.get());
-console.log("Change history:", counter1.getHistory());
 ```
 
 ## API Reference
@@ -526,46 +465,71 @@ console.log("Change history:", counter1.getHistory());
 ### Creating Atoms
 
 ```typescript
-const atom = createAtom<T>(initialValue: T, options?: AtomOptions);
+import { createAtom } from "@phyxius/atom";
+import { createSystemClock } from "@phyxius/clock";
+
+const clock = createSystemClock();
+const atom = createAtom<T>(initialValue: T, clock, options?: AtomOptions<T>);
 ```
 
 ### Core Methods
 
 ```typescript
 // Get current value
-const value = atom.get();
+const value = atom.deref();
 
 // Set new value
-atom.set(newValue);
+atom.reset(newValue);
 
 // Update with function
-atom.update((currentValue) => newValue);
+atom.swap((currentValue) => newValue);
+
+// Compare and set
+const success = atom.compareAndSet(expectedValue, newValue);
 
 // Get current version
-const version = atom.getVersion();
+const version = atom.version();
 
-// Get complete history
-const history = atom.getHistory();
+// Get current snapshot
+const snapshot = atom.snapshot();
 
-// Subscribe to changes
-const unsubscribe = atom.subscribe((newValue) => {
-  console.log("Value changed:", newValue);
+// Get recent history (bounded)
+const history = atom.history();
+
+// Watch changes (synchronous, ordered)
+const unsubscribe = atom.watch((change) => {
+  console.log(`Value changed: ${change.from} → ${change.to}`);
 });
 
 // Unsubscribe
 unsubscribe();
+
+// Clear history buffer
+atom.clearHistory();
 ```
 
-### History Entries
+### Snapshots and Changes
 
-Each history entry contains:
+Each snapshot contains:
 
 ```typescript
-interface AtomHistoryEntry<T> {
-  version: number;
-  value: T;
-  timestamp: number;
-  previousValue?: T;
+interface AtomSnapshot<T> {
+  readonly value: T;
+  readonly version: number;
+  readonly at: Instant; // from injected Clock
+}
+```
+
+Each change contains:
+
+```typescript
+interface Change<T> {
+  readonly from: T;
+  readonly to: T;
+  readonly versionFrom: number;
+  readonly versionTo: number;
+  readonly at: Instant;
+  readonly cause?: unknown; // optional metadata
 }
 ```
 
@@ -576,17 +540,18 @@ interface AtomHistoryEntry<T> {
 ```typescript
 describe("UserProfile", () => {
   it("should track profile updates", () => {
-    const profile = createAtom({ name: "John", age: 30 });
+    const clock = createSystemClock();
+    const profile = createAtom({ name: "John", age: 30 }, clock);
 
-    profile.update((p) => ({ ...p, age: 31 }));
+    profile.swap((p) => ({ ...p, age: 31 }));
 
-    expect(profile.get().age).toBe(31);
-    expect(profile.getVersion()).toBe(2);
+    expect(profile.deref().age).toBe(31);
+    expect(profile.version()).toBe(1);
 
-    const history = profile.getHistory();
+    const history = profile.history();
     expect(history).toHaveLength(2);
-    expect(history[0].value.age).toBe(30);
-    expect(history[1].value.age).toBe(31);
+    expect(history[0]!.value.age).toBe(30);
+    expect(history[1]!.value.age).toBe(31);
   });
 });
 ```
@@ -596,16 +561,17 @@ describe("UserProfile", () => {
 ```typescript
 describe("Reactive Updates", () => {
   it("should notify subscribers", () => {
-    const atom = createAtom(0);
-    const values: number[] = [];
+    const clock = createSystemClock();
+    const atom = createAtom(0, clock);
+    const changes: Change<number>[] = [];
 
-    atom.subscribe((value) => values.push(value));
+    atom.watch((change) => changes.push(change));
 
-    atom.set(1);
-    atom.set(2);
-    atom.update((n) => n + 1);
+    atom.reset(1);
+    atom.reset(2);
+    atom.swap((n) => n + 1);
 
-    expect(values).toEqual([1, 2, 3]);
+    expect(changes.map((c) => c.to)).toEqual([1, 2, 3]);
   });
 });
 ```
@@ -615,19 +581,20 @@ describe("Reactive Updates", () => {
 ```typescript
 describe("Concurrent Access", () => {
   it("should handle concurrent updates safely", async () => {
-    const counter = createAtom(0);
+    const clock = createSystemClock();
+    const counter = createAtom(0, clock);
 
-    // Simulate concurrent updates
-    const promises = Array.from({ length: 100 }, () => Promise.resolve().then(() => counter.update((n) => n + 1)));
+    // Simulate concurrent updates in the same event loop
+    const promises = Array.from({ length: 100 }, () => Promise.resolve().then(() => counter.swap((n) => n + 1)));
 
     await Promise.all(promises);
 
-    expect(counter.get()).toBe(100);
-    expect(counter.getVersion()).toBe(101); // Initial + 100 updates
+    expect(counter.deref()).toBe(100);
+    expect(counter.version()).toBe(100); // 100 updates from initial version 0
   });
 });
 ```
 
 ---
 
-Atom provides the foundation for safe, observable state management. By combining atomic updates with complete auditability, it eliminates race conditions while providing the transparency needed for debugging and compliance. Its design makes it perfect for building larger abstractions like Software Transactional Memory systems.
+Atom provides the foundation for safe, observable state management within the JavaScript event loop. By combining atomic updates with bounded history tracking, it eliminates race conditions in synchronous execution while providing the transparency needed for debugging. Its design makes it perfect for building larger abstractions like Software Transactional Memory systems.
