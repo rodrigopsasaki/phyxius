@@ -83,34 +83,45 @@ export class EffectImpl<T> implements Effect<T> {
   timeout(ms: number): Effect<T> {
     return new EffectImpl<T>(async (context) => {
       const scope = createScope();
-      let timeoutId: NodeJS.Timeout;
+      const clock = context.get<{ sleep(ms: number): Promise<void> }>("clock");
 
       this.emit?.({
         type: "effect:timeout:start",
         effectId: this.id,
         timeoutMs: ms,
-        timestamp: Date.now(),
+        timestamp: clock?.now?.() ?? Date.now(),
       });
 
+      let timeoutHandle: NodeJS.Timeout | undefined;
       const timeoutPromise = new Promise<never>((_, reject) => {
-        timeoutId = setTimeout(() => {
+        (async () => {
+          if (clock && typeof clock.sleep === "function") {
+            // Use controlled clock
+            await clock.sleep(ms);
+          } else {
+            // Use real setTimeout
+            await new Promise<void>((resolve) => {
+              timeoutHandle = setTimeout(resolve, ms);
+            });
+          }
+
           scope.cancel();
           this.emit?.({
             type: "effect:timeout:triggered",
             effectId: this.id,
             timeoutMs: ms,
-            timestamp: Date.now(),
+            timestamp: clock?.now?.() ?? Date.now(),
           });
           reject(new Error(`Effect timed out after ${ms}ms`));
-        }, ms);
+        })();
       });
 
       const effectPromise = this.fn(context).finally(() => {
-        clearTimeout(timeoutId);
+        if (timeoutHandle) clearTimeout(timeoutHandle);
       });
 
       scope.onCancel(() => {
-        clearTimeout(timeoutId);
+        if (timeoutHandle) clearTimeout(timeoutHandle);
       });
 
       return Promise.race([effectPromise, timeoutPromise]);
@@ -160,5 +171,21 @@ export function race<T extends readonly Effect<any>[]>(
   return effect(async (context) => {
     const promises = effects.map((eff) => eff.run(context));
     return Promise.race(promises) as any;
+  }, options);
+}
+
+export function sleep(ms: number, options?: { emit?: EmitFn }): Effect<void> {
+  return effect(async (context) => {
+    const clock = context.get<{ sleep(ms: number): Promise<void> }>("clock");
+
+    if (clock && typeof clock.sleep === "function") {
+      // Use controlled clock for deterministic testing
+      await clock.sleep(ms);
+    } else {
+      // Fallback to real setTimeout
+      await new Promise<void>((resolve) => {
+        setTimeout(resolve, ms);
+      });
+    }
   }, options);
 }

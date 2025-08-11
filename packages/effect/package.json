@@ -26,6 +26,9 @@
     "lint": "eslint .",
     "size": "size-limit"
   },
+  "dependencies": {
+    "@phyxius/clock": "workspace:*"
+  },
   "devDependencies": {
     "@size-limit/preset-small-lib": "^11.1.7",
     "@vitest/coverage-v8": "^2.1.8",
