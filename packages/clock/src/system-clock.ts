@@ -80,6 +80,8 @@ class SystemClock implements Clock {
 
     const startTime = this.now();
     let tickCount = 0;
+    let inFlight = false;
+    let active = true;
 
     this.emit?.({
       type: "time:interval:set",
@@ -88,6 +90,9 @@ class SystemClock implements Clock {
     });
 
     const id = setInterval(async () => {
+      if (!active || inFlight) return;
+
+      inFlight = true;
       tickCount++;
       const tickTime = this.now();
 
@@ -108,11 +113,14 @@ class SystemClock implements Clock {
           error,
           at: this.now(),
         });
+      } finally {
+        inFlight = false;
       }
     }, ms);
 
     return {
       cancel: () => {
+        active = false;
         clearInterval(id);
         this.emit?.({
           type: "time:interval:cancel",

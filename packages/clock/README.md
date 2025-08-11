@@ -113,24 +113,86 @@ Clock abstracts "what time is it now?" so you can control it. That's all.
 - Clock includes timer management (`sleep`, `interval`, `deadline`)
 - Clock maintains consistent relationships between wall time and monotonic time
 
+## Which Time Do I Use?
+
+Clock provides two time values in every `Instant`. Here's when to use each:
+
+### Use `wallMs` for:
+
+- **TTLs and expiration**: Session expiry, cache expiration, token validity
+- **Business rules tied to human time**: "Orders placed after 5 PM ship tomorrow"
+- **Scheduling and calendar operations**: "Run this job at 3 AM daily"
+- **Logging and audit trails**: When events actually happened in the real world
+- **API rate limiting**: "100 requests per hour" based on wall clock time
+
+### Use `monoMs` for:
+
+- **Performance measurement**: Timing how long operations take
+- **Timeouts and intervals**: "Retry after 5 seconds", "Poll every 10ms"
+- **SLA monitoring**: Measuring response times, uptime calculations
+- **Deadlines relative to now**: "Timeout this request in 30 seconds"
+- **Animation and game loops**: Smooth, consistent timing that can't go backwards
+
+### Quick Examples:
+
+```typescript
+const clock = createSystemClock();
+const now = clock.now();
+
+// Cache expiration (wall time - can be affected by clock adjustments)
+const expiresAt = now.wallMs + 30 * 60 * 1000; // 30 minutes from now
+
+// Performance measurement (monotonic - never affected by clock adjustments)
+const start = now.monoMs;
+// ... do work ...
+const duration = clock.now().monoMs - start; // Always positive, never jumps
+```
+
 ## Usage Examples
 
 ### Basic Usage
 
 ```typescript
-import { createSystemClock, createControlledClock } from "@phyxius/clock";
+import { createSystemClock, createControlledClock, ms } from "@phyxius/clock";
 
 // Production: real time
 const clock = createSystemClock();
 console.log(clock.now()); // { wallMs: 1704063600000, monoMs: 42.1 }
 
-// Testing: controlled time
+// Testing: controlled time (defaults to 0 for deterministic tests)
 const testClock = createControlledClock({ initialTime: 1000 });
 console.log(testClock.now()); // { wallMs: 1000, monoMs: 1000 }
 
-type Millis = number & { readonly __brand: "millis" };
-await testClock.advanceBy(500 as Millis);
+// Use ms() helper to avoid casting noise
+testClock.advanceBy(ms(500));
 console.log(testClock.now()); // { wallMs: 1500, monoMs: 1500 }
+```
+
+### Interval Cancellation
+
+```typescript
+import { createSystemClock, ms } from "@phyxius/clock";
+
+const clock = createSystemClock();
+let count = 0;
+
+// Create an interval
+const handle = clock.interval(ms(1000), () => {
+  count++;
+  console.log(`Tick ${count}`);
+
+  // Cancel after 5 ticks
+  if (count >= 5) {
+    handle.cancel();
+    console.log("Interval cancelled");
+  }
+});
+
+// Or cancel from outside
+setTimeout(() => {
+  handle.cancel();
+  console.log("Cancelled early");
+}, 3000);
 ```
 
 ### Rate Limiting
@@ -146,7 +208,7 @@ class RateLimiter {
   ) {}
 
   isAllowed(key: string): boolean {
-    const now = this.clock.now();
+    const now = this.clock.now().wallMs;
     const attempts = this.attempts.get(key) || [];
 
     // Remove old attempts outside window
@@ -173,7 +235,7 @@ expect(rateLimiter.isAllowed("user1")).toBe(true);
 expect(rateLimiter.isAllowed("user1")).toBe(false); // Rate limited
 
 // Fast-forward past window
-await testClock.advanceBy(1001 as Millis);
+testClock.advanceBy(ms(1001));
 expect(rateLimiter.isAllowed("user1")).toBe(true); // Allowed again
 ```
 
@@ -213,10 +275,10 @@ cache.set("key", "value");
 
 expect(cache.get("key")).toBe("value");
 
-await testClock.advanceBy(999 as Millis);
+testClock.advanceBy(ms(999));
 expect(cache.get("key")).toBe("value"); // Still valid
 
-await testClock.advanceBy(2 as Millis);
+testClock.advanceBy(ms(2));
 expect(cache.get("key")).toBeUndefined(); // Expired
 ```
 
@@ -245,10 +307,10 @@ class RetryManager {
   }
 
   private async delay(ms: number): Promise<void> {
-    const start = this.clock.now();
+    const start = this.clock.now().monoMs;
     return new Promise((resolve) => {
       const check = () => {
-        if (this.clock.now() - start >= ms) {
+        if (this.clock.now().monoMs - start >= ms) {
           resolve();
         } else {
           setImmediate(check);
@@ -260,7 +322,8 @@ class RetryManager {
 }
 
 // Test retry logic instantly with ControlledClock
-const retryManager = new RetryManager(createControlledClock(0));
+const testClock = createControlledClock({ initialTime: 0 });
+const retryManager = new RetryManager(testClock);
 let attempts = 0;
 
 const operation = async () => {
@@ -271,8 +334,8 @@ const operation = async () => {
 
 // In another async context, advance time to trigger retries
 const result = retryManager.withRetry(operation, 3, 100);
-testClock.advance(100); // First retry
-testClock.advance(200); // Second retry
+testClock.advanceBy(ms(100)); // First retry
+testClock.advanceBy(ms(200)); // Second retry
 expect(await result).toBe("success");
 ```
 
@@ -285,21 +348,21 @@ class PerformanceMonitor {
   constructor(private clock: Clock) {}
 
   time<T>(operation: string, fn: () => T): T {
-    const start = this.clock.now();
+    const start = this.clock.now().monoMs;
     try {
       return fn();
     } finally {
-      const duration = this.clock.now() - start;
+      const duration = this.clock.now().monoMs - start;
       this.recordMetric(operation, duration);
     }
   }
 
   async timeAsync<T>(operation: string, fn: () => Promise<T>): Promise<T> {
-    const start = this.clock.now();
+    const start = this.clock.now().monoMs;
     try {
       return await fn();
     } finally {
-      const duration = this.clock.now() - start;
+      const duration = this.clock.now().monoMs - start;
       this.recordMetric(operation, duration);
     }
   }
@@ -324,15 +387,16 @@ class PerformanceMonitor {
 }
 
 // Test performance monitoring with precise control
-const monitor = new PerformanceMonitor(createControlledClock(1000));
+const testClock = createControlledClock({ initialTime: 1000 });
+const monitor = new PerformanceMonitor(testClock);
 
 monitor.time("operation1", () => {
-  testClock.advance(50);
+  testClock.advanceBy(ms(50));
   return "result";
 });
 
 monitor.time("operation1", () => {
-  testClock.advance(75);
+  testClock.advanceBy(ms(75));
   return "result";
 });
 
@@ -398,15 +462,17 @@ class ControlledClock implements Clock {
   // ... Clock methods ...
 
   // Additional methods for time control:
-  advanceBy(ms: Millis): Promise<void>; // Advance by duration
-  advanceTo(targetMono: number): Promise<void>; // Advance to specific monotonic time
+  advanceBy(ms: Millis): void; // Advance by duration (synchronous)
+  advanceTo(targetMono: number): void; // Advance to specific monotonic time (synchronous)
   jumpWallTime(newWallMs: number): void; // Jump wall time (keep monotonic continuous)
-  tick(): Promise<void>; // Advance to next pending timer
+  tick(): void; // Advance to next pending timer (synchronous)
   getPendingTimerCount(): number; // Number of pending timers
+  flush(): Promise<void>; // Await completion of fired callbacks
 }
 
 const clock = createControlledClock({ initialTime: 1000 });
-await clock.advanceBy(500 as Millis); // Time manipulation
+clock.advanceBy(ms(500)); // Time manipulation (synchronous)
+await clock.flush(); // Wait for callbacks to complete
 ```
 
 ## Testing Patterns
@@ -415,17 +481,17 @@ await clock.advanceBy(500 as Millis); // Time manipulation
 
 ```typescript
 describe("SessionTimeout", () => {
-  it("should expire sessions after timeout", async () => {
+  it("should expire sessions after timeout", () => {
     const clock = createControlledClock({ initialTime: 0 });
     const session = new SessionManager(clock, 1000); // 1s timeout
 
     const id = session.create("user");
     expect(session.isValid(id)).toBe(true);
 
-    await clock.advanceBy(999 as Millis);
+    clock.advanceBy(ms(999));
     expect(session.isValid(id)).toBe(true);
 
-    await clock.advanceBy(2 as Millis);
+    clock.advanceBy(ms(2));
     expect(session.isValid(id)).toBe(false);
   });
 });
@@ -440,17 +506,20 @@ describe("ConcurrentOperations", () => {
     const events: string[] = [];
 
     // Use Clock's methods instead of global timers
-    clock.sleep(100 as Millis).then(() => events.push("A"));
-    clock.sleep(200 as Millis).then(() => events.push("B"));
-    clock.sleep(150 as Millis).then(() => events.push("C"));
+    clock.sleep(ms(100)).then(() => events.push("A"));
+    clock.sleep(ms(200)).then(() => events.push("B"));
+    clock.sleep(ms(150)).then(() => events.push("C"));
 
-    await clock.advanceBy(100 as Millis);
+    clock.advanceBy(ms(100));
+    await clock.flush();
     expect(events).toEqual(["A"]);
 
-    await clock.advanceBy(50 as Millis);
+    clock.advanceBy(ms(50));
+    await clock.flush();
     expect(events).toEqual(["A", "C"]);
 
-    await clock.advanceBy(50 as Millis);
+    clock.advanceBy(ms(50));
+    await clock.flush();
     expect(events).toEqual(["A", "C", "B"]);
   });
 });

@@ -64,3 +64,8 @@ export interface Clock {
  * Event emitter function type
  */
 export type EmitFn = (event: unknown) => void;
+
+/**
+ * Helper to create Millis values without casting noise
+ */
+export const ms = (n: number): Millis => n as Millis;

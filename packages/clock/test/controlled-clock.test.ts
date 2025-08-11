@@ -23,7 +23,7 @@ describe("ControlledClock", () => {
 
     it("should advance monotonic time independently", async () => {
       const instant1 = clock.now();
-      await clock.advanceBy(100 as Millis);
+      clock.advanceBy(100 as Millis);
       const instant2 = clock.now();
 
       expect(instant2.wallMs).toBe(instant1.wallMs + 100);
@@ -40,17 +40,17 @@ describe("ControlledClock", () => {
 
       expect(resolved).toBe(false);
 
-      await clock.advanceBy(50 as Millis);
+      clock.advanceBy(50 as Millis);
       expect(resolved).toBe(false);
 
-      await clock.advanceBy(50 as Millis);
+      clock.advanceBy(50 as Millis);
       await sleepPromise;
       expect(resolved).toBe(true);
     });
 
     it("should emit sleep events", async () => {
       const sleepPromise = clock.sleep(100 as Millis);
-      await clock.advanceBy(100 as Millis);
+      clock.advanceBy(100 as Millis);
       await sleepPromise;
 
       // Filter out advance events
@@ -78,7 +78,7 @@ describe("ControlledClock", () => {
     it("should wait for deadline", async () => {
       const target: DeadlineTarget = { wallMs: 1000000000000 + 50 };
       const deadlinePromise = clock.deadline(target);
-      await clock.advanceBy(50 as Millis);
+      clock.advanceBy(50 as Millis);
       await deadlinePromise;
 
       const okEvent = events.find((e: any) => e.type === "time:deadline:ok");
@@ -86,7 +86,7 @@ describe("ControlledClock", () => {
     });
 
     it("should handle past deadlines", async () => {
-      await clock.advanceBy(100 as Millis);
+      clock.advanceBy(100 as Millis);
       const past: DeadlineTarget = { wallMs: clock.now().wallMs - 50 };
       await clock.deadline(past);
 
@@ -102,7 +102,7 @@ describe("ControlledClock", () => {
         callbacks.push(clock.now().monoMs);
       });
 
-      await clock.advanceBy(250 as Millis);
+      clock.advanceBy(250 as Millis);
       handle.cancel();
 
       expect(callbacks).toEqual([1000000000100, 1000000000200]);
@@ -110,7 +110,7 @@ describe("ControlledClock", () => {
 
     it("should emit interval events", async () => {
       const handle = clock.interval(100 as Millis, () => {});
-      await clock.advanceBy(250 as Millis);
+      clock.advanceBy(250 as Millis);
       handle.cancel();
 
       const setEvent = events.find((e: any) => e.type === "time:interval:set");
@@ -131,7 +131,7 @@ describe("ControlledClock", () => {
         }
       });
 
-      await clock.advanceBy(350 as Millis);
+      clock.advanceBy(350 as Millis);
       handle.cancel();
 
       expect(callCount).toBe(3);
@@ -148,7 +148,7 @@ describe("ControlledClock", () => {
   describe("advanceBy()", () => {
     it("should advance time by specified amount", async () => {
       const before = clock.now();
-      await clock.advanceBy(500 as Millis);
+      clock.advanceBy(500 as Millis);
       const after = clock.now();
 
       expect(after.monoMs).toBe(before.monoMs + 500);
@@ -156,7 +156,7 @@ describe("ControlledClock", () => {
     });
 
     it("should emit advance events", async () => {
-      await clock.advanceBy(100 as Millis);
+      clock.advanceBy(100 as Millis);
 
       const advanceEvent = events.find((e: any) => e.type === "time:advance");
       expect(advanceEvent).toMatchObject({
@@ -169,8 +169,8 @@ describe("ControlledClock", () => {
 
     it("should handle non-positive advances", async () => {
       const before = clock.now();
-      await clock.advanceBy(0 as Millis);
-      await clock.advanceBy(-10 as Millis);
+      clock.advanceBy(0 as Millis);
+      clock.advanceBy(-10 as Millis);
       const after = clock.now();
 
       expect(after.monoMs).toBe(before.monoMs);
@@ -180,7 +180,7 @@ describe("ControlledClock", () => {
 
   describe("advanceTo()", () => {
     it("should advance to specific monotonic time", async () => {
-      await clock.advanceTo(1000000000500);
+      clock.advanceTo(1000000000500);
       const instant = clock.now();
 
       expect(instant.monoMs).toBe(1000000000500);
@@ -188,9 +188,9 @@ describe("ControlledClock", () => {
     });
 
     it("should not go backwards", async () => {
-      await clock.advanceTo(1000000000100);
+      clock.advanceTo(1000000000100);
       const before = clock.now();
-      await clock.advanceTo(1000000000050);
+      clock.advanceTo(1000000000050);
       const after = clock.now();
 
       expect(after.monoMs).toBe(before.monoMs);
@@ -243,7 +243,8 @@ describe("ControlledClock", () => {
       clock.sleep(150 as Millis).then(() => results.push("sleep2"));
       clock.deadline({ wallMs: clock.now().wallMs + 75 }).then(() => results.push("deadline"));
 
-      await clock.advanceBy(200 as Millis);
+      clock.advanceBy(200 as Millis);
+      await clock.flush();
 
       expect(results).toContain("deadline");
       expect(results).toContain("sleep1");
@@ -256,7 +257,8 @@ describe("ControlledClock", () => {
       const handle = clock.interval(50 as Millis, () => results.push("interval"));
 
       clock.sleep(125 as Millis).then(() => results.push("sleep"));
-      await clock.advanceBy(175 as Millis);
+      clock.advanceBy(175 as Millis);
+      await clock.flush();
       handle.cancel();
 
       expect(results).toContain("sleep");

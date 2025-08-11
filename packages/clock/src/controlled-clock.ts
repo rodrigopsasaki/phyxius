@@ -1,12 +1,26 @@
 import type { Clock, EmitFn, Instant, TimerHandle, Millis, DeadlineTarget } from "./types.js";
 
-interface PendingTimer {
-  id: number;
-  type: "timeout" | "interval";
+type PendingTimeout = {
+  kind: "timeout";
   fireAt: number;
-  callback: () => void | Promise<void>;
-  intervalMs?: Millis;
+  fn: () => void;
   cancelled: boolean;
+};
+
+type PendingInterval = {
+  kind: "interval";
+  every: Millis;
+  nextMono: number;
+  fn: () => void | Promise<void>;
+  cancelled: boolean;
+  tickCount: number;
+};
+
+type PendingTimer = PendingTimeout | PendingInterval;
+
+interface QueuedTimer {
+  fireAt: number;
+  timer: PendingTimer;
 }
 
 /**
@@ -16,12 +30,12 @@ class ControlledClock implements Clock {
   private wallMs: number;
   private monoMs: number;
   private readonly emit: EmitFn | undefined;
-  private readonly pendingTimers: PendingTimer[] = [];
-  private nextTimerId = 1;
+  private readonly timers: PendingTimer[] = [];
 
   constructor(options?: { initialTime?: number; emit?: EmitFn }) {
-    this.wallMs = options?.initialTime ?? Date.now();
-    this.monoMs = options?.initialTime ?? Date.now();
+    // Default to 0 for deterministic tests
+    this.wallMs = options?.initialTime ?? 0;
+    this.monoMs = options?.initialTime ?? 0;
     this.emit = options?.emit;
   }
 
@@ -40,11 +54,10 @@ class ControlledClock implements Clock {
     });
 
     return new Promise<void>((resolve) => {
-      const timer: PendingTimer = {
-        id: this.nextTimerId++,
-        type: "timeout",
+      const timer: PendingTimeout = {
+        kind: "timeout",
         fireAt: this.monoMs + ms,
-        callback: () => {
+        fn: () => {
           const endTime = this.now();
           this.emit?.({
             type: "time:sleep:end",
@@ -56,8 +69,7 @@ class ControlledClock implements Clock {
         },
         cancelled: false,
       };
-      this.pendingTimers.push(timer);
-      this.pendingTimers.sort((a, b) => a.fireAt - b.fireAt);
+      this.timers.push(timer);
     });
   }
 
@@ -98,7 +110,6 @@ class ControlledClock implements Clock {
     }
 
     const startTime = this.now();
-    let tickCount = 0;
 
     this.emit?.({
       type: "time:interval:set",
@@ -106,59 +117,24 @@ class ControlledClock implements Clock {
       at: startTime,
     });
 
-    const timer: PendingTimer = {
-      id: this.nextTimerId++,
-      type: "interval",
-      fireAt: this.monoMs + ms,
-      intervalMs: ms,
-      callback: async () => {
-        if (timer.cancelled) return;
-
-        tickCount++;
-        const tickTime = this.now();
-
-        this.emit?.({
-          type: "time:interval:tick",
-          intervalMs: ms,
-          tick: tickCount,
-          at: tickTime,
-        });
-
-        try {
-          await callback();
-        } catch (error) {
-          this.emit?.({
-            type: "time:interval:error",
-            intervalMs: ms,
-            tick: tickCount,
-            error,
-            at: this.now(),
-          });
-        }
-
-        // Schedule next tick
-        if (!timer.cancelled) {
-          timer.fireAt = this.monoMs + ms;
-          this.pendingTimers.sort((a, b) => a.fireAt - b.fireAt);
-        }
-      },
+    const timer: PendingInterval = {
+      kind: "interval",
+      every: ms,
+      nextMono: this.monoMs + ms,
+      fn: callback,
       cancelled: false,
+      tickCount: 0,
     };
 
-    this.pendingTimers.push(timer);
-    this.pendingTimers.sort((a, b) => a.fireAt - b.fireAt);
+    this.timers.push(timer);
 
     return {
       cancel: () => {
         timer.cancelled = true;
-        const index = this.pendingTimers.indexOf(timer);
-        if (index >= 0) {
-          this.pendingTimers.splice(index, 1);
-        }
         this.emit?.({
           type: "time:interval:cancel",
           intervalMs: ms,
-          ticks: tickCount,
+          ticks: timer.tickCount,
           at: this.now(),
         });
       },
@@ -181,7 +157,7 @@ class ControlledClock implements Clock {
   /**
    * Advance monotonic time by a specific duration, firing all due timers
    */
-  async advanceBy(ms: Millis): Promise<void> {
+  advanceBy(ms: Millis): void {
     if (ms <= 0) return;
 
     const targetMono = this.monoMs + ms;
@@ -192,63 +168,148 @@ class ControlledClock implements Clock {
       toMono: targetMono,
     });
 
-    await this.advanceTo(targetMono);
+    this.advanceTo(targetMono);
   }
 
   /**
    * Advance monotonic time to a specific time, firing all due timers
    */
-  async advanceTo(targetMono: number): Promise<void> {
+  advanceTo(targetMono: number): void {
     if (targetMono <= this.monoMs) return;
 
-    while (this.pendingTimers.length > 0 && this.pendingTimers[0]!.fireAt <= targetMono) {
-      const timer = this.pendingTimers[0]!;
-      const jumpTo = timer.fireAt;
+    this.drainUntil(targetMono);
 
-      // Advance time to timer's fire time
-      const timeDelta = jumpTo - this.monoMs;
-      this.monoMs = jumpTo;
-      this.wallMs += timeDelta;
+    // Final jump to target time
+    if (this.monoMs < targetMono) {
+      const dt = targetMono - this.monoMs;
+      this.monoMs = targetMono;
+      this.wallMs += dt;
+    }
+  }
 
-      // Fire the timer
-      if (!timer.cancelled) {
-        this.pendingTimers.shift();
-        await timer.callback();
+  /**
+   * Process all timers due up to targetMono without awaiting callbacks
+   */
+  private drainUntil(targetMono: number): void {
+    while (true) {
+      const next = this.getNextDue(targetMono);
+      if (!next) break;
 
-        // Re-add interval timers
-        if (timer.type === "interval" && !timer.cancelled && timer.intervalMs) {
-          timer.fireAt = this.monoMs + timer.intervalMs;
-          this.pendingTimers.push(timer);
-          this.pendingTimers.sort((a, b) => a.fireAt - b.fireAt);
+      // Jump time to the event
+      const dt = next.fireAt - this.monoMs;
+      this.monoMs = next.fireAt;
+      this.wallMs += dt;
+
+      if (next.timer.kind === "timeout") {
+        if (!next.timer.cancelled) {
+          // Fire timeout without await
+          next.timer.fn();
         }
+        // Remove timeout timer
+        this.removeTimer(next.timer);
       } else {
-        this.pendingTimers.shift();
+        // Handle interval with catch-up
+        while (next.timer.nextMono <= this.monoMs && !next.timer.cancelled) {
+          // Schedule next tick first to maintain stable cadence
+          next.timer.nextMono += next.timer.every;
+          next.timer.tickCount++;
+
+          const tickTime = this.now();
+          this.emit?.({
+            type: "time:interval:tick",
+            intervalMs: (next.timer as PendingInterval).every,
+            tick: (next.timer as PendingInterval).tickCount,
+            at: tickTime,
+          });
+
+          try {
+            // Fire without await - queue microtask if async is needed
+            const result = next.timer.fn();
+            if (result && typeof result.then === "function") {
+              // Queue promise but don't await
+              result.catch((error) => {
+                this.emit?.({
+                  type: "time:interval:error",
+                  intervalMs: (next.timer as PendingInterval).every,
+                  tick: (next.timer as PendingInterval).tickCount,
+                  error,
+                  at: this.now(),
+                });
+              });
+            }
+          } catch (error) {
+            this.emit?.({
+              type: "time:interval:error",
+              intervalMs: (next.timer as PendingInterval).every,
+              tick: (next.timer as PendingInterval).tickCount,
+              error,
+              at: this.now(),
+            });
+          }
+        }
+      }
+    }
+  }
+
+  /**
+   * Get the next timer due at or before targetMono
+   */
+  private getNextDue(targetMono: number): QueuedTimer | null {
+    let earliest: QueuedTimer | null = null;
+
+    for (const timer of this.timers) {
+      if (timer.cancelled) continue;
+
+      let fireAt: number;
+      if (timer.kind === "timeout") {
+        fireAt = timer.fireAt;
+      } else {
+        fireAt = timer.nextMono;
+      }
+
+      if (fireAt <= targetMono) {
+        if (!earliest || fireAt < earliest.fireAt) {
+          earliest = { fireAt, timer };
+        }
       }
     }
 
-    // Advance to target if we haven't reached it
-    if (this.monoMs < targetMono) {
-      const remaining = targetMono - this.monoMs;
-      this.monoMs = targetMono;
-      this.wallMs += remaining;
+    return earliest;
+  }
+
+  /**
+   * Remove a timer from the list
+   */
+  private removeTimer(timer: PendingTimer): void {
+    const index = this.timers.indexOf(timer);
+    if (index >= 0) {
+      this.timers.splice(index, 1);
     }
   }
 
   /**
    * Advance by one tick, firing the next timer if any
    */
-  async tick(): Promise<void> {
-    if (this.pendingTimers.length === 0) return;
-
-    const nextTimer = this.pendingTimers[0]!;
-    await this.advanceTo(nextTimer.fireAt);
+  tick(): void {
+    const next = this.getNextDue(Infinity);
+    if (next) {
+      this.advanceTo(next.fireAt);
+    }
   }
 
   /**
    * Get the number of pending timers
    */
   getPendingTimerCount(): number {
-    return this.pendingTimers.filter((t) => !t.cancelled).length;
+    return this.timers.filter((t) => !t.cancelled).length;
+  }
+
+  /**
+   * Await completion of callbacks fired so far (microtasks/promises queued)
+   */
+  async flush(): Promise<void> {
+    // Allow multiple microtask cycles to complete
+    await new Promise((resolve) => setImmediate(resolve));
   }
 }
 
