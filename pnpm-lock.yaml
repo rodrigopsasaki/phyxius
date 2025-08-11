@@ -45,11 +45,50 @@ importers:
         specifier: ^2.1.8
         version: 2.1.9(@types/node@22.17.1)
 
+  packages/atom:
+    devDependencies:
+      '@size-limit/preset-small-lib':
+        specifier: ^11.1.7
+        version: 11.2.0(size-limit@11.2.0)
+      '@vitest/coverage-v8':
+        specifier: ^2.1.8
+        version: 2.1.9(vitest@2.1.9(@types/node@22.17.1))
+      size-limit:
+        specifier: ^11.1.7
+        version: 11.2.0
+      tsup:
+        specifier: ^8.3.5
+        version: 8.5.0(jiti@2.5.1)(postcss@8.5.6)(typescript@5.9.2)(yaml@2.8.1)
+      typescript:
+        specifier: ^5.7.2
+        version: 5.9.2
+      vitest:
+        specifier: ^2.1.8
+        version: 2.1.9(@types/node@22.17.1)
+
   packages/clock:
     devDependencies:
-      '@rodrigopsasaki/vision':
-        specifier: ^0.5.0
-        version: 0.5.0
+      '@size-limit/preset-small-lib':
+        specifier: ^11.1.7
+        version: 11.2.0(size-limit@11.2.0)
+      '@vitest/coverage-v8':
+        specifier: ^2.1.8
+        version: 2.1.9(vitest@2.1.9(@types/node@22.17.1))
+      size-limit:
+        specifier: ^11.1.7
+        version: 11.2.0
+      tsup:
+        specifier: ^8.3.5
+        version: 8.5.0(jiti@2.5.1)(postcss@8.5.6)(typescript@5.9.2)(yaml@2.8.1)
+      typescript:
+        specifier: ^5.7.2
+        version: 5.9.2
+      vitest:
+        specifier: ^2.1.8
+        version: 2.1.9(@types/node@22.17.1)
+
+  packages/journal:
+    devDependencies:
       '@size-limit/preset-small-lib':
         specifier: ^11.1.7
         version: 11.2.0(size-limit@11.2.0)
@@ -559,9 +598,6 @@ packages:
   '@pkgjs/parseargs@0.11.0':
     resolution: {integrity: sha512-+1VkjdD0QBLPodGrJUeqarH8VAIvQODIbwh9XpP5Syisf7YoQgsJKPNFoqqLQlu+VQ/tVSshMR6loPMn8U+dPg==}
     engines: {node: '>=14'}
-
-  '@rodrigopsasaki/vision@0.5.0':
-    resolution: {integrity: sha512-wXkLcgbIByG8PnmEVmMAOE1wl1Hw1fj4lA3Y4143OXgOIuVG9lupv2dDZgEY54VMV8HA3UzAOVc9TXeRJDf4Cw==}
 
   '@rollup/rollup-android-arm-eabi@4.46.2':
     resolution: {integrity: sha512-Zj3Hl6sN34xJtMv7Anwb5Gu01yujyE/cLBDB2gnHTAHaWS1Z38L7kuSG+oAh0giZMqG060f/YBStXtMH6FvPMA==}
@@ -2459,8 +2495,6 @@ snapshots:
 
   '@pkgjs/parseargs@0.11.0':
     optional: true
-
-  '@rodrigopsasaki/vision@0.5.0': {}
 
   '@rollup/rollup-android-arm-eabi@4.46.2':
     optional: true
