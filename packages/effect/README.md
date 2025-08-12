@@ -1,1016 +1,691 @@
-# Effect v0 - Production Ready Effect System
+# Effect
 
-A production-ready Effect system with structured concurrency, resource management, and deterministic time operations.
+**Async that can't leak. Resources that clean up. Concurrency you can reason about.**
 
-## Features
+Every production outage you've debugged starts the same way: resources leak, operations hang, promises never resolve, timeouts don't work, cleanup never happens.
 
-✅ **Hierarchical Cancellation** - CancelToken with parent propagation  
-✅ **Resource Management** - Finalizer scopes with LIFO execution  
-✅ **Result-Based Interpreter** - Never throws, always returns `Result<E, A>`  
-✅ **Cancel-Aware Operations** - Sleep, timeout, and all async operations respond to cancellation  
-✅ **Structured Concurrency** - Fork/join with automatic cleanup  
-✅ **Race with Loser Cancellation** - Race cancels losing effects  
-✅ **Retry with Backoff Policy** - Configurable exponential backoff  
-✅ **Resource Management** - `acquireUseRelease` pattern with guaranteed cleanup  
-✅ **Deterministic Time** - All time operations use injected Clock interface  
-✅ **Zero Runtime Dependencies** - Only depends on `@phyxius/clock`
+Effect fixes this. Structured concurrency, automatic cleanup, explicit errors.
 
-## Core API
+## The Problem
 
 ```typescript
-import { effect, succeed, fail, sleep, all, race, acquireUseRelease } from "@phyxius/effect";
-import type { RetryPolicy } from "@phyxius/effect";
-import { createControlledClock, ms } from "@phyxius/clock";
+// This is broken. The leaks just haven't killed you yet.
+async function fetchWithTimeout(url: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const controller = new AbortController();
 
-// Basic effects
-const simpleEffect = succeed(42);
-const failingEffect = fail("error");
+    // Timeout that might not clean up
+    const timeout = setTimeout(() => {
+      controller.abort();
+      reject(new Error("Timeout"));
+    }, 5000);
 
-// Async operations with deterministic time
-const clock = createControlledClock({ initialTime: 0 });
-const sleepEffect = sleep(ms(1000));
+    // Request that might not be cancelled
+    fetch(url, { signal: controller.signal })
+      .then((response) => response.text())
+      .then((text) => {
+        clearTimeout(timeout); // Did this run?
+        resolve(text);
+      })
+      .catch((error) => {
+        clearTimeout(timeout); // What about this?
+        reject(error);
+      });
+  });
+}
 
-// Run effects
-const result = await simpleEffect.unsafeRunPromise({ clock });
-// result: { _tag: "Ok", value: 42 } | { _tag: "Err", error: E }
+// Concurrent operations with no cleanup guarantee
+Promise.race([
+  fetchWithTimeout("https://api1.com"),
+  fetchWithTimeout("https://api2.com"),
+  fetchWithTimeout("https://api3.com"),
+]);
+// Two of these will "lose" the race. Did they clean up? Are they still running?
+```
 
-// Effect combinators
-const chainedEffect = succeed(1)
-  .map((x) => x + 1)
-  .flatMap((x) => succeed(x * 2))
-  .timeout(ms(5000));
+Promises are fire-and-forget missiles. Once launched, you can't reliably cancel them, manage their resources, or prevent them from doing work after you've moved on.
 
-// Structured concurrency
-const fiber = await slowEffect.fork().unsafeRunPromise({ clock });
-const result = await fiber.join().unsafeRunPromise({ clock });
+## The Solution
 
-// Race with automatic loser cancellation
-const winner = await race([sleep(ms(100)).map(() => "fast"), sleep(ms(1000)).map(() => "slow")]).unsafeRunPromise({
-  clock,
+```typescript
+import { effect, race, sleep } from "@phyxius/effect";
+import { createSystemClock } from "@phyxius/clock";
+
+const clock = createSystemClock();
+
+// Interruptible, resource-safe async computation
+const fetchData = effect(async (env) => {
+  // Check for cancellation
+  if (env.cancel.isCanceled()) {
+    return { _tag: "Err", error: "Cancelled" };
+  }
+
+  const response = await fetch("https://api.com");
+  const data = await response.text();
+
+  return { _tag: "Ok", value: data };
 });
 
-// Retry with exponential backoff
-const retryPolicy: RetryPolicy = {
+// Race with automatic cleanup of losers
+const winner = await race([
+  fetchData,
+  fetchData.timeout(1000), // Loser gets cancelled automatically
+  sleep(2000), // This too
+]).unsafeRunPromise({ clock });
+
+// All losing effects are interrupted and cleaned up
+```
+
+Effects are blueprints, not executions. They describe what you want to do without doing it. When you run them, you get structured concurrency, automatic cleanup, and explicit error handling.
+
+## Start Simple: Basic Effects
+
+```typescript
+import { effect, succeed, fail } from "@phyxius/effect";
+import { createSystemClock } from "@phyxius/clock";
+
+const clock = createSystemClock();
+
+// Create effects (don't run them yet)
+const successful = succeed(42);
+const failing = fail(new Error("Oops"));
+
+// Compose effects
+const doubled = successful.map((x) => x * 2);
+
+// Run them
+const result1 = await doubled.unsafeRunPromise({ clock });
+console.log(result1); // { _tag: "Ok", value: 84 }
+
+const result2 = await failing.unsafeRunPromise({ clock });
+console.log(result2); // { _tag: "Err", error: Error("Oops") }
+```
+
+Effects use `Result<E, A>` types instead of throwing exceptions. Success is `{ _tag: "Ok", value: A }`, failure is `{ _tag: "Err", error: E }`. No surprise exceptions.
+
+## Add Async: Promise Integration
+
+```typescript
+import { fromPromise, effect } from "@phyxius/effect";
+
+// Wrap existing promises
+const apiCall = fromPromise(fetch("https://api.com"));
+
+// Custom async effects
+const customEffect = effect(async (env) => {
+  // Access the environment for cancellation, clock, etc
+  const start = env.clock?.now().wallMs ?? Date.now();
+
+  // Do async work
+  await new Promise((resolve) => setTimeout(resolve, 1000));
+
+  const end = env.clock?.now().wallMs ?? Date.now();
+
+  return { _tag: "Ok", value: end - start };
+});
+
+const result = await customEffect.unsafeRunPromise({ clock });
+console.log(result); // { _tag: "Ok", value: 1000 }
+```
+
+`fromPromise` converts existing promises into Effects. Custom effects get access to the environment with cancellation tokens, clock, and scope for resource management.
+
+## Add Cancellation: Interruptible Operations
+
+```typescript
+import { effect, sleep } from "@phyxius/effect";
+
+const longRunning = effect(async (env) => {
+  for (let i = 0; i < 100; i++) {
+    // Check for cancellation on each iteration
+    if (env.cancel.isCanceled()) {
+      return { _tag: "Err", error: "Cancelled" };
+    }
+
+    // Simulate work
+    await sleep(100).unsafeRunPromise({ clock });
+    console.log(`Step ${i}`);
+  }
+
+  return { _tag: "Ok", value: "Completed" };
+});
+
+// Fork the effect (run in background)
+const fiber = await longRunning.fork().unsafeRunPromise({ clock });
+
+// Wait a bit
+await sleep(500).unsafeRunPromise({ clock });
+
+// Interrupt it
+await fiber.interrupt().unsafeRunPromise({ clock });
+console.log("Effect was interrupted");
+```
+
+Fibers are lightweight threads that can be interrupted cleanly. Interruption propagates through the cancellation token, allowing operations to clean up gracefully.
+
+## Add Timeouts: Guaranteed Deadlines
+
+```typescript
+import { effect, sleep } from "@phyxius/effect";
+
+const slowOperation = effect(async () => {
+  await sleep(5000).unsafeRunPromise({ clock }); // 5 seconds
+  return { _tag: "Ok", value: "Finally done" };
+});
+
+// Timeout after 2 seconds
+const timedOperation = slowOperation.timeout(2000);
+
+const result = await timedOperation.unsafeRunPromise({ clock });
+console.log(result); // { _tag: "Err", error: { _tag: "Timeout" } }
+```
+
+Timeouts are first-class citizens. They respect the clock abstraction, so they work perfectly in tests with controlled time.
+
+## Add Resource Management: RAII Pattern
+
+```typescript
+import { acquireUseRelease, effect } from "@phyxius/effect";
+
+// Resource that needs cleanup
+class DatabaseConnection {
+  constructor(public url: string) {}
+
+  async query(sql: string): Promise<any> {
+    console.log(`Querying: ${sql}`);
+    return { rows: [] };
+  }
+
+  async close(): Promise<void> {
+    console.log("Database connection closed");
+  }
+}
+
+const withDatabase = acquireUseRelease(
+  // Acquire: Create the resource
+  effect(async () => {
+    const conn = new DatabaseConnection("postgresql://...");
+    console.log("Database connection opened");
+    return { _tag: "Ok", value: conn };
+  }),
+
+  // Use: Do work with the resource
+  (conn) =>
+    effect(async () => {
+      const result = await conn.query("SELECT * FROM users");
+      return { _tag: "Ok", value: result };
+    }),
+
+  // Release: Clean up (guaranteed to run)
+  (conn, cause) =>
+    effect(async () => {
+      console.log(`Closing connection due to: ${cause}`);
+      await conn.close();
+      return { _tag: "Ok", value: undefined };
+    }),
+);
+
+const result = await withDatabase.unsafeRunPromise({ clock });
+// Output:
+// Database connection opened
+// Querying: SELECT * FROM users
+// Closing connection due to: ok
+```
+
+`acquireUseRelease` guarantees cleanup. The release function always runs with the cause - whether the operation succeeded ("ok"), failed ("error"), or was interrupted ("interrupted").
+
+## Add Error Recovery: Retry Logic
+
+```typescript
+import { effect } from "@phyxius/effect";
+
+let attempts = 0;
+
+const flakyOperation = effect(async () => {
+  attempts++;
+  console.log(`Attempt ${attempts}`);
+
+  if (attempts < 3) {
+    return { _tag: "Err", error: new Error(`Failure ${attempts}`) };
+  }
+
+  return { _tag: "Ok", value: "Success!" };
+});
+
+const retriedOperation = flakyOperation.retry({
   maxAttempts: 5,
   baseDelayMs: 100,
   backoffFactor: 2,
-  maxDelayMs: 5000,
-};
-
-const resilientEffect = unreliableOperation.retry(retryPolicy);
-
-// Resource management
-const resourceEffect = acquireUseRelease(
-  openFile("data.txt"),
-  (file) => processFile(file),
-  (file, cause) => closeFile(file, cause),
-);
-```
-
-## Architecture
-
-### Result Type
-
-All effects return `Result<E, A>` instead of throwing:
-
-```typescript
-type Result<E, A> = { _tag: "Ok"; value: A } | { _tag: "Err"; error: E };
-```
-
-### Environment
-
-Effects run in an `EffectEnv` context:
-
-```typescript
-interface EffectEnv {
-  clock?: Clock; // Deterministic time operations
-  cancel: CancelToken; // Hierarchical cancellation
-  scope: FinalizerScope; // Resource cleanup
-}
-```
-
-### Structured Concurrency
-
-- **Fork**: Create background fibers with automatic parent cleanup
-- **Race**: First-to-complete wins, others are cancelled
-- **Join**: Wait for fiber completion with proper error propagation
-
-### Resource Management
-
-- **Finalizers**: LIFO cleanup on scope exit (ok/error/interrupted)
-- **acquireUseRelease**: Guaranteed resource cleanup pattern
-- **onInterrupt**: Custom cleanup logic on cancellation
-
-## ESLint Rules
-
-The codebase enforces deterministic time operations through ESLint rules:
-
-```javascript
-// Forbidden patterns:
-Date.now()              // Use Clock.now() instead
-setTimeout(...)         // Use Clock.sleep() instead
-setInterval(...)        // Use Clock.interval() instead
-new Date()              // Use Clock interface instead
-```
-
-### Known Exceptions
-
-The following fallbacks are used only when no Clock is injected (legacy compatibility):
-
-- `env.clock?.now().wallMs ?? Date.now()` - Timestamp fallback for logging
-- `setTimeout` in timeout implementation when no clock available
-
-## Testing
-
-All tests use controlled clocks for deterministic behavior:
-
-```typescript
-import { createControlledClock, ms } from "@phyxius/clock";
-
-const clock = createControlledClock({ initialTime: 0 });
-
-// Test sleeps complete instantly with controlled time
-const sleepEffect = sleep(ms(1000));
-const promise = sleepEffect.unsafeRunPromise({ clock });
-
-clock.advanceBy(ms(1000)); // Instant completion
-const result = await promise;
-```
-
-## Implementation Notes
-
-### Cancellation
-
-- CancelToken propagates cancellation from parent to children
-- Finalizers run in LIFO order when scopes close
-- Sleep and timeout operations check cancellation and clean up timers
-
-### Memory Safety
-
-- No resource leaks: all timers/promises are cleaned up on cancellation
-- Deferred execution: effects don't run until `unsafeRunPromise` is called
-- Proper scope management ensures finalizers always run
-
-### Backward Compatibility
-
-Effects provide a legacy `.run()` method that throws on error for gradual migration:
-
-```typescript
-// New style (recommended)
-const result = await effect.unsafeRunPromise();
-if (result._tag === "Err") {
-  /* handle error */
-}
-
-// Legacy style (for migration)
-try {
-  const value = await effect.run();
-} catch (error) {
-  /* handle error */
-}
-```
-
-## Why does Effect exist?
-
-Async programming in JavaScript is powerful but dangerous. Promise-based code often suffers from resource leaks, lost contexts, and cascading failures. When operations fail or need to be cancelled, cleanup becomes a nightmare.
-
-**The Problem:**
-
-```typescript
-// Dangerous: resource leaks, lost context, no cancellation
-class DataProcessor {
-  async processData(userId: string) {
-    // No way to pass userId through the operation chain
-    const data = await this.fetchData();
-
-    // If this fails, cleanup is manual and error-prone
-    const processed = await this.transformData(data);
-
-    // Multiple async operations - no coordination
-    const [result1, result2] = await Promise.all([this.saveToDatabase(processed), this.sendNotification(processed)]);
-
-    // What if we need to cancel? How do we clean up resources?
-    // How do we know which operation failed?
-    // How do we pass context through the chain?
-  }
-
-  // Context is lost - no way to know which user this is for
-  private async transformData(data: any) {
-    // Need userId here but it's not available!
-    return this.applyUserSpecificTransforms(data, "???");
-  }
-}
-```
-
-**The Solution:**
-
-```typescript
-// Safe: structured concurrency, context propagation, clean cancellation
-class DataProcessor {
-  async processData(userId: string) {
-    return runEffect(async (context) => {
-      // Context is available everywhere in the operation tree
-      context.set("userId", userId);
-      context.set("operation", "data_processing");
-
-      const data = await this.fetchData(context);
-      const processed = await this.transformData(data, context);
-
-      // Concurrent operations with proper coordination
-      const [result1, result2] = await Promise.all([
-        this.saveToDatabase(processed, context),
-        this.sendNotification(processed, context),
-      ]);
-
-      return { result1, result2 };
-    });
-
-    // If this Effect is cancelled or fails, all child operations
-    // are automatically cancelled and cleaned up
-  }
-
-  private async transformData(data: any, context: Context) {
-    const userId = context.get("userId");
-    // Context is available! Operations are traceable!
-    return this.applyUserSpecificTransforms(data, userId);
-  }
-}
-```
-
-## Why is Effect good?
-
-### 1. **Structured Concurrency**
-
-Parent operations automatically manage child operations - no resource leaks or orphaned promises.
-
-### 2. **Context Propagation**
-
-Values like user IDs, request IDs, and configuration flow through operation chains automatically.
-
-### 3. **Clean Cancellation**
-
-Cancel operations and all their children with proper cleanup guaranteed.
-
-### 4. **Error Boundaries**
-
-Errors are contained and handled at the right level in the operation hierarchy.
-
-### 5. **Observability**
-
-Every operation can be traced and monitored through the context chain.
-
-## Usage Examples
-
-### Basic Context Propagation
-
-```typescript
-import { runEffect } from "@phyxius/effect";
-
-// Simple context usage
-const result = await runEffect(async (context) => {
-  context.set("requestId", "req-123");
-  context.set("userId", "user-456");
-
-  return await performOperation(context);
+  maxDelayMs: 1000,
 });
 
-async function performOperation(context) {
-  const requestId = context.get("requestId");
-  const userId = context.get("userId");
+const result = await retriedOperation.unsafeRunPromise({ clock });
+console.log(result); // { _tag: "Ok", value: "Success!" }
 
-  console.log(`Processing ${requestId} for ${userId}`);
-
-  // Context flows to nested operations
-  return await nestedOperation(context);
-}
-
-async function nestedOperation(context) {
-  // Still has access to parent context
-  const requestId = context.get("requestId");
-  console.log(`Nested operation for ${requestId}`);
-
-  return "completed";
-}
+// Output:
+// Attempt 1
+// Attempt 2
+// Attempt 3
 ```
 
-### Request Processing with Tracing
+Retry policies use exponential backoff with configurable limits. Delays respect the clock abstraction for perfect testing.
+
+## Add Concurrency: Race and Parallel
 
 ```typescript
-interface RequestContext {
-  requestId: string;
-  userId: string;
-  startTime: number;
-  correlationId: string;
-}
+import { race, all, effect, sleep } from "@phyxius/effect";
 
-class RequestProcessor {
-  async handleRequest(req: Request): Promise<Response> {
-    return runEffect(async (context) => {
-      const requestContext: RequestContext = {
-        requestId: generateId(),
-        userId: req.headers["user-id"],
-        startTime: Date.now(),
-        correlationId: req.headers["correlation-id"] || generateId(),
-      };
+const fast = effect(async () => {
+  await sleep(100).unsafeRunPromise({ clock });
+  return { _tag: "Ok", value: "Fast" };
+});
 
-      // Set context for the entire request tree
-      context.set("request", requestContext);
-      context.set("logger", this.createLogger(requestContext));
+const slow = effect(async () => {
+  await sleep(1000).unsafeRunPromise({ clock });
+  return { _tag: "Ok", value: "Slow" };
+});
 
-      try {
-        // All operations will have access to this context
-        const data = await this.fetchUserData(context);
-        const processed = await this.processData(data, context);
-        const response = await this.formatResponse(processed, context);
+const timeout = effect(async () => {
+  await sleep(500).unsafeRunPromise({ clock });
+  return { _tag: "Err", error: "Timeout" };
+});
 
-        this.logSuccess(context);
-        return response;
-      } catch (error) {
-        this.logError(context, error);
-        throw error;
-      }
-    });
-  }
+// Race: First to complete wins, others are cancelled
+const winner = await race([fast, slow, timeout]).unsafeRunPromise({ clock });
+console.log(winner); // { _tag: "Ok", value: "Fast" }
 
-  private async fetchUserData(context) {
-    const { userId, requestId } = context.get("request");
-    const logger = context.get("logger");
+// Parallel: All must succeed
+const allResults = await all([fast, fast, fast]).unsafeRunPromise({ clock });
+console.log(allResults); // { _tag: "Ok", value: ["Fast", "Fast", "Fast"] }
+```
 
-    logger.info(`Fetching data for user ${userId}`, { requestId });
+`race` cancels the losers automatically. `all` fails fast if any effect fails. Both provide structured concurrency with guaranteed cleanup.
 
-    // Simulate async operation
-    await new Promise((resolve) => setTimeout(resolve, 100));
+## Add Observability: Complete Telemetry
 
-    return { userId, data: "user-data" };
-  }
+```typescript
+import { effect, sleep } from "@phyxius/effect";
 
-  private async processData(data: any, context) {
-    const { requestId } = context.get("request");
-    const logger = context.get("logger");
-
-    logger.info("Processing data", { requestId, dataSize: JSON.stringify(data).length });
-
-    // Context flows through all operations
-    return await this.applyTransformations(data, context);
-  }
-
-  private async applyTransformations(data: any, context) {
-    const { correlationId } = context.get("request");
-
-    // Can access parent context at any depth
-    return {
-      ...data,
-      correlationId,
-      processed: true,
-      timestamp: Date.now(),
-    };
-  }
-
-  private createLogger(requestContext: RequestContext) {
-    return {
-      info: (message: string, metadata = {}) => {
-        console.log(
-          JSON.stringify({
-            level: "info",
-            message,
-            requestId: requestContext.requestId,
-            correlationId: requestContext.correlationId,
-            ...metadata,
-          }),
-        );
-      },
-      error: (message: string, error: any, metadata = {}) => {
-        console.error(
-          JSON.stringify({
-            level: "error",
-            message,
-            error: error.message,
-            requestId: requestContext.requestId,
-            correlationId: requestContext.correlationId,
-            ...metadata,
-          }),
-        );
-      },
-    };
-  }
-
-  private logSuccess(context) {
-    const { requestId, startTime } = context.get("request");
-    const duration = Date.now() - startTime;
-    const logger = context.get("logger");
-
-    logger.info("Request completed successfully", {
-      requestId,
-      duration,
-    });
-  }
-
-  private logError(context, error) {
-    const { requestId, startTime } = context.get("request");
-    const duration = Date.now() - startTime;
-    const logger = context.get("logger");
-
-    logger.error("Request failed", error, {
-      requestId,
-      duration,
-    });
-  }
-}
-
-// Usage
-const processor = new RequestProcessor();
-const response = await processor.handleRequest({
-  headers: {
-    "user-id": "user123",
-    "correlation-id": "corr-456",
+const observable = effect(
+  async (env) => {
+    await sleep(100).unsafeRunPromise({ clock });
+    return { _tag: "Ok", value: "Done" };
   },
+  {
+    emit: (event) => {
+      console.log("Effect event:", event);
+    },
+  },
+);
+
+const result = await observable.unsafeRunPromise({ clock });
+// Output:
+// Effect event: { type: "effect:start", effectId: "...", timestamp: 1640995200000 }
+// Effect event: { type: "effect:success", effectId: "...", timestamp: 1640995200100 }
+```
+
+Every operation emits structured events. Monitor performance, track errors, understand exactly what's happening in your async operations.
+
+## Advanced: Error Handling
+
+```typescript
+import { effect, fail } from "@phyxius/effect";
+
+const risky = effect(async () => {
+  if (Math.random() < 0.5) {
+    return { _tag: "Err", error: "Network error" };
+  }
+  return { _tag: "Ok", value: "Success" };
 });
+
+// Handle specific errors
+const recovered = risky.catch((error) => {
+  if (error === "Network error") {
+    return effect(async () => ({ _tag: "Ok", value: "Fallback data" }));
+  }
+  return fail(error); // Re-throw other errors
+});
+
+// Chain operations
+const pipeline = risky
+  .map((data) => data.toUpperCase())
+  .flatMap((data) => effect(async () => ({ _tag: "Ok", value: `Processed: ${data}` })))
+  .catch((error) => effect(async () => ({ _tag: "Ok", value: `Error: ${error}` })));
+
+const result = await pipeline.unsafeRunPromise({ clock });
+console.log(result); // { _tag: "Ok", value: "Processed: SUCCESS" } or "Error: Network error"
 ```
 
-### Database Transaction Management
+Error handling is explicit and composable. Use `catch` for recovery, `map` for transformations, `flatMap` for chaining. No hidden exceptions.
+
+## Advanced: Fiber Coordination
 
 ```typescript
-interface TransactionContext {
-  transactionId: string;
-  connection: DatabaseConnection;
-  operations: string[];
+import { effect, sleep, all } from "@phyxius/effect";
+
+async function coordinatedWork() {
+  // Start three concurrent operations
+  const fiber1 = await effect(async () => {
+    await sleep(1000).unsafeRunPromise({ clock });
+    return { _tag: "Ok", value: "Task 1" };
+  })
+    .fork()
+    .unsafeRunPromise({ clock });
+
+  const fiber2 = await effect(async () => {
+    await sleep(800).unsafeRunPromise({ clock });
+    return { _tag: "Ok", value: "Task 2" };
+  })
+    .fork()
+    .unsafeRunPromise({ clock });
+
+  const fiber3 = await effect(async () => {
+    await sleep(1200).unsafeRunPromise({ clock });
+    return { _tag: "Ok", value: "Task 3" };
+  })
+    .fork()
+    .unsafeRunPromise({ clock });
+
+  // Wait for all to complete
+  const results = await all([fiber1.join(), fiber2.join(), fiber3.join()]).unsafeRunPromise({ clock });
+
+  return results;
 }
 
-class DatabaseService {
-  async withTransaction<T>(operation: (context) => Promise<T>): Promise<T> {
-    return runEffect(async (context) => {
-      const connection = await this.getConnection();
-      const transactionId = generateId();
+const results = await coordinatedWork();
+console.log(results); // { _tag: "Ok", value: ["Task 1", "Task 2", "Task 3"] }
+```
 
-      const txContext: TransactionContext = {
-        transactionId,
-        connection,
-        operations: [],
-      };
+Fibers enable CSP-style concurrency. Fork operations, coordinate with join, interrupt when needed. Perfect for worker pools, pipeline processing, and concurrent data flows.
 
-      context.set("transaction", txContext);
+## Advanced: Custom Resource Scopes
 
-      try {
-        await connection.begin();
-        console.log(`Transaction ${transactionId} started`);
+```typescript
+import { effect, acquireUseRelease } from "@phyxius/effect";
 
-        const result = await operation(context);
+// Complex resource with multiple cleanup steps
+class HttpServer {
+  private connections = new Set<string>();
 
-        await connection.commit();
-        console.log(`Transaction ${transactionId} committed`, {
-          operations: txContext.operations,
-        });
+  constructor(public port: number) {}
 
-        return result;
-      } catch (error) {
-        await connection.rollback();
-        console.log(`Transaction ${transactionId} rolled back`, {
-          operations: txContext.operations,
-          error: error.message,
-        });
-        throw error;
-      } finally {
-        await connection.close();
+  start(): void {
+    console.log(`Server listening on port ${this.port}`);
+  }
+
+  addConnection(id: string): void {
+    this.connections.add(id);
+    console.log(`Connection ${id} added`);
+  }
+
+  async stop(): Promise<void> {
+    console.log("Graceful shutdown starting...");
+
+    // Close all connections
+    for (const conn of this.connections) {
+      console.log(`Closing connection ${conn}`);
+    }
+    this.connections.clear();
+
+    console.log("Server stopped");
+  }
+}
+
+const withServer = acquireUseRelease(
+  // Acquire server
+  effect(async () => {
+    const server = new HttpServer(8080);
+    server.start();
+    return { _tag: "Ok", value: server };
+  }),
+
+  // Use server
+  (server) =>
+    effect(async (env) => {
+      // Simulate handling requests
+      server.addConnection("conn-1");
+      server.addConnection("conn-2");
+
+      // Simulate some work
+      await sleep(1000).unsafeRunPromise({ clock });
+
+      // Maybe an error occurs
+      if (Math.random() < 0.3) {
+        return { _tag: "Err", error: "Request failed" };
       }
-    });
-  }
 
-  async createUser(userData: any, context) {
-    const transaction = context.get("transaction");
-    transaction.operations.push("create_user");
+      return { _tag: "Ok", value: "Requests handled" };
+    }),
 
-    const query = "INSERT INTO users (name, email) VALUES (?, ?)";
-    const result = await transaction.connection.execute(query, [userData.name, userData.email]);
+  // Release (always runs regardless of success/failure)
+  (server, cause) =>
+    effect(async () => {
+      console.log(`Shutdown cause: ${cause}`);
+      await server.stop();
+      return { _tag: "Ok", value: undefined };
+    }),
+);
 
-    console.log(`User created in transaction ${transaction.transactionId}`, {
-      userId: result.insertId,
-    });
-
-    return result.insertId;
-  }
-
-  async createProfile(userId: number, profileData: any, context) {
-    const transaction = context.get("transaction");
-    transaction.operations.push("create_profile");
-
-    const query = "INSERT INTO profiles (user_id, bio, avatar) VALUES (?, ?, ?)";
-    await transaction.connection.execute(query, [userId, profileData.bio, profileData.avatar]);
-
-    console.log(`Profile created in transaction ${transaction.transactionId}`, {
-      userId,
-    });
-  }
-
-  async sendWelcomeEmail(userId: number, context) {
-    const transaction = context.get("transaction");
-    transaction.operations.push("send_welcome_email");
-
-    // This could fail and cause the entire transaction to rollback
-    await this.emailService.send({
-      to: await this.getUserEmail(userId, context),
-      template: "welcome",
-      data: { userId },
-    });
-
-    console.log(`Welcome email sent in transaction ${transaction.transactionId}`, {
-      userId,
-    });
-  }
-}
-
-// Usage: All-or-nothing user creation
-const dbService = new DatabaseService();
-
-try {
-  const result = await dbService.withTransaction(async (context) => {
-    const userId = await dbService.createUser(
-      {
-        name: "John Doe",
-        email: "john@example.com",
-      },
-      context,
-    );
-
-    await dbService.createProfile(
-      userId,
-      {
-        bio: "Software developer",
-        avatar: "avatar.jpg",
-      },
-      context,
-    );
-
-    await dbService.sendWelcomeEmail(userId, context);
-
-    return { userId, success: true };
-  });
-
-  console.log("User creation completed:", result);
-} catch (error) {
-  console.log("User creation failed, everything rolled back:", error.message);
-}
+const result = await withServer.unsafeRunPromise({ clock });
+// Output:
+// Server listening on port 8080
+// Connection conn-1 added
+// Connection conn-2 added
+// Shutdown cause: ok (or error)
+// Graceful shutdown starting...
+// Closing connection conn-1
+// Closing connection conn-2
+// Server stopped
 ```
 
-### Concurrent Operations with Coordination
+Resource management with cause propagation. Cleanup code knows whether it's running due to success, failure, or interruption.
+
+## The Full Power: Distributed System Orchestration
 
 ```typescript
-class DataAggregator {
-  async aggregateUserData(userId: string) {
-    return runEffect(async (context) => {
-      context.set("userId", userId);
-      context.set("operation", "user_data_aggregation");
-      context.set("startTime", Date.now());
+import { effect, race, all, sleep, acquireUseRelease } from "@phyxius/effect";
 
-      // Fetch data from multiple sources concurrently
-      // All operations share the same context
-      const [profile, orders, preferences, activity] = await Promise.all([
-        this.fetchUserProfile(context),
-        this.fetchUserOrders(context),
-        this.fetchUserPreferences(context),
-        this.fetchUserActivity(context),
-      ]);
+// Distributed cache with automatic failover
+class CacheNode {
+  constructor(
+    public id: string,
+    public healthy: boolean = true,
+  ) {}
 
-      // Process the aggregated data
-      return await this.buildUserSummary(
-        {
-          profile,
-          orders,
-          preferences,
-          activity,
-        },
-        context,
-      );
-    });
+  async get(key: string): Promise<string | null> {
+    if (!this.healthy) throw new Error(`Node ${this.id} is down`);
+    await sleep(Math.random() * 100).unsafeRunPromise({ clock });
+    return Math.random() < 0.7 ? `value-${key}` : null;
   }
 
-  private async fetchUserProfile(context) {
-    const userId = context.get("userId");
-    const operation = context.get("operation");
-
-    console.log(`Fetching profile for ${userId} in ${operation}`);
-
-    // Simulate async operation
-    await new Promise((resolve) => setTimeout(resolve, 50));
-
-    return {
-      id: userId,
-      name: "John Doe",
-      email: "john@example.com",
-    };
+  async set(key: string, value: string): Promise<void> {
+    if (!this.healthy) throw new Error(`Node ${this.id} is down`);
+    await sleep(Math.random() * 50).unsafeRunPromise({ clock });
   }
 
-  private async fetchUserOrders(context) {
-    const userId = context.get("userId");
-
-    console.log(`Fetching orders for ${userId}`);
-
-    await new Promise((resolve) => setTimeout(resolve, 100));
-
-    return [
-      { id: "order1", amount: 99.99 },
-      { id: "order2", amount: 149.99 },
-    ];
+  markDown(): void {
+    this.healthy = false;
   }
-
-  private async fetchUserPreferences(context) {
-    const userId = context.get("userId");
-
-    console.log(`Fetching preferences for ${userId}`);
-
-    await new Promise((resolve) => setTimeout(resolve, 75));
-
-    return {
-      theme: "dark",
-      notifications: true,
-      language: "en",
-    };
-  }
-
-  private async fetchUserActivity(context) {
-    const userId = context.get("userId");
-
-    console.log(`Fetching activity for ${userId}`);
-
-    await new Promise((resolve) => setTimeout(resolve, 25));
-
-    return {
-      lastLogin: Date.now() - 86400000,
-      sessionsThisWeek: 5,
-      totalSessions: 127,
-    };
-  }
-
-  private async buildUserSummary(data: any, context) {
-    const userId = context.get("userId");
-    const startTime = context.get("startTime");
-    const duration = Date.now() - startTime;
-
-    console.log(`Building summary for ${userId} (took ${duration}ms)`);
-
-    return {
-      userId,
-      summary: {
-        name: data.profile.name,
-        email: data.profile.email,
-        totalOrders: data.orders.length,
-        totalSpent: data.orders.reduce((sum, order) => sum + order.amount, 0),
-        preferences: data.preferences,
-        recentActivity: data.activity.lastLogin,
-        engagement: data.activity.sessionsThisWeek > 3 ? "high" : "low",
-      },
-      metadata: {
-        generatedAt: Date.now(),
-        processingTime: duration,
-      },
-    };
+  markUp(): void {
+    this.healthy = true;
   }
 }
 
-// Usage
-const aggregator = new DataAggregator();
-const userSummary = await aggregator.aggregateUserData("user123");
-console.log("User summary:", userSummary);
-```
+class DistributedCache {
+  constructor(private nodes: CacheNode[]) {}
 
-### Resource Management with Cleanup
-
-```typescript
-class FileProcessor {
-  async processFiles(filePaths: string[]) {
-    return runEffect(async (context) => {
-      context.set("operation", "file_processing");
-      context.set("totalFiles", filePaths.length);
-
-      const resources: any[] = [];
-      context.set("resources", resources);
-
-      try {
-        // Process files with automatic resource cleanup
-        const results = await Promise.all(filePaths.map((path) => this.processFile(path, context)));
-
-        return {
-          processed: results.length,
-          results,
-        };
-      } finally {
-        // Cleanup happens automatically when Effect completes
-        await this.cleanupResources(context);
-      }
-    });
-  }
-
-  private async processFile(filePath: string, context) {
-    const resources = context.get("resources");
-
-    console.log(`Processing file: ${filePath}`);
-
-    // Open file handle
-    const fileHandle = await this.openFile(filePath);
-    resources.push({ type: "file", handle: fileHandle, path: filePath });
-
-    // Create temp directory
-    const tempDir = await this.createTempDir();
-    resources.push({ type: "tempDir", path: tempDir });
-
-    // Process the file
-    const data = await this.readFile(fileHandle);
-    const processed = await this.transformData(data, context);
-    const outputPath = await this.writeProcessedFile(processed, tempDir);
-
-    return {
-      inputPath: filePath,
-      outputPath,
-      size: data.length,
-    };
-  }
-
-  private async cleanupResources(context) {
-    const resources = context.get("resources") || [];
-
-    console.log(`Cleaning up ${resources.length} resources`);
-
-    // Cleanup in reverse order
-    for (const resource of resources.reverse()) {
-      try {
-        switch (resource.type) {
-          case "file":
-            await resource.handle.close();
-            console.log(`Closed file: ${resource.path}`);
-            break;
-
-          case "tempDir":
-            await this.removeDirectory(resource.path);
-            console.log(`Removed temp directory: ${resource.path}`);
-            break;
+  // Get with failover - try all nodes, return first success
+  get(key: string): Effect<string, string> {
+    const attempts = this.nodes.map((node) =>
+      effect(async () => {
+        const value = await node.get(key);
+        if (value === null) {
+          return { _tag: "Err", error: `Cache miss on ${node.id}` };
         }
-      } catch (error) {
-        console.error(`Failed to cleanup ${resource.type}:`, error.message);
-      }
-    }
+        return { _tag: "Ok", value };
+      }).catch((error) => effect(async () => ({ _tag: "Err", error: `${node.id}: ${error}` }))),
+    );
+
+    return race(attempts);
   }
 
-  // Stub implementations
-  private async openFile(path: string) {
-    return { path, close: async () => {} };
+  // Set with replication - write to all healthy nodes
+  set(key: string, value: string): Effect<string, void> {
+    const writes = this.nodes
+      .filter((node) => node.healthy)
+      .map((node) =>
+        effect(async () => {
+          await node.set(key, value);
+          return { _tag: "Ok", value: undefined };
+        }),
+      );
+
+    return all(writes).map(() => undefined);
   }
 
-  private async createTempDir() {
-    return `/tmp/process-${Date.now()}`;
-  }
+  // Health check with automatic recovery
+  healthCheck(): Effect<never, void> {
+    return effect(async (env) => {
+      while (!env.cancel.isCanceled()) {
+        // Check each node
+        for (const node of this.nodes) {
+          try {
+            await node.get("health-check");
+            if (!node.healthy) {
+              console.log(`Node ${node.id} recovered`);
+              node.markUp();
+            }
+          } catch {
+            if (node.healthy) {
+              console.log(`Node ${node.id} failed`);
+              node.markDown();
+            }
+          }
+        }
 
-  private async readFile(handle: any) {
-    return `file content from ${handle.path}`;
-  }
-
-  private async transformData(data: string, context) {
-    const operation = context.get("operation");
-    return `${data} - processed by ${operation}`;
-  }
-
-  private async writeProcessedFile(data: string, tempDir: string) {
-    const outputPath = `${tempDir}/output.txt`;
-    // Write file...
-    return outputPath;
-  }
-
-  private async removeDirectory(path: string) {
-    // Remove directory...
-  }
-}
-
-// Usage
-const processor = new FileProcessor();
-
-try {
-  const result = await processor.processFiles(["/path/to/file1.txt", "/path/to/file2.txt", "/path/to/file3.txt"]);
-
-  console.log("Processing completed:", result);
-  // All resources are automatically cleaned up
-} catch (error) {
-  console.error("Processing failed:", error.message);
-  // Resources are still cleaned up even on failure
-}
-```
-
-### HTTP Request Context
-
-```typescript
-class APIClient {
-  async makeRequest(url: string, options: any = {}) {
-    return runEffect(async (context) => {
-      const requestId = generateId();
-      const startTime = Date.now();
-
-      context.set("requestId", requestId);
-      context.set("url", url);
-      context.set("startTime", startTime);
-      context.set("retryCount", 0);
-
-      return await this.executeRequest(context, options);
-    });
-  }
-
-  private async executeRequest(context, options) {
-    const requestId = context.get("requestId");
-    const url = context.get("url");
-    const retryCount = context.get("retryCount");
-
-    console.log(`Request ${requestId}: ${url} (attempt ${retryCount + 1})`);
-
-    try {
-      // Add request headers with context
-      const headers = {
-        ...options.headers,
-        "X-Request-ID": requestId,
-        "X-Retry-Count": retryCount.toString(),
-      };
-
-      const response = await fetch(url, {
-        ...options,
-        headers,
-      });
-
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+        // Wait before next check
+        await sleep(5000).unsafeRunPromise({ clock });
       }
 
-      const data = await response.json();
-
-      await this.logSuccess(context, response);
-      return data;
-    } catch (error) {
-      return await this.handleError(context, error, options);
-    }
-  }
-
-  private async handleError(context, error, options) {
-    const requestId = context.get("requestId");
-    const retryCount = context.get("retryCount");
-    const maxRetries = options.maxRetries || 3;
-
-    console.error(`Request ${requestId} failed:`, error.message);
-
-    if (retryCount < maxRetries && this.isRetriableError(error)) {
-      console.log(`Request ${requestId}: retrying (${retryCount + 1}/${maxRetries})`);
-
-      context.set("retryCount", retryCount + 1);
-
-      // Exponential backoff
-      const delay = Math.pow(2, retryCount) * 1000;
-      await new Promise((resolve) => setTimeout(resolve, delay));
-
-      return await this.executeRequest(context, options);
-    }
-
-    await this.logFailure(context, error);
-    throw error;
-  }
-
-  private async logSuccess(context, response) {
-    const requestId = context.get("requestId");
-    const url = context.get("url");
-    const startTime = context.get("startTime");
-    const retryCount = context.get("retryCount");
-    const duration = Date.now() - startTime;
-
-    console.log(`Request ${requestId} succeeded`, {
-      url,
-      status: response.status,
-      duration,
-      retries: retryCount,
+      return { _tag: "Ok", value: undefined };
     });
-  }
-
-  private async logFailure(context, error) {
-    const requestId = context.get("requestId");
-    const url = context.get("url");
-    const startTime = context.get("startTime");
-    const retryCount = context.get("retryCount");
-    const duration = Date.now() - startTime;
-
-    console.error(`Request ${requestId} failed permanently`, {
-      url,
-      error: error.message,
-      duration,
-      retries: retryCount,
-    });
-  }
-
-  private isRetriableError(error) {
-    // Retry on network errors and 5xx responses
-    return error.message.includes("fetch") || error.message.includes("HTTP 5");
   }
 }
 
-// Usage
-const client = new APIClient();
+// Service orchestration with graceful shutdown
+const runCacheService = acquireUseRelease(
+  // Acquire: Initialize the distributed cache
+  effect(async () => {
+    const nodes = [new CacheNode("node-1"), new CacheNode("node-2"), new CacheNode("node-3")];
 
-const userData = await client.makeRequest("https://api.example.com/users/123", {
-  method: "GET",
-  maxRetries: 2,
-});
+    const cache = new DistributedCache(nodes);
+    console.log("Distributed cache initialized");
 
-console.log("User data:", userData);
-```
+    return { _tag: "Ok", value: cache };
+  }),
 
-## API Reference
+  // Use: Run the cache service
+  (cache) =>
+    effect(async (env) => {
+      // Start health check in background
+      const healthFiber = await cache.healthCheck().fork().unsafeRunPromise({ clock });
 
-### Running Effects
+      // Simulate cache operations
+      for (let i = 0; i < 10 && !env.cancel.isCanceled(); i++) {
+        // Try to get value
+        const getResult = await cache.get(`key-${i}`).unsafeRunPromise({ clock });
 
-```typescript
-// Run an Effect with automatic context management
-const result = await runEffect(async (context) => {
-  // Your async operation with context
-  return someValue;
-});
-```
+        if (getResult._tag === "Err") {
+          // Cache miss - set the value
+          const setResult = await cache.set(`key-${i}`, `data-${i}`).unsafeRunPromise({ clock });
 
-### Context Methods
+          if (setResult._tag === "Ok") {
+            console.log(`Cached key-${i}`);
+          } else {
+            console.log(`Failed to cache key-${i}: ${setResult.error}`);
+          }
+        } else {
+          console.log(`Cache hit: key-${i} = ${getResult.value}`);
+        }
 
-```typescript
-// Set a value in the context
-context.set(key: string, value: any): void;
+        await sleep(1000).unsafeRunPromise({ clock });
+      }
 
-// Get a value from the context
-context.get(key: string): any;
+      // Clean shutdown of health check
+      await healthFiber.interrupt().unsafeRunPromise({ clock });
 
-// Check if a key exists
-context.has(key: string): boolean;
+      return { _tag: "Ok", value: "Service completed successfully" };
+    }),
 
-// Get all context keys
-context.keys(): string[];
-```
+  // Release: Graceful shutdown
+  (cache, cause) =>
+    effect(async () => {
+      console.log(`Cache service shutdown: ${cause}`);
+      // Drain pending operations, save state, etc.
+      return { _tag: "Ok", value: undefined };
+    }),
+);
 
-### Context Interface
+// Run the service with timeout and interruption support
+const serviceWithTimeout = runCacheService.timeout(30000);
 
-```typescript
-interface Context {
-  set(key: string, value: any): void;
-  get<T = any>(key: string): T;
-  has(key: string): boolean;
-  keys(): string[];
+const result = await serviceWithTimeout.unsafeRunPromise({ clock });
+
+if (result._tag === "Ok") {
+  console.log("Service completed:", result.value);
+} else if (result.error._tag === "Timeout") {
+  console.log("Service timed out");
+} else {
+  console.log("Service failed:", result.error);
 }
 ```
 
-## Testing Patterns
+This is the full power of Effect. Distributed systems with failover, health checks, replication, graceful shutdown, timeout handling, and perfect resource cleanup. Every operation is interruptible, every resource is managed, every error is explicit.
 
-### Testing Context Propagation
-
-```typescript
-describe("ContextPropagation", () => {
-  it("should propagate context through operation chain", async () => {
-    const result = await runEffect(async (context) => {
-      context.set("userId", "test-user");
-
-      return await operationThatUsesContext(context);
-    });
-
-    expect(result.userId).toBe("test-user");
-  });
-});
-```
-
-### Testing Resource Cleanup
+## Interface
 
 ```typescript
-describe("ResourceCleanup", () => {
-  it("should clean up resources on success", async () => {
-    const resources: any[] = [];
+interface Effect<E, A> {
+  unsafeRunPromise(env?: Partial<EffectEnv>): Promise<Result<E, A>>;
+  map<B>(fn: (value: A) => B): Effect<E, B>;
+  flatMap<E2, B>(fn: (value: A) => Effect<E2, B>): Effect<E | E2, B>;
+  catch<E2, B>(fn: (error: E) => Effect<E2, B>): Effect<E2, A | B>;
+  timeout(ms: number): Effect<E | { _tag: "Timeout" }, A>;
+  fork(): Effect<never, Fiber<E, A>>;
+  retry(policy: RetryPolicy): Effect<E | { _tag: "Interrupted" }, A>;
+}
 
-    await runEffect(async (context) => {
-      context.set("resources", resources);
+type Result<E, A> = { _tag: "Ok"; value: A } | { _tag: "Err"; error: E };
 
-      // Create resources
-      resources.push("resource1");
-      resources.push("resource2");
+interface EffectEnv {
+  clock?: Clock;
+  cancel: CancelToken;
+  scope: Scope;
+}
 
-      return "success";
-    });
-
-    // Test that cleanup happened
-    // (In real code, you'd verify resources were properly closed)
-  });
-});
+interface Fiber<E, A> {
+  join(): Effect<E, A>;
+  interrupt(): Effect<never, void>;
+  poll(): Effect<never, Result<E, A> | undefined>;
+}
 ```
 
-### Testing Error Handling
+## Installation
 
-```typescript
-describe("ErrorHandling", () => {
-  it("should handle errors with context", async () => {
-    await expect(
-      runEffect(async (context) => {
-        context.set("operation", "test");
-
-        throw new Error("Test error");
-      }),
-    ).rejects.toThrow("Test error");
-
-    // Verify error was logged with proper context
-  });
-});
+```bash
+npm install @phyxius/effect @phyxius/clock
 ```
 
----
+## What You Get
 
-Effect provides structured concurrency and context propagation for reliable async programming. By ensuring that contexts flow through operation chains and resources are properly managed, it eliminates many common pitfalls in async JavaScript while providing the observability needed for debugging complex systems.
+**Async that can't leak.** Structured concurrency guarantees cleanup. No zombie operations, no resource leaks.
+
+**Resources that clean up.** RAII pattern with cause propagation. Acquire/use/release cycle always completes.
+
+**Concurrency you can reason about.** Fibers, cancellation, timeouts, race conditions - all explicit and composable.
+
+**Errors you can handle.** No surprise exceptions. `Result` types make success and failure explicit.
+
+**Systems that scale.** From simple async operations to distributed orchestration. One abstraction, infinite scale.
+
+Effect solves async. Everything else builds on that foundation.

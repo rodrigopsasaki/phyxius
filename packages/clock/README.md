@@ -1,530 +1,431 @@
 # Clock
 
-**Deterministic time control for reliable, testable applications**
+**Time you can reason about. Time you can test. Time that works.**
 
-## What is Clock?
+Time is the root of all chaos in software. Race conditions, flaky tests, production bugs that only happen "sometimes" - they all trace back to time being unpredictable.
 
-Clock provides deterministic time control through two implementations: `SystemClock` for real-world time and `ControlledClock` for tests and simulations. Instead of calling `Date.now()` directly, your code uses a clock interface that can be controlled and manipulated.
+Clock fixes this. Two implementations, same interface. Real time for production, controlled time for tests.
 
-The `clock.now()` method returns an `Instant` object with two time values:
-
-- **`wallMs`** - Wall clock time (can jump due to system clock changes)
-- **`monoMs`** - Monotonic time (never goes backwards, perfect for measuring intervals)
-
-## Why does Clock exist?
-
-Time-dependent code is notoriously difficult to test and reason about. Race conditions, timing-dependent bugs, and flaky tests often stem from uncontrolled time progression. Clock solves this by making time explicit and controllable.
-
-**The Problem:**
+## The Problem
 
 ```typescript
-// Hard to test, non-deterministic
-class SessionManager {
-  private sessions = new Map<string, { expires: number }>();
+// This is broken. You just don't know it yet.
+setTimeout(() => {
+  console.log("I hope this runs when I think it does");
+}, 1000);
 
-  createSession(userId: string): string {
-    const sessionId = generateId();
-    this.sessions.set(sessionId, {
-      expires: Date.now() + 30 * 60 * 1000, // 30 minutes
-    });
-    return sessionId;
-  }
-
-  cleanupExpired() {
-    const now = Date.now();
-    for (const [id, session] of this.sessions) {
-      if (session.expires < now) {
-        this.sessions.delete(id);
-      }
-    }
-  }
-}
-
-// How do you test this? Mock Date.now()? Wait 30 minutes?
+// In tests? Forget about it.
+it("should timeout after 1 second", async () => {
+  // Actually waits 1 second. Every. Single. Time.
+  await new Promise((resolve) => setTimeout(resolve, 1000));
+  expect(something).toBe(true);
+});
 ```
 
-**The Solution:**
+The real world has NTP corrections, system sleep, clock drift, and a thousand other ways time can surprise you. Your code assumes time is linear. It's not.
 
-```typescript
-// Deterministic, fully testable
-class SessionManager {
-  constructor(private clock: Clock) {}
-
-  createSession(userId: string): string {
-    const sessionId = generateId();
-    this.sessions.set(sessionId, {
-      expires: this.clock.now().wallMs + 30 * 60 * 1000,
-    });
-    return sessionId;
-  }
-
-  cleanupExpired() {
-    const now = this.clock.now().wallMs;
-    for (const [id, session] of this.sessions) {
-      if (session.expires < now) {
-        this.sessions.delete(id);
-      }
-    }
-  }
-}
-```
-
-## Why is Clock good?
-
-### 1. **Deterministic Testing**
-
-Control time progression in tests for reliable, fast test suites.
-
-### 2. **Replay and Debugging**
-
-Reproduce time-dependent bugs by replaying with the same time sequence.
-
-### 3. **Simulation and Load Testing**
-
-Speed up or slow down time to test long-running processes quickly.
-
-### 4. **Clear Dependencies**
-
-Makes time dependencies explicit in your code architecture.
-
-## Non-Goals
-
-Clock is **only** about controlling the progression of time. It deliberately does not handle:
-
-- **No timezones or DST handling** - Use date-fns, Luxon, or Temporal for timezone-aware operations
-- **No date parsing or formatting** - Clock works with millisecond timestamps, nothing more
-- **No implicit conversion** between monotonic and wall time - You explicitly choose which time to use
-- **No hidden globals** - Time flows from the `Clock` instance you pass around, making dependencies explicit
-
-Clock abstracts "what time is it now?" so you can control it. That's all.
-
-## How Clock Differs from Other Solutions
-
-**vs. `jest.useFakeTimers()`:**
-
-- Jest replaces global timers system-wide, Clock uses dependency injection
-- Jest can cause interference between tests, Clock instances are isolated
-- Jest requires manual `.tick()` calls, Clock can advance time automatically
-- Clock separates wall time from monotonic time for more realistic testing
-
-**vs. Manual mocks:**
-
-- Clock provides a complete time abstraction, not just `Date.now()` replacement
-- Clock includes timer management (`sleep`, `interval`, `deadline`)
-- Clock maintains consistent relationships between wall time and monotonic time
-
-## Which Time Do I Use?
-
-Clock provides two time values in every `Instant`. Here's when to use each:
-
-### Use `wallMs` for:
-
-- **TTLs and expiration**: Session expiry, cache expiration, token validity
-- **Business rules tied to human time**: "Orders placed after 5 PM ship tomorrow"
-- **Scheduling and calendar operations**: "Run this job at 3 AM daily"
-- **Logging and audit trails**: When events actually happened in the real world
-- **API rate limiting**: "100 requests per hour" based on wall clock time
-
-### Use `monoMs` for:
-
-- **Performance measurement**: Timing how long operations take
-- **Timeouts and intervals**: "Retry after 5 seconds", "Poll every 10ms"
-- **SLA monitoring**: Measuring response times, uptime calculations
-- **Deadlines relative to now**: "Timeout this request in 30 seconds"
-- **Animation and game loops**: Smooth, consistent timing that can't go backwards
-
-### Quick Examples:
-
-```typescript
-const clock = createSystemClock();
-const now = clock.now();
-
-// Cache expiration (wall time - can be affected by clock adjustments)
-const expiresAt = now.wallMs + 30 * 60 * 1000; // 30 minutes from now
-
-// Performance measurement (monotonic - never affected by clock adjustments)
-const start = now.monoMs;
-// ... do work ...
-const duration = clock.now().monoMs - start; // Always positive, never jumps
-```
-
-## Usage Examples
-
-### Basic Usage
-
-```typescript
-import { createSystemClock, createControlledClock, ms } from "@phyxius/clock";
-
-// Production: real time
-const clock = createSystemClock();
-console.log(clock.now()); // { wallMs: 1704063600000, monoMs: 42.1 }
-
-// Testing: controlled time (defaults to 0 for deterministic tests)
-const testClock = createControlledClock({ initialTime: 1000 });
-console.log(testClock.now()); // { wallMs: 1000, monoMs: 1000 }
-
-// Use ms() helper to avoid casting noise
-testClock.advanceBy(ms(500));
-console.log(testClock.now()); // { wallMs: 1500, monoMs: 1500 }
-```
-
-### Interval Cancellation
+## The Solution
 
 ```typescript
 import { createSystemClock, ms } from "@phyxius/clock";
 
 const clock = createSystemClock();
-let count = 0;
 
-// Create an interval
-const handle = clock.interval(ms(1000), () => {
-  count++;
-  console.log(`Tick ${count}`);
+// Two times: wall time (can jump) and mono time (never backwards)
+const now = clock.now();
+console.log("Wall time:", now.wallMs); // Can jump due to NTP
+console.log("Mono time:", now.monoMs); // Monotonic, perfect for intervals
+```
 
-  // Cancel after 5 ticks
-  if (count >= 5) {
-    handle.cancel();
-    console.log("Interval cancelled");
-  }
+Clock gives you **two time tracks**:
+
+- **Wall time** (`wallMs`) - Real world time. Can jump forwards or backwards due to NTP corrections, timezone changes, manual clock adjustments.
+- **Monotonic time** (`monoMs`) - Interval time. Never goes backwards. Perfect for measuring durations.
+
+## Start Simple: Basic Sleep
+
+```typescript
+import { createSystemClock, ms } from "@phyxius/clock";
+
+const clock = createSystemClock();
+
+// Sleep for 100ms
+await clock.sleep(ms(100));
+
+// That's it. No more setTimeout.
+```
+
+The `ms()` function creates a branded `Millis` type. This prevents you from accidentally mixing milliseconds with other numbers:
+
+```typescript
+const delay = ms(1000);
+const count = 42;
+
+await clock.sleep(delay); // ✅ Works
+await clock.sleep(count); // ❌ Type error - can't mix units
+```
+
+## Add Deadlines: Wall Time Targets
+
+```typescript
+const clock = createSystemClock();
+
+// Schedule something for exactly 3pm
+const target = { wallMs: new Date("2024-01-01T15:00:00Z").getTime() };
+await clock.deadline(target);
+
+console.log("It's 3pm!");
+```
+
+Deadlines use wall time because you care about _when_ something happens in the real world, not how much time has elapsed.
+
+## Add Intervals: Repeating Actions
+
+```typescript
+const clock = createSystemClock();
+
+// Run something every 5 seconds
+const handle = clock.interval(ms(5000), () => {
+  console.log("Tick", clock.now().wallMs);
 });
 
-// Or cancel from outside
-setTimeout(() => {
-  handle.cancel();
-  console.log("Cancelled early");
-}, 3000);
+// Later, stop it
+handle.cancel();
 ```
 
-### Rate Limiting
+Intervals use monotonic time internally, so they never drift or accumulate timing errors. If a callback takes longer than the interval, the next one waits - no overlapping execution.
+
+## Observability: See Everything
 
 ```typescript
-class RateLimiter {
-  private attempts = new Map<string, number[]>();
+const clock = createSystemClock({
+  emit: (event) => console.log("Clock event:", event),
+});
 
-  constructor(
-    private clock: Clock,
-    private windowMs: number = 60000,
-    private maxAttempts: number = 10,
-  ) {}
+await clock.sleep(ms(100));
+// Clock event: { type: "time:sleep:start", durationMs: 100, at: { ... } }
+// Clock event: { type: "time:sleep:end", durationMs: 100, actualMs: 102, at: { ... } }
 
-  isAllowed(key: string): boolean {
-    const now = this.clock.now().wallMs;
-    const attempts = this.attempts.get(key) || [];
+const handle = clock.interval(ms(1000), () => {
+  // Do work
+});
+// Clock event: { type: "time:interval:set", intervalMs: 1000, at: { ... } }
+// Clock event: { type: "time:interval:tick", intervalMs: 1000, tick: 1, at: { ... } }
+// Clock event: { type: "time:interval:tick", intervalMs: 1000, tick: 2, at: { ... } }
 
-    // Remove old attempts outside window
-    const recentAttempts = attempts.filter((time) => now - time < this.windowMs);
-
-    if (recentAttempts.length >= this.maxAttempts) {
-      return false;
-    }
-
-    // Record this attempt
-    recentAttempts.push(now);
-    this.attempts.set(key, recentAttempts);
-    return true;
-  }
-}
-
-// Test rate limiting instantly
-const testClock = createControlledClock({ initialTime: 0 });
-const rateLimiter = new RateLimiter(testClock, 1000, 3);
-
-expect(rateLimiter.isAllowed("user1")).toBe(true);
-expect(rateLimiter.isAllowed("user1")).toBe(true);
-expect(rateLimiter.isAllowed("user1")).toBe(true);
-expect(rateLimiter.isAllowed("user1")).toBe(false); // Rate limited
-
-// Fast-forward past window
-testClock.advanceBy(ms(1001));
-expect(rateLimiter.isAllowed("user1")).toBe(true); // Allowed again
+handle.cancel();
+// Clock event: { type: "time:interval:cancel", intervalMs: 1000, ticks: 2, at: { ... } }
 ```
 
-### Cache with TTL
+Every operation emits structured events. Perfect for debugging, monitoring, and understanding what your time-dependent code is actually doing.
+
+## Testing: Control Time
 
 ```typescript
-class TTLCache<T> {
-  private cache = new Map<string, { value: T; expires: number }>();
+import { createControlledClock, ms } from "@phyxius/clock";
 
-  constructor(
-    private clock: Clock,
-    private defaultTTL: number = 300000,
-  ) {}
+const clock = createControlledClock({ initialTime: 0 });
 
-  set(key: string, value: T, ttl?: number): void {
-    const expires = this.clock.now().wallMs + (ttl ?? this.defaultTTL);
-    this.cache.set(key, { value, expires });
-  }
+// Start at time 0
+console.log(clock.now().monoMs); // 0
 
-  get(key: string): T | undefined {
-    const entry = this.cache.get(key);
-    if (!entry) return undefined;
+// Jump forward instantly
+clock.advanceBy(ms(1000));
+console.log(clock.now().monoMs); // 1000
 
-    if (this.clock.now().wallMs > entry.expires) {
-      this.cache.delete(key);
-      return undefined;
-    }
-
-    return entry.value;
-  }
-}
-
-// Test cache expiration without waiting
-const testClock = createControlledClock({ initialTime: 0 });
-const cache = new TTLCache(testClock, 1000);
-cache.set("key", "value");
-
-expect(cache.get("key")).toBe("value");
-
-testClock.advanceBy(ms(999));
-expect(cache.get("key")).toBe("value"); // Still valid
-
-testClock.advanceBy(ms(2));
-expect(cache.get("key")).toBeUndefined(); // Expired
+// Or jump to a specific time
+clock.advanceTo(5000);
+console.log(clock.now().monoMs); // 5000
 ```
 
-### Retry with Backoff
+No more `setTimeout` in tests. No more waiting. Jump to any moment instantly.
+
+## Advanced Testing: Timer Queues
 
 ```typescript
-class RetryManager {
-  constructor(private clock: Clock) {}
+const clock = createControlledClock();
 
-  async withRetry<T>(operation: () => Promise<T>, maxAttempts: number = 3, baseDelayMs: number = 1000): Promise<T> {
-    let attempt = 1;
+// Schedule multiple things
+const promises = [clock.sleep(ms(100)), clock.sleep(ms(200)), clock.sleep(ms(150))];
 
-    while (attempt <= maxAttempts) {
-      try {
-        return await operation();
-      } catch (error) {
-        if (attempt === maxAttempts) throw error;
+// Nothing has resolved yet
+console.log(clock.getPendingTimerCount()); // 3
 
-        const delay = baseDelayMs * Math.pow(2, attempt - 1);
-        await this.delay(delay);
-        attempt++;
-      }
+// Advance to 150ms - two timers fire
+clock.advanceTo(150);
+console.log(clock.getPendingTimerCount()); // 1
+
+// Finish the last one
+clock.advanceTo(200);
+console.log(clock.getPendingTimerCount()); // 0
+
+// All promises are now resolved
+const results = await Promise.all(promises);
+```
+
+The controlled clock maintains a sorted timer queue. When you advance time, all due timers fire in the correct order, instantly.
+
+## Wall Time Jumps: Simulate NTP
+
+```typescript
+const clock = createControlledClock({ initialTime: 1000 });
+
+console.log(clock.now().wallMs); // 1000
+console.log(clock.now().monoMs); // 1000
+
+// Simulate NTP correction - wall time jumps backwards
+clock.jumpWallTime(500);
+
+console.log(clock.now().wallMs); // 500 (jumped backwards)
+console.log(clock.now().monoMs); // 1000 (unchanged)
+
+// Advance monotonic time
+clock.advanceBy(ms(100));
+
+console.log(clock.now().wallMs); // 600 (500 + 100)
+console.log(clock.now().monoMs); // 1100 (1000 + 100)
+```
+
+Wall time can jump independently of monotonic time. This lets you test how your code handles NTP corrections, timezone changes, and manual clock adjustments.
+
+## DST Protection: Duration Tracking That Works
+
+```typescript
+const clock = createControlledClock();
+
+// Start tracking a process at 1:30 AM on DST transition day
+const startWall = 1_699_156_200_000; // 1:30 AM, Nov 5, 2023 (before fall-back)
+const startMono = 10_000;
+
+clock.jumpWallTime(startWall);
+clock.advanceTo(startMono);
+
+const start = clock.now();
+console.log("Process started:");
+console.log("  Wall time:", new Date(start.wallMs).toISOString());
+console.log("  Mono time:", start.monoMs);
+
+// Process runs for 2 hours of monotonic time
+clock.advanceBy(ms(2 * 60 * 60 * 1000)); // 2 hours
+
+const end = clock.now();
+
+// Calculate duration using wall time (WRONG!)
+const wallDuration = end.wallMs - start.wallMs;
+
+// Calculate duration using monotonic time (CORRECT!)
+const monoDuration = end.monoMs - start.monoMs;
+
+console.log("\nAfter 2 hours of real work:");
+console.log("  Wall time:", new Date(end.wallMs).toISOString());
+console.log("  Mono time:", end.monoMs);
+
+console.log("\nDuration calculations:");
+console.log("  Wall time duration:", wallDuration / 1000 / 60, "minutes");
+console.log("  Mono time duration:", monoDuration / 1000 / 60, "minutes");
+
+// Simulate DST fall-back during the process
+// Wall time jumps back 1 hour at 2:00 AM
+clock.jumpWallTime(end.wallMs - 60 * 60 * 1000); // Jump back 1 hour
+
+const afterDST = clock.now();
+console.log("\nAfter DST fall-back:");
+console.log("  Wall time:", new Date(afterDST.wallMs).toISOString());
+console.log("  Mono time:", afterDST.monoMs);
+
+// Recalculate durations
+const wallDurationAfterDST = afterDST.wallMs - start.wallMs;
+const monoDurationAfterDST = afterDST.monoMs - start.monoMs;
+
+console.log("\nDuration after DST shift:");
+console.log("  Wall time duration:", wallDurationAfterDST / 1000 / 60, "minutes"); // 60 minutes (WRONG!)
+console.log("  Mono time duration:", monoDurationAfterDST / 1000 / 60, "minutes"); // 120 minutes (CORRECT!)
+```
+
+When DST "falls back," wall time repeats an hour. A 2-hour process that spans the transition would appear to take only 1 hour if you use wall time for duration. Monotonic time never goes backwards, so it gives you the true elapsed time.
+
+## Perfect Intervals: No Drift, No Overlap
+
+```typescript
+const clock = createControlledClock();
+const events: number[] = [];
+
+const handle = clock.interval(ms(100), () => {
+  events.push(clock.now().monoMs);
+});
+
+// Advance by 350ms
+clock.advanceBy(ms(350));
+
+console.log(events); // [100, 200, 300]
+
+// Intervals fire at exactly 100ms intervals
+// No accumulating drift, no timing errors
+```
+
+Even if callbacks take time to execute, the next interval waits. No overlapping, no cascading delays.
+
+## Error Handling: Intervals That Don't Break
+
+```typescript
+const clock = createControlledClock({
+  emit: (event) => {
+    if (event.type === "time:interval:error") {
+      console.log("Callback failed:", event.error);
+    }
+  },
+});
+
+const handle = clock.interval(ms(100), () => {
+  throw new Error("Oops");
+});
+
+// Advance time - the interval keeps running despite errors
+clock.advanceBy(ms(300));
+
+// Still firing - errors don't stop the interval
+console.log(clock.getPendingTimerCount()); // 1 (still active)
+```
+
+Intervals are resilient. If a callback throws or rejects, the interval keeps going. Errors are emitted as events for observability.
+
+## Production Monitoring: Real System Timers
+
+```typescript
+import { createSystemClock, ms } from "@phyxius/clock";
+
+const clock = createSystemClock({
+  emit: (event) => {
+    if (event.type === "time:deadline:err") {
+      // We missed a deadline - system is under load
+      console.warn("Deadline missed:", {
+        target: event.targetMs,
+        actual: event.actualMs,
+        drift: event.driftMs,
+      });
     }
 
-    throw new Error("Max attempts reached");
+    if (event.type === "time:interval:tick") {
+      // Interval fired - system is healthy
+      metrics.increment("interval.tick", {
+        interval: event.intervalMs,
+      });
+    }
+  },
+});
+
+// Monitor critical deadlines
+const deadline = { wallMs: Date.now() + 5000 };
+await clock.deadline(deadline);
+// If this fires late, you'll know via the emit function
+```
+
+In production, the system clock uses real Node.js timers but adds complete observability. See exactly when timers fire, how much they drift, and when deadlines are missed.
+
+## The Full Power: Time-Based State Machines
+
+```typescript
+import { createControlledClock, ms } from "@phyxius/clock";
+
+class ConnectionManager {
+  private clock: Clock;
+  private reconnectHandle?: TimerHandle;
+  private heartbeatHandle?: TimerHandle;
+
+  constructor(clock: Clock) {
+    this.clock = clock;
   }
 
-  private async delay(ms: number): Promise<void> {
-    const start = this.clock.now().monoMs;
-    return new Promise((resolve) => {
-      const check = () => {
-        if (this.clock.now().monoMs - start >= ms) {
-          resolve();
-        } else {
-          setImmediate(check);
-        }
-      };
-      check();
+  async connect() {
+    // Connect with timeout
+    const deadline = {
+      wallMs: this.clock.now().wallMs + 5000,
+    };
+
+    const connection = await Promise.race([
+      this.attemptConnection(),
+      this.clock.deadline(deadline).then(() => Promise.reject(new Error("Connection timeout"))),
+    ]);
+
+    // Start heartbeat
+    this.heartbeatHandle = this.clock.interval(ms(30000), () => {
+      this.sendHeartbeat();
+    });
+
+    return connection;
+  }
+
+  scheduleReconnect() {
+    this.heartbeatHandle?.cancel();
+
+    // Exponential backoff
+    const delay = ms(Math.min(30000, 1000 * Math.pow(2, this.retryCount)));
+
+    this.reconnectHandle = this.clock.interval(delay, () => {
+      this.connect().catch(() => this.scheduleReconnect());
     });
   }
 }
 
-// Test retry logic instantly with ControlledClock
-const testClock = createControlledClock({ initialTime: 0 });
-const retryManager = new RetryManager(testClock);
-let attempts = 0;
+// In tests - control time completely
+const clock = createControlledClock();
+const manager = new ConnectionManager(clock);
 
-const operation = async () => {
-  attempts++;
-  if (attempts < 3) throw new Error("Temporary failure");
-  return "success";
-};
+// Simulate connection timeout
+const connectPromise = manager.connect();
+clock.advanceBy(ms(6000)); // Force timeout
+await expect(connectPromise).rejects.toThrow("Connection timeout");
 
-// In another async context, advance time to trigger retries
-const result = retryManager.withRetry(operation, 3, 100);
-testClock.advanceBy(ms(100)); // First retry
-testClock.advanceBy(ms(200)); // Second retry
-expect(await result).toBe("success");
+// Simulate reconnection backoff
+manager.scheduleReconnect();
+clock.advanceBy(ms(1000)); // First retry
+clock.advanceBy(ms(2000)); // Second retry
+clock.advanceBy(ms(4000)); // Third retry
+// Perfect control over complex timing scenarios
 ```
 
-### Performance Monitoring
+This is where Clock shows its full power. Complex state machines with timeouts, retries, heartbeats, and backoff become completely deterministic and testable.
 
-```typescript
-class PerformanceMonitor {
-  private metrics = new Map<string, number[]>();
-
-  constructor(private clock: Clock) {}
-
-  time<T>(operation: string, fn: () => T): T {
-    const start = this.clock.now().monoMs;
-    try {
-      return fn();
-    } finally {
-      const duration = this.clock.now().monoMs - start;
-      this.recordMetric(operation, duration);
-    }
-  }
-
-  async timeAsync<T>(operation: string, fn: () => Promise<T>): Promise<T> {
-    const start = this.clock.now().monoMs;
-    try {
-      return await fn();
-    } finally {
-      const duration = this.clock.now().monoMs - start;
-      this.recordMetric(operation, duration);
-    }
-  }
-
-  private recordMetric(operation: string, duration: number): void {
-    const metrics = this.metrics.get(operation) || [];
-    metrics.push(duration);
-    this.metrics.set(operation, metrics);
-  }
-
-  getStats(operation: string) {
-    const metrics = this.metrics.get(operation) || [];
-    if (metrics.length === 0) return null;
-
-    return {
-      count: metrics.length,
-      avg: metrics.reduce((a, b) => a + b) / metrics.length,
-      min: Math.min(...metrics),
-      max: Math.max(...metrics),
-    };
-  }
-}
-
-// Test performance monitoring with precise control
-const testClock = createControlledClock({ initialTime: 1000 });
-const monitor = new PerformanceMonitor(testClock);
-
-monitor.time("operation1", () => {
-  testClock.advanceBy(ms(50));
-  return "result";
-});
-
-monitor.time("operation1", () => {
-  testClock.advanceBy(ms(75));
-  return "result";
-});
-
-const stats = monitor.getStats("operation1");
-expect(stats).toEqual({
-  count: 2,
-  avg: 62.5,
-  min: 50,
-  max: 75,
-});
-```
-
-## API Reference
-
-> **Note:** For complete type definitions, see [`src/types.ts`](./src/types.ts)
-
-### Core Types
-
-```typescript
-type Millis = number & { readonly __brand: "millis" };
-
-interface Instant {
-  readonly wallMs: number; // Wall clock time (can jump due to system changes)
-  readonly monoMs: number; // Monotonic time (never goes backwards)
-}
-
-interface DeadlineTarget {
-  readonly wallMs: number; // When the deadline should fire
-}
-
-interface TimerHandle {
-  cancel(): void;
-}
-```
-
-### Clock Interface
+## Interface
 
 ```typescript
 interface Clock {
   now(): Instant;
   sleep(ms: Millis): Promise<void>;
-  timeout(ms: Millis): Promise<void>;
+  timeout(ms: Millis): Promise<void>; // Alias for sleep
   deadline(target: DeadlineTarget): Promise<void>;
   interval(ms: Millis, callback: () => void | Promise<void>): TimerHandle;
 }
-```
 
-### SystemClock
-
-Uses real system time via `Date.now()` and `performance.now()`.
-
-```typescript
-const clock = createSystemClock();
-const instant = clock.now(); // { wallMs: 1704063600000, monoMs: 42.1 }
-```
-
-### ControlledClock
-
-Extends `Clock` with time manipulation methods for testing.
-
-```typescript
-class ControlledClock implements Clock {
-  // ... Clock methods ...
-
-  // Additional methods for time control:
-  advanceBy(ms: Millis): void; // Advance by duration (synchronous)
-  advanceTo(targetMono: number): void; // Advance to specific monotonic time (synchronous)
-  jumpWallTime(newWallMs: number): void; // Jump wall time (keep monotonic continuous)
-  tick(): void; // Advance to next pending timer (synchronous)
-  getPendingTimerCount(): number; // Number of pending timers
-  flush(): Promise<void>; // Await completion of fired callbacks
+interface Instant {
+  wallMs: number; // Wall clock time - can jump
+  monoMs: number; // Monotonic time - never backwards
 }
 
-const clock = createControlledClock({ initialTime: 1000 });
-clock.advanceBy(ms(500)); // Time manipulation (synchronous)
-await clock.flush(); // Wait for callbacks to complete
+interface DeadlineTarget {
+  wallMs: number; // When to fire (wall time)
+}
+
+interface TimerHandle {
+  cancel(): void;
+}
+
+type Millis = number & { readonly __brand: "millis" };
+const ms = (n: number): Millis => n as Millis;
 ```
 
-## Testing Patterns
+## Installation
 
-### Fast Time-based Tests
-
-```typescript
-describe("SessionTimeout", () => {
-  it("should expire sessions after timeout", () => {
-    const clock = createControlledClock({ initialTime: 0 });
-    const session = new SessionManager(clock, 1000); // 1s timeout
-
-    const id = session.create("user");
-    expect(session.isValid(id)).toBe(true);
-
-    clock.advanceBy(ms(999));
-    expect(session.isValid(id)).toBe(true);
-
-    clock.advanceBy(ms(2));
-    expect(session.isValid(id)).toBe(false);
-  });
-});
+```bash
+npm install @phyxius/clock
 ```
 
-### Deterministic Race Condition Testing
+## What You Get
 
-```typescript
-describe("ConcurrentOperations", () => {
-  it("should handle operations in precise order", async () => {
-    const clock = createControlledClock({ initialTime: 1000 });
-    const events: string[] = [];
+**Time you can reason about.** Two tracks - wall time for scheduling, monotonic time for intervals. No more confusion about which time to use when.
 
-    // Use Clock's methods instead of global timers
-    clock.sleep(ms(100)).then(() => events.push("A"));
-    clock.sleep(ms(200)).then(() => events.push("B"));
-    clock.sleep(ms(150)).then(() => events.push("C"));
+**Time you can test.** Jump to any moment instantly. Complex timing scenarios become trivial to set up and verify.
 
-    clock.advanceBy(ms(100));
-    await clock.flush();
-    expect(events).toEqual(["A"]);
+**Time that works in production.** Complete observability into timing behavior. See exactly when things fire and how much they drift.
 
-    clock.advanceBy(ms(50));
-    await clock.flush();
-    expect(events).toEqual(["A", "C"]);
-
-    clock.advanceBy(ms(50));
-    await clock.flush();
-    expect(events).toEqual(["A", "C", "B"]);
-  });
-});
-```
-
----
-
-Clock is the foundation of deterministic systems. By controlling time, you control one of the most chaotic aspects of distributed systems, making your applications more reliable, testable, and debuggable.
+Clock solves time. Everything else builds on that foundation.

@@ -1,830 +1,706 @@
 # Process
 
-**Actor-like units with supervision for fault-tolerant distributed systems**
+**Units that restart on failure. Systems that heal themselves. Concurrency without chaos.**
 
-## What is Process?
+Every system failure you've debugged starts with the same pattern: one component fails, takes down its neighbor, which takes down its neighbor, until the whole system is dead. Cascading failures, resource leaks, deadlocks, race conditions.
 
-Process provides actor-model concurrency with supervision strategies. Each Process is an independent unit that handles messages asynchronously, maintains its own state, and can be supervised by other processes for fault tolerance. When processes fail, supervisors can restart, stop, or escalate based on configured strategies.
+Process fixes this. Isolated units, supervised execution, let it crash and restart.
 
-Think of Process as a "resilient worker" that handles tasks independently, communicates through messages, and automatically recovers from failures according to your supervision policies.
-
-## Why does Process exist?
-
-Building fault-tolerant distributed systems is challenging. Traditional approaches often result in cascading failures, resource leaks, and systems that become unstable under load. The actor model with supervision provides a battle-tested approach to building resilient systems.
-
-**The Problem:**
+## The Problem
 
 ```typescript
-// Fragile: no fault tolerance, shared state, cascading failures
-class OrderProcessor {
-  private orders: Order[] = [];
-  private isProcessing = false;
+// This is broken. One failure kills everything.
+class UserService {
+  private connections = new Map();
+  private cache = new Map();
 
-  async processOrder(order: Order) {
-    if (this.isProcessing) {
-      throw new Error("Already processing"); // Blocks other orders
-    }
+  async handleRequest(req: Request) {
+    // If this throws, the whole service dies
+    const user = await this.database.getUser(req.userId);
 
-    this.isProcessing = true;
+    // Shared state, race conditions waiting to happen
+    this.cache.set(req.userId, user);
 
-    try {
-      // If this fails, the entire processor becomes unusable
-      await this.validateOrder(order);
-      await this.updateInventory(order);
-      await this.chargeCustomer(order);
+    // If this fails, the connection leaks
+    const connection = await this.createConnection(user);
+    this.connections.set(req.userId, connection);
 
-      this.orders.push(order);
-    } catch (error) {
-      // What do we do now? How do we recover?
-      // How do we handle the next order?
-      // How do we prevent this error from affecting other orders?
-      this.isProcessing = false;
-      throw error;
-    }
-
-    this.isProcessing = false;
+    return user;
   }
-
-  // Shared state, no isolation, no recovery strategy
 }
 
-// Multiple processors compete for resources
-const processor1 = new OrderProcessor();
-const processor2 = new OrderProcessor();
-
-// If one fails, others might be affected
-// No coordination, no supervision, no automatic recovery
+// One bad request can kill the entire service
+const service = new UserService();
 ```
 
-**The Solution:**
+Object-oriented programming gives you shared mutable state, which gives you race conditions, which give you bugs that only happen in production under load.
+
+## The Solution
 
 ```typescript
-// Resilient: isolated processes, supervision, automatic recovery
-const supervisor = createSupervisor();
+import { createRootSupervisor } from "@phyxius/process";
+import { createSystemClock } from "@phyxius/clock";
 
-// Each process handles messages independently
-const orderProcessor = await supervisor.spawn({
-  async handle(message) {
-    switch (message.type) {
-      case "process_order":
-        return await this.processOrder(message.order);
-      case "get_status":
-        return this.getProcessingStatus();
-    }
-  }
-});
+const clock = createSystemClock();
+const supervisor = createRootSupervisor({ clock });
 
-// If process fails, supervisor automatically restarts it
-// Other processes continue unaffected
-// Messages are queued until process recovers
+// Isolated process with its own state
+const userProcess = supervisor.spawn(
+  {
+    name: "user-service",
 
-await orderProcessor.send({
-  type: "process_order",
-  order: { id: "order123", items: [...] }
-});
+    // Initialize state (runs once on start)
+    init: () => ({
+      connections: new Map(),
+      cache: new Map(),
+    }),
 
-// System stays responsive even when individual processes fail
-```
+    // Handle messages (one at a time, no race conditions)
+    handle: async (state, message) => {
+      if (message.type === "get-user") {
+        const user = await database.getUser(message.userId);
+        state.cache.set(message.userId, user);
+        return state;
+      }
 
-## Why is Process good?
-
-### 1. **Fault Isolation**
-
-Failures in one process don't affect others. Each process has its own memory space and failure domain.
-
-### 2. **Automatic Recovery**
-
-Supervisors monitor processes and restart them according to configurable strategies.
-
-### 3. **Message-Based Communication**
-
-Processes communicate through messages, eliminating shared state and race conditions.
-
-### 4. **Scalable Architecture**
-
-Add more processes to handle increased load without complex coordination.
-
-### 5. **Observable System**
-
-All process lifecycle events are emitted for monitoring and debugging.
-
-## Usage Examples
-
-### Basic Process Creation
-
-```typescript
-import { createProcess, createSupervisor } from "@phyxius/process";
-
-// Create a simple process
-const echoProcess = createProcess({
-  async handle(message) {
-    console.log("Received:", message);
-    return `Echo: ${message.text}`;
+      return state;
+    },
   },
-});
-
-await echoProcess.start();
-const response = await echoProcess.send({ text: "Hello, World!" });
-console.log(response); // "Echo: Hello, World!"
-```
-
-### Counter Process with State
-
-```typescript
-interface CounterMessage {
-  type: "increment" | "decrement" | "get" | "reset";
-  amount?: number;
-}
-
-const counterBehavior = {
-  // Initialize process state
-  async init() {
-    this.count = 0;
-  },
-
-  async handle(message: CounterMessage) {
-    switch (message.type) {
-      case "increment":
-        this.count += message.amount || 1;
-        return this.count;
-
-      case "decrement":
-        this.count -= message.amount || 1;
-        return this.count;
-
-      case "get":
-        return this.count;
-
-      case "reset":
-        this.count = 0;
-        return this.count;
-
-      default:
-        throw new Error(`Unknown message type: ${message.type}`);
-    }
-  },
-};
-
-const counter = createProcess(counterBehavior);
-await counter.start();
-
-await counter.send({ type: "increment", amount: 5 }); // Returns 5
-await counter.send({ type: "increment" }); // Returns 6
-await counter.send({ type: "decrement", amount: 2 }); // Returns 4
-const current = await counter.send({ type: "get" }); // Returns 4
-```
-
-### Order Processing System
-
-```typescript
-interface Order {
-  id: string;
-  userId: string;
-  items: Array<{ productId: string; quantity: number; price: number }>;
-  total: number;
-}
-
-interface OrderMessage {
-  type: "process_order" | "cancel_order" | "get_status";
-  order?: Order;
-  orderId?: string;
-}
-
-class OrderProcessorBehavior {
-  private processedOrders = new Map<string, Order>();
-  private failedOrders = new Map<string, { order: Order; error: string }>();
-
-  async init() {
-    console.log("Order processor initialized");
-  }
-
-  async handle(message: OrderMessage) {
-    switch (message.type) {
-      case "process_order":
-        return await this.processOrder(message.order!);
-
-      case "cancel_order":
-        return await this.cancelOrder(message.orderId!);
-
-      case "get_status":
-        return {
-          processed: this.processedOrders.size,
-          failed: this.failedOrders.size,
-          processedOrders: Array.from(this.processedOrders.keys()),
-          failedOrders: Array.from(this.failedOrders.keys()),
-        };
-    }
-  }
-
-  private async processOrder(order: Order) {
-    console.log(`Processing order ${order.id}`);
-
-    try {
-      // Validate order
-      await this.validateOrder(order);
-
-      // Update inventory
-      await this.updateInventory(order);
-
-      // Charge customer
-      await this.chargeCustomer(order);
-
-      // Record successful processing
-      this.processedOrders.set(order.id, order);
-
-      console.log(`Order ${order.id} processed successfully`);
-      return { success: true, orderId: order.id };
-    } catch (error) {
-      // Record failure
-      this.failedOrders.set(order.id, { order, error: error.message });
-
-      console.error(`Order ${order.id} failed:`, error.message);
-      throw error; // Process will fail and be restarted by supervisor
-    }
-  }
-
-  private async validateOrder(order: Order) {
-    // Simulate validation
-    if (order.total <= 0) {
-      throw new Error("Invalid order total");
-    }
-
-    if (!order.items.length) {
-      throw new Error("Order has no items");
-    }
-
-    // Random failure for demonstration
-    if (Math.random() < 0.1) {
-      throw new Error("Validation service unavailable");
-    }
-  }
-
-  private async updateInventory(order: Order) {
-    // Simulate inventory update
-    await new Promise((resolve) => setTimeout(resolve, 10));
-
-    // Random failure for demonstration
-    if (Math.random() < 0.05) {
-      throw new Error("Inventory service unavailable");
-    }
-  }
-
-  private async chargeCustomer(order: Order) {
-    // Simulate payment processing
-    await new Promise((resolve) => setTimeout(resolve, 20));
-
-    // Random failure for demonstration
-    if (Math.random() < 0.05) {
-      throw new Error("Payment service unavailable");
-    }
-  }
-
-  private async cancelOrder(orderId: string) {
-    if (this.processedOrders.has(orderId)) {
-      this.processedOrders.delete(orderId);
-      return { success: true, message: `Order ${orderId} cancelled` };
-    }
-
-    return { success: false, message: `Order ${orderId} not found` };
-  }
-
-  async terminate() {
-    console.log("Order processor shutting down");
-    console.log(`Processed ${this.processedOrders.size} orders`);
-    console.log(`Failed ${this.failedOrders.size} orders`);
-  }
-}
-
-// Create supervised order processor
-const supervisor = createSupervisor();
-const orderProcessor = await supervisor.spawn(new OrderProcessorBehavior());
-
-// Process multiple orders concurrently
-const orders: Order[] = [
-  { id: "order1", userId: "user1", items: [{ productId: "p1", quantity: 2, price: 10 }], total: 20 },
-  { id: "order2", userId: "user2", items: [{ productId: "p2", quantity: 1, price: 50 }], total: 50 },
-  { id: "order3", userId: "user3", items: [{ productId: "p3", quantity: 3, price: 15 }], total: 45 },
-];
-
-// Send orders for processing (non-blocking)
-const promises = orders.map((order) =>
-  orderProcessor.send({ type: "process_order", order }).catch((error) => ({ error: error.message, order })),
+  {},
 );
 
-const results = await Promise.all(promises);
-console.log("Processing results:", results);
-
-// Get final status
-const status = await orderProcessor.send({ type: "get_status" });
-console.log("Final status:", status);
+// Send message - never blocks, never fails
+userProcess.send({ type: "get-user", userId: "alice" });
 ```
 
-### Chat Room System
+Processes are isolated units with their own state. Messages are handled one at a time. If a process crashes, it restarts with fresh state. No shared state, no race conditions, no cascading failures.
+
+## Start Simple: Basic Process
 
 ```typescript
-interface ChatMessage {
-  type: "join" | "leave" | "message" | "get_users" | "get_messages";
-  userId?: string;
-  username?: string;
-  text?: string;
-}
+import { createRootSupervisor } from "@phyxius/process";
+import { createSystemClock } from "@phyxius/clock";
 
-class ChatRoomBehavior {
-  private users = new Map<string, { username: string; joinedAt: number }>();
-  private messages: Array<{ userId: string; username: string; text: string; timestamp: number }> = [];
-  private maxMessages = 100;
+const clock = createSystemClock();
+const supervisor = createRootSupervisor({ clock });
 
-  async init() {
-    console.log("Chat room started");
-  }
-
-  async handle(message: ChatMessage) {
-    switch (message.type) {
-      case "join":
-        return await this.handleJoin(message.userId!, message.username!);
-
-      case "leave":
-        return await this.handleLeave(message.userId!);
-
-      case "message":
-        return await this.handleMessage(message.userId!, message.text!);
-
-      case "get_users":
-        return Array.from(this.users.values());
-
-      case "get_messages":
-        return this.messages.slice(-50); // Last 50 messages
-    }
-  }
-
-  private async handleJoin(userId: string, username: string) {
-    this.users.set(userId, { username, joinedAt: Date.now() });
-
-    const joinMessage = {
-      userId: "system",
-      username: "System",
-      text: `${username} joined the chat`,
-      timestamp: Date.now(),
-    };
-
-    this.addMessage(joinMessage);
-
-    return {
-      success: true,
-      message: `Welcome ${username}!`,
-      userCount: this.users.size,
-    };
-  }
-
-  private async handleLeave(userId: string) {
-    const user = this.users.get(userId);
-    if (!user) {
-      return { success: false, message: "User not found" };
-    }
-
-    this.users.delete(userId);
-
-    const leaveMessage = {
-      userId: "system",
-      username: "System",
-      text: `${user.username} left the chat`,
-      timestamp: Date.now(),
-    };
-
-    this.addMessage(leaveMessage);
-
-    return {
-      success: true,
-      message: `${user.username} left the chat`,
-      userCount: this.users.size,
-    };
-  }
-
-  private async handleMessage(userId: string, text: string) {
-    const user = this.users.get(userId);
-    if (!user) {
-      return { success: false, message: "User not in chat room" };
-    }
-
-    const chatMessage = {
-      userId,
-      username: user.username,
-      text,
-      timestamp: Date.now(),
-    };
-
-    this.addMessage(chatMessage);
-
-    return {
-      success: true,
-      message: "Message sent",
-      messageCount: this.messages.length,
-    };
-  }
-
-  private addMessage(message: any) {
-    this.messages.push(message);
-
-    // Keep only recent messages
-    if (this.messages.length > this.maxMessages) {
-      this.messages = this.messages.slice(-this.maxMessages);
-    }
-  }
-
-  async terminate() {
-    console.log("Chat room shutting down");
-    console.log(`${this.users.size} users were online`);
-    console.log(`${this.messages.length} messages in history`);
-  }
-}
-
-// Create chat room
-const chatRoom = await supervisor.spawn(new ChatRoomBehavior());
-
-// Users join the chat
-await chatRoom.send({ type: "join", userId: "user1", username: "Alice" });
-await chatRoom.send({ type: "join", userId: "user2", username: "Bob" });
-await chatRoom.send({ type: "join", userId: "user3", username: "Charlie" });
+// Counter process that manages its own state
+const counter = supervisor.spawn(
+  {
+    name: "counter",
+    init: () => ({ count: 0 }),
+    handle: (state, message) => {
+      switch (message.type) {
+        case "increment":
+          return { count: state.count + 1 };
+        case "decrement":
+          return { count: state.count - 1 };
+        case "reset":
+          return { count: 0 };
+        default:
+          return state;
+      }
+    },
+  },
+  {},
+);
 
 // Send messages
-await chatRoom.send({ type: "message", userId: "user1", text: "Hello everyone!" });
-await chatRoom.send({ type: "message", userId: "user2", text: "Hi Alice! How are you?" });
-await chatRoom.send({ type: "message", userId: "user3", text: "Great to see you all here!" });
+counter.send({ type: "increment" });
+counter.send({ type: "increment" });
+counter.send({ type: "decrement" });
 
-// Get current state
-const users = await chatRoom.send({ type: "get_users" });
-const messages = await chatRoom.send({ type: "get_messages" });
-
-console.log("Users online:", users);
-console.log("Recent messages:", messages);
+console.log(counter.status()); // "running"
 ```
 
-### Worker Pool for Background Tasks
+Each process handles one message at a time. No locks, no mutexes, no race conditions. The process state is isolated and safe.
+
+## Add Responses: Request-Reply Pattern
 
 ```typescript
-interface TaskMessage {
-  type: "execute_task" | "get_stats";
-  task?: {
-    id: string;
-    type: string;
-    payload: any;
-  };
+type CounterMessage = { type: "increment" } | { type: "get"; reply: (count: number) => void };
+
+const counter = supervisor.spawn(
+  {
+    name: "counter",
+    init: () => ({ count: 0 }),
+    handle: (state, message) => {
+      switch (message.type) {
+        case "increment":
+          return { count: state.count + 1 };
+        case "get":
+          message.reply(state.count);
+          return state;
+        default:
+          return state;
+      }
+    },
+  },
+  {},
+);
+
+// Send async request with response
+const count = await counter.ask((reply) => ({ type: "get", reply }));
+console.log(`Current count: ${count}`);
+```
+
+The `ask` pattern provides synchronous-style request-response over async message passing. Timeouts prevent hanging forever.
+
+## Add Timing: Scheduled Messages
+
+```typescript
+const heartbeat = supervisor.spawn(
+  {
+    name: "heartbeat",
+    init: () => ({ lastPing: Date.now() }),
+    handle: (state, message, tools) => {
+      switch (message.type) {
+        case "start":
+          // Schedule a ping to ourselves in 1 second
+          tools.schedule(1000, { type: "ping" });
+          return state;
+
+        case "ping":
+          const now = Date.now();
+          console.log(`Heartbeat: ${now - state.lastPing}ms since last ping`);
+
+          // Schedule next ping
+          tools.schedule(1000, { type: "ping" });
+          return { lastPing: now };
+
+        default:
+          return state;
+      }
+    },
+  },
+  {},
+);
+
+// Start the heartbeat
+heartbeat.send({ type: "start" });
+```
+
+Schedule messages to yourself for periodic behavior, timeouts, delayed operations. All timing is deterministic and testable.
+
+## Add Resilience: Crash and Restart
+
+```typescript
+const flakyWorker = supervisor.spawn(
+  {
+    name: "flaky-worker",
+    init: () => ({ processed: 0 }),
+    handle: (state, message) => {
+      if (message.type === "work") {
+        // Randomly crash 10% of the time
+        if (Math.random() < 0.1) {
+          throw new Error("Random failure!");
+        }
+
+        console.log(`Processed item ${state.processed + 1}`);
+        return { processed: state.processed + 1 };
+      }
+
+      return state;
+    },
+  },
+  {},
+);
+
+// Send work - even if it crashes, it restarts
+for (let i = 0; i < 100; i++) {
+  flakyWorker.send({ type: "work", item: i });
 }
+```
 
-class WorkerBehavior {
-  private tasksExecuted = 0;
-  private tasksSuccess = 0;
-  private tasksFailed = 0;
-  private currentTask: string | null = null;
+When a process crashes, it restarts with fresh state. Work continues. The error doesn't propagate or bring down other processes.
 
-  async init() {
-    console.log(`Worker ${this.workerId} initialized`);
-  }
+## Add Observability: Complete Telemetry
 
-  constructor(private workerId: string) {}
+```typescript
+const observable = supervisor.spawn(
+  {
+    name: "observable-worker",
+    init: () => ({ tasks: 0 }),
+    handle: async (state, message, tools) => {
+      tools.emit?.({
+        type: "worker:task:start",
+        taskId: message.id,
+        timestamp: tools.clock.now().wallMs,
+      });
 
-  async handle(message: TaskMessage) {
-    switch (message.type) {
-      case "execute_task":
-        return await this.executeTask(message.task!);
+      // Simulate async work
+      await new Promise((resolve) => setTimeout(resolve, 100));
 
-      case "get_stats":
-        return {
-          workerId: this.workerId,
-          tasksExecuted: this.tasksExecuted,
-          tasksSuccess: this.tasksSuccess,
-          tasksFailed: this.tasksFailed,
-          currentTask: this.currentTask,
-        };
-    }
-  }
+      tools.emit?.({
+        type: "worker:task:complete",
+        taskId: message.id,
+        timestamp: tools.clock.now().wallMs,
+      });
 
-  private async executeTask(task: any) {
-    this.currentTask = task.id;
-    this.tasksExecuted++;
+      return { tasks: state.tasks + 1 };
+    },
+  },
+  {},
+);
 
-    console.log(`Worker ${this.workerId} executing task ${task.id} (${task.type})`);
+// Create supervisor with telemetry
+const supervisor = createRootSupervisor({
+  clock,
+  emit: (event) => {
+    console.log("Process event:", event);
+  },
+});
+```
 
-    try {
-      const result = await this.processTask(task);
-      this.tasksSuccess++;
-      this.currentTask = null;
+Every operation emits structured events. Process lifecycle, message handling, failures, restarts - complete visibility into system behavior.
 
-      console.log(`Worker ${this.workerId} completed task ${task.id}`);
-      return { success: true, result, workerId: this.workerId };
-    } catch (error) {
-      this.tasksFailed++;
-      this.currentTask = null;
+## Add Supervision: Restart Policies
 
-      console.error(`Worker ${this.workerId} failed task ${task.id}:`, error.message);
-      throw error;
-    }
-  }
+```typescript
+// Create supervisor with restart policies
+const resilientWorker = supervisor.spawn(
+  {
+    name: "resilient-worker",
+    init: () => ({ failures: 0 }),
+    handle: (state, message) => {
+      if (message.type === "risky-work") {
+        // Fail 50% of the time initially, then succeed
+        if (state.failures < 3 && Math.random() < 0.5) {
+          throw new Error(`Failure ${state.failures + 1}`);
+        }
 
-  private async processTask(task: any) {
-    // Simulate different types of work
-    switch (task.type) {
-      case "image_resize":
-        await new Promise((resolve) => setTimeout(resolve, 100 + Math.random() * 200));
-        return { resizedImages: task.payload.images.length, format: "jpg" };
+        return { failures: state.failures };
+      }
 
-      case "email_send":
-        await new Promise((resolve) => setTimeout(resolve, 50 + Math.random() * 100));
-        if (Math.random() < 0.1) throw new Error("SMTP server unavailable");
-        return { sent: true, recipient: task.payload.recipient };
+      return state;
+    },
+    supervision: {
+      type: "one-for-one",
+      backoff: {
+        initial: 100, // Start with 100ms
+        max: 5000, // Cap at 5 seconds
+        factor: 2, // Double each time
+        jitter: 10, // ±10% randomization
+      },
+      maxRestarts: {
+        count: 5, // Max 5 restarts
+        within: 10000, // Within 10 seconds
+      },
+    },
+  },
+  {},
+);
 
-      case "data_analysis":
-        await new Promise((resolve) => setTimeout(resolve, 200 + Math.random() * 500));
-        if (Math.random() < 0.05) throw new Error("Analysis failed");
-        return { analyzed: task.payload.records, insights: Math.floor(Math.random() * 10) };
+// Send risky work - supervisor handles failures automatically
+resilientWorker.send({ type: "risky-work" });
+```
 
-      default:
-        throw new Error(`Unknown task type: ${task.type}`);
-    }
-  }
+Supervision strategies control restart behavior. Exponential backoff prevents thundering herds. Restart limits prevent infinite failure loops.
 
-  async terminate() {
-    console.log(`Worker ${this.workerId} shutting down`);
-    console.log(`Executed ${this.tasksExecuted} tasks (${this.tasksSuccess} success, ${this.tasksFailed} failed)`);
-  }
-}
+## Advanced: Process Hierarchy
+
+```typescript
+// Parent process that spawns and manages children
+const taskManager = supervisor.spawn(
+  {
+    name: "task-manager",
+    init: () => ({ workers: new Map(), nextWorkerId: 0 }),
+    handle: (state, message, tools) => {
+      switch (message.type) {
+        case "spawn-worker":
+          const workerId = state.nextWorkerId++;
+
+          // Spawn child worker process
+          const worker = tools.spawn(
+            {
+              name: `worker-${workerId}`,
+              init: () => ({ tasksCompleted: 0 }),
+              handle: (workerState, workerMessage) => {
+                if (workerMessage.type === "task") {
+                  console.log(`Worker ${workerId} processing task`);
+                  return { tasksCompleted: workerState.tasksCompleted + 1 };
+                }
+                return workerState;
+              },
+            },
+            {},
+          );
+
+          state.workers.set(workerId, worker);
+          return { ...state, nextWorkerId: workerId + 1 };
+
+        case "distribute-task":
+          // Send task to all workers
+          for (const worker of state.workers.values()) {
+            worker.send({ type: "task", data: message.data });
+          }
+          return state;
+
+        default:
+          return state;
+      }
+    },
+  },
+  {},
+);
 
 // Create worker pool
-const workerPool = {
-  workers: [] as any[],
+taskManager.send({ type: "spawn-worker" });
+taskManager.send({ type: "spawn-worker" });
+taskManager.send({ type: "spawn-worker" });
 
-  async init(size: number) {
-    const supervisor = createSupervisor();
+// Distribute work
+taskManager.send({ type: "distribute-task", data: "some work" });
+```
 
-    for (let i = 0; i < size; i++) {
-      const worker = await supervisor.spawn(new WorkerBehavior(`worker-${i + 1}`));
-      this.workers.push(worker);
-    }
+Processes can spawn child processes. Build hierarchies, worker pools, pipeline architectures. Each process manages its children.
 
-    console.log(`Worker pool initialized with ${size} workers`);
+## Advanced: Stateful Services
+
+```typescript
+// Database connection pool as a process
+const dbPool = supervisor.spawn(
+  {
+    name: "db-pool",
+    init: async () => ({
+      connections: [],
+      maxConnections: 10,
+      inUse: new Set(),
+    }),
+    handle: async (state, message, tools) => {
+      switch (message.type) {
+        case "acquire":
+          // Find available connection
+          const available = state.connections.find((conn) => !state.inUse.has(conn.id));
+
+          if (available) {
+            state.inUse.add(available.id);
+            message.reply(available);
+            return state;
+          }
+
+          // Create new connection if under limit
+          if (state.connections.length < state.maxConnections) {
+            const newConn = { id: crypto.randomUUID(), ready: true };
+            state.connections.push(newConn);
+            state.inUse.add(newConn.id);
+            message.reply(newConn);
+            return state;
+          }
+
+          // Pool exhausted
+          message.reply(null);
+          return state;
+
+        case "release":
+          state.inUse.delete(message.connectionId);
+          return state;
+
+        default:
+          return state;
+      }
+    },
   },
+  {},
+);
 
-  async executeTask(task: any) {
-    // Simple round-robin task distribution
-    const worker = this.workers[Math.floor(Math.random() * this.workers.length)];
-    return await worker.send({ type: "execute_task", task });
+// Use the pool
+const connection = await dbPool.ask((reply) => ({
+  type: "acquire",
+  reply,
+}));
+
+if (connection) {
+  // Use connection
+  console.log(`Using connection ${connection.id}`);
+
+  // Release when done
+  dbPool.send({
+    type: "release",
+    connectionId: connection.id,
+  });
+}
+```
+
+Processes are perfect for stateful services. Connection pools, caches, session managers, rate limiters - any service that needs to maintain state safely.
+
+## Advanced: Event Sourcing Integration
+
+```typescript
+import { Journal } from "@phyxius/journal";
+
+// Process with full event sourcing
+const bankAccount = supervisor.spawn(
+  {
+    name: "bank-account",
+    init: (ctx) => ({
+      balance: 0,
+      accountId: ctx.accountId,
+      journal: new Journal({ clock }),
+    }),
+    handle: (state, message, tools) => {
+      switch (message.type) {
+        case "deposit":
+          const depositEvent = {
+            type: "deposit" as const,
+            amount: message.amount,
+            timestamp: tools.clock.now().wallMs,
+          };
+
+          // Append to event log
+          state.journal.append(depositEvent);
+
+          // Update state
+          const newBalance = state.balance + message.amount;
+
+          tools.emit?.({
+            type: "account:deposit",
+            accountId: state.accountId,
+            amount: message.amount,
+            newBalance,
+          });
+
+          message.reply?.({ success: true, balance: newBalance });
+
+          return { ...state, balance: newBalance };
+
+        case "withdraw":
+          if (state.balance < message.amount) {
+            message.reply?.({ success: false, error: "Insufficient funds" });
+            return state;
+          }
+
+          const withdrawEvent = {
+            type: "withdraw" as const,
+            amount: message.amount,
+            timestamp: tools.clock.now().wallMs,
+          };
+
+          state.journal.append(withdrawEvent);
+
+          const finalBalance = state.balance - message.amount;
+
+          message.reply?.({ success: true, balance: finalBalance });
+
+          return { ...state, balance: finalBalance };
+
+        case "get-balance":
+          message.reply(state.balance);
+          return state;
+
+        default:
+          return state;
+      }
+    },
   },
+  { accountId: "acc-123" },
+);
 
-  async getStats() {
-    const stats = await Promise.all(this.workers.map((worker) => worker.send({ type: "get_stats" })));
+// Use the account
+const depositResult = await bankAccount.ask((reply) => ({
+  type: "deposit",
+  amount: 100,
+  reply,
+}));
 
-    return {
-      totalWorkers: this.workers.length,
-      workers: stats,
-      totalTasks: stats.reduce((sum, s) => sum + s.tasksExecuted, 0),
-      totalSuccess: stats.reduce((sum, s) => sum + s.tasksSuccess, 0),
-      totalFailed: stats.reduce((sum, s) => sum + s.tasksFailed, 0),
-    };
-  },
+const balance = await bankAccount.ask((reply) => ({
+  type: "get-balance",
+  reply,
+}));
+
+console.log(`Deposit result:`, depositResult);
+console.log(`Balance:`, balance);
+```
+
+Combine Process with Journal for event-sourced systems. Every state change is an event. Process restarts can replay events to rebuild state.
+
+## The Full Power: Distributed System Simulation
+
+```typescript
+// Distributed cache with gossip protocol
+const createCacheNode = (nodeId: string, peers: string[]) => {
+  return supervisor.spawn(
+    {
+      name: `cache-node-${nodeId}`,
+      init: () => ({
+        nodeId,
+        data: new Map(),
+        version: 0,
+        peers: new Map(), // peer -> ProcessRef
+        lastGossip: 0,
+      }),
+      handle: async (state, message, tools) => {
+        switch (message.type) {
+          case "connect-peer":
+            state.peers.set(message.peerId, message.peerRef);
+            return state;
+
+          case "set":
+            // Update local data
+            state.data.set(message.key, {
+              value: message.value,
+              version: ++state.version,
+              nodeId: state.nodeId,
+            });
+
+            // Gossip to peers
+            for (const peer of state.peers.values()) {
+              peer.send({
+                type: "gossip",
+                key: message.key,
+                value: message.value,
+                version: state.version,
+                nodeId: state.nodeId,
+              });
+            }
+
+            message.reply?.({ success: true });
+            return state;
+
+          case "get":
+            const entry = state.data.get(message.key);
+            message.reply(entry ? entry.value : null);
+            return state;
+
+          case "gossip":
+            const existing = state.data.get(message.key);
+
+            // Accept if we don't have it, or remote version is newer
+            if (!existing || message.version > existing.version) {
+              state.data.set(message.key, {
+                value: message.value,
+                version: message.version,
+                nodeId: message.nodeId,
+              });
+
+              tools.emit?.({
+                type: "cache:gossip:accepted",
+                nodeId: state.nodeId,
+                key: message.key,
+                fromNode: message.nodeId,
+                version: message.version,
+              });
+            }
+
+            return state;
+
+          case "periodic-gossip":
+            // Periodically gossip all data to all peers
+            const now = tools.clock.now().wallMs;
+            if (now - state.lastGossip > 5000) {
+              // Every 5 seconds
+              for (const [key, entry] of state.data) {
+                for (const peer of state.peers.values()) {
+                  peer.send({
+                    type: "gossip",
+                    key,
+                    value: entry.value,
+                    version: entry.version,
+                    nodeId: entry.nodeId,
+                  });
+                }
+              }
+
+              // Schedule next gossip
+              tools.schedule(5000, { type: "periodic-gossip" });
+              return { ...state, lastGossip: now };
+            }
+
+            return state;
+
+          default:
+            return state;
+        }
+      },
+    },
+    {},
+  );
 };
 
-// Initialize worker pool
-await workerPool.init(3);
+// Create 3-node distributed cache
+const node1 = createCacheNode("node1", ["node2", "node3"]);
+const node2 = createCacheNode("node2", ["node1", "node3"]);
+const node3 = createCacheNode("node3", ["node1", "node2"]);
 
-// Submit tasks
-const tasks = [
-  { id: "task1", type: "image_resize", payload: { images: ["img1.jpg", "img2.png"] } },
-  { id: "task2", type: "email_send", payload: { recipient: "user@example.com" } },
-  { id: "task3", type: "data_analysis", payload: { records: 1000 } },
-  { id: "task4", type: "image_resize", payload: { images: ["img3.gif"] } },
-  { id: "task5", type: "email_send", payload: { recipient: "admin@example.com" } },
-];
+// Connect the peers
+node1.send({ type: "connect-peer", peerId: "node2", peerRef: node2 });
+node1.send({ type: "connect-peer", peerId: "node3", peerRef: node3 });
+node2.send({ type: "connect-peer", peerId: "node1", peerRef: node1 });
+node2.send({ type: "connect-peer", peerId: "node3", peerRef: node3 });
+node3.send({ type: "connect-peer", peerId: "node1", peerRef: node1 });
+node3.send({ type: "connect-peer", peerId: "node2", peerRef: node2 });
 
-// Execute tasks concurrently
-const results = await Promise.allSettled(tasks.map((task) => workerPool.executeTask(task)));
+// Start periodic gossip
+node1.send({ type: "periodic-gossip" });
+node2.send({ type: "periodic-gossip" });
+node3.send({ type: "periodic-gossip" });
 
-console.log("Task results:", results);
+// Write to different nodes
+await node1.ask((reply) => ({ type: "set", key: "user:alice", value: { name: "Alice" }, reply }));
+await node2.ask((reply) => ({ type: "set", key: "user:bob", value: { name: "Bob" }, reply }));
+await node3.ask((reply) => ({ type: "set", key: "user:charlie", value: { name: "Charlie" }, reply }));
 
-// Get worker pool statistics
-const poolStats = await workerPool.getStats();
-console.log("Worker pool stats:", poolStats);
+// Wait for gossip to propagate
+await new Promise((resolve) => setTimeout(resolve, 1000));
+
+// Read from any node - should have all data
+const aliceFromNode2 = await node2.ask((reply) => ({ type: "get", key: "user:alice", reply }));
+const bobFromNode3 = await node3.ask((reply) => ({ type: "get", key: "user:bob", reply }));
+const charlieFromNode1 = await node1.ask((reply) => ({ type: "get", key: "user:charlie", reply }));
+
+console.log("Distributed cache results:");
+console.log("Alice from node2:", aliceFromNode2);
+console.log("Bob from node3:", bobFromNode3);
+console.log("Charlie from node1:", charlieFromNode1);
 ```
 
-### Supervision Strategies
+This is the full power of Process. Distributed systems with gossip protocols, peer-to-peer networks, consensus algorithms, replication strategies. Each node is an isolated process. Communication is through message passing. Failures are isolated and recoverable.
+
+## Interface
 
 ```typescript
-// Different supervision strategies for different failure scenarios
-const supervisor = createSupervisor({
-  emit: (event) => console.log("Supervisor event:", event),
-});
-
-// Critical service: always restart on failure
-const databaseService = await supervisor.spawn({
-  async handle(message) {
-    if (message.type === "query") {
-      // Simulate occasional database failures
-      if (Math.random() < 0.1) {
-        throw new Error("Database connection lost");
-      }
-      return { result: "data" };
-    }
-  },
-});
-
-// Apply restart strategy (default)
-supervisor.supervise(databaseService, "restart");
-
-// Batch job: stop on failure (don't restart automatically)
-const batchJob = await supervisor.spawn({
-  async handle(message) {
-    if (message.type === "process_batch") {
-      // Simulate batch processing that might fail
-      if (Math.random() < 0.2) {
-        throw new Error("Batch processing failed");
-      }
-      return { processed: 100 };
-    }
-  },
-});
-
-// Apply stop strategy - don't restart failed batch jobs
-supervisor.supervise(batchJob, "stop");
-
-// External API client: escalate failures to parent supervisor
-const apiClient = await supervisor.spawn({
-  async handle(message) {
-    if (message.type === "api_call") {
-      // Simulate API failures
-      if (Math.random() < 0.15) {
-        throw new Error("External API unavailable");
-      }
-      return { data: "api response" };
-    }
-  },
-});
-
-// Escalate API failures - let parent supervisor decide what to do
-supervisor.supervise(apiClient, "escalate");
-
-// Test the supervision behavior
-try {
-  // These calls might trigger supervision actions
-  await databaseService.send({ type: "query" }); // May restart on failure
-  await batchJob.send({ type: "process_batch" }); // Will stop on failure
-  await apiClient.send({ type: "api_call" }); // Will escalate on failure
-} catch (error) {
-  console.log("Some operations failed, but supervisor handled recovery");
+interface ProcessSpec<TMsg, TState, TCtx = unknown> {
+  name: string;
+  init(ctx: TCtx): Promise<TState> | TState;
+  handle(state: TState, msg: TMsg, tools: Tools<TState, TMsg, TCtx>): Promise<TState> | TState;
+  onStop?(state: TState, reason: StopReason, ctx: TCtx): Promise<void> | void;
+  maxInbox?: number;
+  mailboxPolicy?: "reject" | "drop-oldest";
+  supervision?: SupervisionStrategy;
 }
 
-// Check supervisor status
-const children = supervisor.getChildren();
-console.log(`Supervisor managing ${children.length} processes`);
-```
-
-## API Reference
-
-### Creating Processes
-
-```typescript
-// Create a process with behavior
-const process = createProcess(behavior, options?);
-
-// Create a supervisor for managing processes
-const supervisor = createSupervisor(options?);
-```
-
-### Process Methods
-
-```typescript
-// Start the process
-await process.start();
-
-// Send a message
-const result = await process.send(message);
-
-// Stop the process
-await process.stop();
-
-// Get process information
-const info = process.getInfo();
-
-// Check current state
-const state = process.state; // "starting" | "running" | "stopping" | "stopped" | "failed"
-```
-
-### Supervisor Methods
-
-```typescript
-// Spawn a new child process
-const child = await supervisor.spawn(behavior);
-
-// Apply supervision strategy
-supervisor.supervise(process, strategy); // "restart" | "stop" | "escalate"
-
-// Get all children
-const children = supervisor.getChildren();
-
-// Stop supervisor and all children
-await supervisor.stop();
-```
-
-### Process Behavior Interface
-
-```typescript
-interface ProcessBehavior<T = any> {
-  // Optional initialization
-  init?(): Promise<void>;
-
-  // Required message handler
-  handle(message: T): Promise<any>;
-
-  // Optional cleanup
-  terminate?(): Promise<void>;
-}
-```
-
-### Process Information
-
-```typescript
-interface ProcessInfo {
+interface ProcessRef<TMsg> {
   id: ProcessId;
-  state: ProcessState;
-  startedAt: number;
-  restartCount: number;
-  lastError?: Error;
+  send(msg: TMsg): boolean;
+  stop(reason?: StopReason): Promise<void>;
+  ask<TResp>(build: (reply: (r: TResp) => void) => TMsg, timeout?: number): Promise<TResp>;
+  status(): ProcessStatus;
+}
+
+interface Tools<TState, TMsg, TCtx> {
+  clock: Clock;
+  ctx: TCtx;
+  emit?: EmitFn;
+  spawn<TM, TS, TC>(spec: ProcessSpec<TM, TS, TC>, ctx: TC): ProcessRef<TM>;
+  ask<T>(desc: string, f: (res: (value: T) => void, rej: (e: unknown) => void) => void, timeout?: number): Promise<T>;
+  schedule(after: number, msg: TMsg): void;
 }
 ```
 
-## Testing Patterns
+## Installation
 
-### Testing Process Behavior
-
-```typescript
-describe("CounterProcess", () => {
-  it("should increment counter", async () => {
-    const counter = createProcess(counterBehavior);
-    await counter.start();
-
-    const result = await counter.send({ type: "increment", amount: 5 });
-    expect(result).toBe(5);
-
-    const current = await counter.send({ type: "get" });
-    expect(current).toBe(5);
-  });
-});
+```bash
+npm install @phyxius/process @phyxius/clock
 ```
 
-### Testing Supervision
+## What You Get
 
-```typescript
-describe("ProcessSupervision", () => {
-  it("should restart failed processes", async () => {
-    const supervisor = createSupervisor();
+**Units that restart on failure.** Processes crash and restart automatically. Errors don't propagate. Systems heal themselves.
 
-    let attempts = 0;
-    const process = await supervisor.spawn({
-      handle: async (message) => {
-        attempts++;
-        if (attempts === 1) {
-          throw new Error("First attempt fails");
-        }
-        return "success";
-      },
-    });
+**Systems that heal themselves.** Supervision strategies control restart behavior. Exponential backoff, restart limits, graceful degradation.
 
-    // First call will fail and trigger restart
-    await expect(process.send({ type: "test" })).rejects.toThrow();
+**Concurrency without chaos.** No shared state, no race conditions, no deadlocks. Message passing eliminates data races.
 
-    // Wait for restart, then try again
-    await new Promise((resolve) => setTimeout(resolve, 100));
-    const result = await process.send({ type: "test" });
-    expect(result).toBe("success");
-  });
-});
-```
+**Scalability without complexity.** From single processes to distributed systems. Same patterns, same guarantees.
 
-### Testing Message Handling
-
-```typescript
-describe("MessageHandling", () => {
-  it("should handle messages in order", async () => {
-    const messages: string[] = [];
-
-    const process = createProcess({
-      handle: async (message) => {
-        messages.push(message.text);
-        return `processed: ${message.text}`;
-      },
-    });
-
-    await process.start();
-
-    await Promise.all([
-      process.send({ text: "first" }),
-      process.send({ text: "second" }),
-      process.send({ text: "third" }),
-    ]);
-
-    expect(messages).toEqual(["first", "second", "third"]);
-  });
-});
-```
-
----
-
-Process provides the actor model with supervision for building fault-tolerant distributed systems. By isolating failures, providing automatic recovery, and enabling message-based communication, it creates resilient architectures that can handle failures gracefully and scale effectively. Combined with other Phyxius primitives, it forms the backbone of robust, observable distributed systems.
+Process solves concurrency. Everything else builds on that foundation.

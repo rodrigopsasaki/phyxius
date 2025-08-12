@@ -1,389 +1,108 @@
 # Phyxius
 
-**Deterministic building blocks for reliable, observable Node.js applications**
+**Primitives for building systems that have a production mindset.**
 
-Phyxius provides five fundamental primitives that, when combined, create systems that are not just functional, but truly **deterministic**, **observable**, and **reliable** in production.
+## Why This Exists
 
-## The Five Building Blocks
+After years of building Node.js systems, I got tired of the same production issues: race conditions that only happen under load, tests that pass locally but fail in CI, timing-dependent bugs that disappear when you try to debug them, resource leaks that slowly kill your servers.
 
-### 🕒 [Clock](./packages/clock/README.md) - Deterministic Time Control
+The problem isn't Node.js. The problem is that async programming is fundamentally broken at the primitive level. Promises don't clean up. `setTimeout` isn't testable. Shared state races against itself. Failures cascade through systems.
 
-Control time progression for reliable, testable applications.
+I built Phyxius because I wanted primitives that make it very hard to write code that breaks in production.
 
-```typescript
-import { createSystemClock, createControlledClock } from "@phyxius/clock";
+## The Five Primitives
 
-// Production: real time
-const clock = createSystemClock();
+### **Clock** - Time That Works
 
-// Testing: controlled time
-const testClock = createControlledClock(1000);
-testClock.advance(500); // Instant time travel
-```
+Two time tracks: wall time (can jump due to NTP) and monotonic time (perfect for intervals). Controllable in tests, observable in production.
 
-**Why it matters**: Time-dependent code becomes deterministic and testable. No more flaky tests or timing-dependent bugs.
+### **Atom** - State That Can't Race
 
-### 💎 [Atom](./packages/atom/README.md) - Versioned Mutable References
+Atomic updates with versioning and change tracking. Multiple writers never corrupt state. Perfect for conflict-free replication.
 
-Thread-safe state management with complete audit trails.
+### **Journal** - Events That Never Disappear
 
-```typescript
-import { createAtom } from "@phyxius/atom";
+Append-only log with guaranteed ordering. Every event preserved forever. Debug any issue by replaying history.
 
-const counter = createAtom(0);
+### **Effect** - Async That Cleans Up
 
-counter.update((n) => n + 1);
-console.log(counter.get()); // 1
+Structured concurrency with automatic resource management. Cancel operations cleanly. No leaks, no zombies.
 
-// Complete history available
-console.log(counter.getHistory()); // Every change recorded
-```
+### **Process** - Units That Restart on Failure
 
-**Why it matters**: Eliminates race conditions while providing complete auditability. Perfect for building Software Transactional Memory systems.
-
-### 📜 [Journal](./packages/journal/README.md) - Append-Only Event Logs
-
-Capture every important event for replay, debugging, and audit trails.
-
-```typescript
-import { createJournal } from "@phyxius/journal";
-
-const journal = createJournal();
-
-await journal.append({
-  type: "user.login",
-  userId: "user123",
-  timestamp: Date.now(),
-});
-
-// Powerful querying
-const userEvents = await journal.filter((e) => e.userId === "user123");
-```
-
-**Why it matters**: Complete system observability and the ability to replay any scenario. The foundation of event sourcing architectures.
-
-### ⚡ [Effect](./packages/effect/README.md) - Structured Concurrency
-
-Context propagation and resource management for reliable async operations.
-
-```typescript
-import { runEffect } from "@phyxius/effect";
-
-const result = await runEffect(async (context) => {
-  context.set("userId", "user123");
-  context.set("requestId", "req456");
-
-  // Context flows through all operations
-  return await performComplexOperation(context);
-});
-```
-
-**Why it matters**: Eliminates resource leaks and provides distributed tracing. Context flows through operation chains automatically.
-
-### 🏭 [Process](./packages/process/README.md) - Actor-Like Units with Supervision
-
-Fault-tolerant distributed systems with automatic recovery.
-
-```typescript
-import { createSupervisor } from "@phyxius/process";
-
-const supervisor = createSupervisor();
-
-const worker = await supervisor.spawn({
-  async handle(message) {
-    // Process messages independently
-    return processOrder(message.order);
-  }
-});
-
-// Automatic restart on failure
-await worker.send({ type: "process_order", order: {...} });
-```
-
-**Why it matters**: Build resilient systems that automatically recover from failures. Each process is isolated and supervised.
-
-## The Power of Combination
-
-While each primitive is powerful alone, they become **transformative** when used together. Here are real-world examples:
-
-### 🏢 [Distributed Cache System](./examples/distributed-cache.md)
-
-See how all five primitives combine to create a production-ready distributed cache with:
-
-- **Atomic state management** preventing race conditions
-- **Complete audit trails** for every cache operation
-- **Deterministic testing** of TTL and cleanup logic
-- **Context-aware operations** with distributed tracing
-- **Fault-tolerant architecture** with automatic process recovery
-
-### 💼 [Event-Sourced SaaS Platform](./examples/event-sourced-saas.md)
-
-A complete multi-tenant SaaS platform showcasing:
-
-- **Event sourcing** with complete audit compliance
-- **Real-time features** with atomic state updates
-- **Deterministic billing** based on usage events
-- **Context propagation** across service boundaries
-- **Resilient background processing** with supervision
-
-### 👥 [Real-Time Collaboration System](./examples/real-time-collaboration.md)
-
-A collaborative editor (like Google Docs) demonstrating:
-
-- **Conflict-free collaboration** with operational transform
-- **Atomic document state** preventing inconsistencies
-- **Deterministic conflict resolution** with precise timing
-- **Distributed context tracking** for user sessions
-- **Fault-tolerant real-time updates** with process supervision
-
-## Why Phyxius?
-
-### Before: Traditional Approaches
-
-```typescript
-// Fragile, untestable, unobservable
-let counter = 0;
-const cache = new Map();
-
-async function processOrder(order) {
-  // Race conditions
-  counter++;
-
-  // Silent failures
-  try {
-    await updateDatabase(order);
-  } catch (error) {
-    console.log("Database update failed");
-    // Lost forever, no recovery
-  }
-
-  // Time-dependent logic - impossible to test
-  cache.set(order.id, order, Date.now() + 300000);
-}
-```
-
-### After: Phyxius-Powered
-
-```typescript
-// Reliable, testable, observable
-const counter = createAtom(0);
-const orderJournal = createJournal();
-
-async function processOrder(order, clock) {
-  return runEffect(async (context) => {
-    context.set("orderId", order.id);
-
-    // Atomic update - no race conditions
-    counter.update((n) => n + 1);
-
-    // Complete audit trail
-    await orderJournal.append({
-      type: "order.processing_started",
-      orderId: order.id,
-      timestamp: clock.now(),
-    });
-
-    // Context flows through operation
-    await updateDatabase(order, context);
-
-    // Deterministic timing - fully testable
-    await scheduleExpiry(order.id, clock.now() + 300000);
-  });
-}
-```
-
-## Design Philosophy
-
-### **Boring on the Outside, Brilliant Under the Hood**
-
-Phyxius primitives have simple, obvious APIs that hide sophisticated implementations. You write straightforward code that happens to be deterministic, observable, and reliable.
-
-### **Composable by Design**
-
-Each primitive solves one problem excellently and combines naturally with others. No forced architectures or complex frameworks - just building blocks.
-
-### **Production-Ready from Day One**
-
-Built for real systems with real requirements: performance, observability, fault tolerance, and compliance.
-
-### **Test-Driven Development Made Easy**
-
-Deterministic primitives make complex scenarios easily testable. No mocks, no sleeps, no flaky tests.
+Isolated processes with supervision. Let it crash, let it restart. Failures don't cascade.
 
 ## Quick Start
+
+```typescript
+import { createSystemClock } from "@phyxius/clock";
+import { createAtom } from "@phyxius/atom";
+import { Journal } from "@phyxius/journal";
+
+const clock = createSystemClock();
+
+// Atomic state - no race conditions
+const users = createAtom(new Map(), clock);
+users.swap((map) => new Map(map).set("alice", { online: true }));
+
+// Event history - complete audit trail
+const events = new Journal({ clock });
+events.append({ type: "user.login", userId: "alice" });
+
+// Deterministic time - testable delays
+await clock.sleep(1000); // Real time in production, instant in tests
+```
+
+## What You Get
+
+**In Production:**
+
+- Resource leaks become impossible
+- Race conditions are eliminated at the primitive level
+- Timing bugs disappear with deterministic time
+- Failures are isolated and self-healing
+- Complete audit trail of everything that happens
+
+**In Development:**
+
+- Tests run instantly with controlled time
+- Complex async scenarios become trivial to set up
+- Debugging with time travel and complete history
+- No more "works on my machine" timing issues
+
+## Examples
+
+Want to see what's possible? Check out complete, production-ready patterns:
+
+- **[Event-Sourced SaaS](examples/event-sourced-saas.md)** - Multi-tenant platform with billing, audit trails, and time travel debugging
+- **[Distributed Cache](examples/distributed-cache.md)** - Fault-tolerant caching with gossip protocol and automatic failover
+- **[Real-Time Collaboration](examples/real-time-collaboration.md)** - Multi-user editing with conflict-free merge and operational transforms
+- **[HTTP Server](examples/express-server.md)** - Express server rebuilt with supervision, graceful shutdown, and circuit breakers
+
+## Learn More
+
+Each primitive stands alone but they're designed to work together:
+
+- **[Clock](packages/clock/)** - Deterministic time for reliable systems
+- **[Atom](packages/atom/)** - Atomic state for race-free updates
+- **[Journal](packages/journal/)** - Event sourcing for complete history
+- **[Effect](packages/effect/)** - Structured concurrency for resource safety
+- **[Process](packages/process/)** - Actor model for fault tolerance
+
+## Installation
 
 ```bash
 npm install @phyxius/clock @phyxius/atom @phyxius/journal @phyxius/effect @phyxius/process
 ```
 
-```typescript
-import { createSystemClock } from "@phyxius/clock";
-import { createAtom } from "@phyxius/atom";
-import { createJournal } from "@phyxius/journal";
-import { runEffect } from "@phyxius/effect";
-import { createSupervisor } from "@phyxius/process";
+## Philosophy
 
-// Your first deterministic, observable, reliable system
-async function buildReliableSystem() {
-  const clock = createSystemClock();
-  const state = createAtom({ users: 0, orders: 0 });
-  const events = createJournal();
-  const supervisor = createSupervisor();
+Production systems fail at the boundaries - between sync and async, between one service and another, between what you expect and what actually happens.
 
-  const orderProcessor = await supervisor.spawn({
-    async handle(message) {
-      return runEffect(async (context) => {
-        context.set("operation", "process_order");
-        context.set("orderId", message.orderId);
+These primitives give you solid boundaries you can reason about. They're not clever. They're not revolutionary. They just work.
 
-        // Atomic state update
-        state.update((s) => ({ ...s, orders: s.orders + 1 }));
+Every time.
 
-        // Complete audit trail
-        await events.append({
-          type: "order.processed",
-          orderId: message.orderId,
-          timestamp: clock.now(),
-        });
+---
 
-        return "Order processed successfully";
-      });
-    },
-  });
-
-  // Process an order
-  await orderProcessor.send({
-    type: "process_order",
-    orderId: "order-123",
-  });
-
-  console.log("Current state:", state.get());
-  console.log("Event history:", await events.getAll());
-}
-
-buildReliableSystem();
-```
-
-## Architecture Patterns
-
-### Event Sourcing
-
-Journal provides the foundation for event sourcing architectures:
-
-```typescript
-class EventSourcedAggregate {
-  constructor(private journal = createJournal()) {}
-
-  async applyCommand(command) {
-    const events = this.validateCommand(command);
-    for (const event of events) {
-      await this.journal.append(event);
-    }
-    return this.rebuildStateFromEvents();
-  }
-
-  async rebuildStateFromEvents() {
-    const events = await this.journal.getAll();
-    return events.reduce(this.applyEvent, this.initialState);
-  }
-}
-```
-
-### CQRS with Process Supervision
-
-Separate command and query responsibilities with fault tolerance:
-
-```typescript
-const supervisor = createSupervisor();
-
-// Command side
-const commandProcessor = await supervisor.spawn({
-  async handle(command) {
-    await journal.append({ type: "command.received", ...command });
-    return await processCommand(command);
-  },
-});
-
-// Query side
-const queryProcessor = await supervisor.spawn({
-  async handle(query) {
-    return await buildProjection(query);
-  },
-});
-```
-
-### Saga Pattern with Context
-
-Coordinate distributed transactions:
-
-```typescript
-async function orderSaga(orderId) {
-  return runEffect(async (context) => {
-    context.set("sagaId", generateId());
-    context.set("orderId", orderId);
-
-    try {
-      await reserveInventory(orderId, context);
-      await chargePayment(orderId, context);
-      await fulfillOrder(orderId, context);
-    } catch (error) {
-      await compensate(orderId, context);
-      throw error;
-    }
-  });
-}
-```
-
-## Technical Specifications
-
-### **Requirements**
-
-- Node.js 22+ (ESM only)
-- TypeScript 5.0+ (strict mode)
-- Modern JavaScript environment
-
-### **Performance**
-
-- **Clock**: Sub-microsecond precision, zero allocation overhead
-- **Atom**: Lock-free atomic updates, O(1) access time
-- **Journal**: Append-optimized, configurable retention policies
-- **Effect**: Minimal context overhead, efficient cleanup
-- **Process**: Message passing optimized, low-latency supervision
-
-### **Size**
-
-Each primitive is ≤300 lines of code. Total bundle size <50KB minified.
-
-### **Dependencies**
-
-Zero external dependencies. Self-contained, auditable implementations.
-
-## Development
-
-```bash
-# Install dependencies
-pnpm install
-
-# Run tests
-pnpm test
-
-# Build all packages
-pnpm build
-
-# Type checking
-pnpm typecheck
-
-# Linting & formatting
-pnpm lint
-pnpm format
-```
-
-## Requirements
-
-- Node.js ≥ 22.0.0
-- pnpm ≥ 9.0.0
-- ESM-only (`"type": "module"`)
-
-## License
-
-MIT
+_Built because Node.js deserves primitives that don't break in production._

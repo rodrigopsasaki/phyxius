@@ -1,600 +1,488 @@
 # Atom
 
-**Versioned mutable references for safe, observable state management**
+**State that can't race. State with time. State you can trust.**
 
-## What is Atom?
+Every bug you've debugged that starts with "it works on my machine" traces back to race conditions in shared state. Two updates happening at the same time. Lost writes. Inconsistent reads.
 
-Atom provides safe mutable references with built-in versioning and change tracking. Unlike simple variables or objects, Atoms maintain a bounded history of changes and provide atomic update operations relative to the JavaScript event loop.
+Atom fixes this. One value, atomic updates, complete history.
 
-Think of an Atom as a "smart container" for any value that needs to change over time while maintaining complete auditability and consistency.
-
-## Why does Atom exist?
-
-State management in applications is fraught with race conditions, lost updates, and inconsistent reads. Traditional approaches either sacrifice performance (locks everywhere) or correctness (hope for the best).
-
-**The Problem:**
+## The Problem
 
 ```typescript
-// Dangerous: race conditions, lost updates
-let userCount = 0;
-let totalRevenue = 0;
+// This is broken. You just don't see it yet.
+let counter = 0;
 
-async function processOrder(order: Order) {
-  // Multiple async operations can interfere with each other
-  const currentCount = userCount;
-  const currentRevenue = totalRevenue;
+// Two async operations
+Promise.resolve().then(() => counter++);
+Promise.resolve().then(() => counter++);
 
-  // ... async processing ...
-
-  userCount = currentCount + 1; // Lost update if another operation runs
-  totalRevenue = currentRevenue + order.amount; // Same problem
-}
-
-// State can become inconsistent
-// No way to track what changed when
-// No way to roll back or replay changes
+// What's the final value? 1? 2? You don't know.
+setTimeout(() => console.log(counter), 0); // Mystery
 ```
 
-**The Solution:**
+Shared mutable state is the source of all evil. Multiple writers, inconsistent reads, lost updates, race conditions that only happen in production when Jupiter aligns with Mars.
 
-```typescript
-// Safe: atomic updates, bounded history, observable changes
-const clock = createSystemClock();
-const userCount = createAtom(0, clock);
-const totalRevenue = createAtom(0, clock);
+Most solutions add locks, mutexes, channels - complexity to manage complexity. Atom takes a different approach: make the operation atomic, not the access.
 
-async function processOrder(order: Order) {
-  // Atomic updates prevent race conditions within the event loop
-  userCount.swap((count) => count + 1);
-  totalRevenue.swap((revenue) => revenue + order.amount);
-
-  // Or coordinate multiple updates
-  const updates = [
-    () => userCount.swap((count) => count + 1),
-    () => totalRevenue.swap((revenue) => revenue + order.amount),
-  ];
-
-  updates.forEach((update) => update()); // Each update is atomic
-}
-
-// Bounded history for recent changes
-console.log(userCount.history()); // Recent changes recorded
-console.log(userCount.version()); // Current version number
-
-// Observable changes
-userCount.watch((change) => console.log(`Users changed: ${change.from} → ${change.to}`));
-```
-
-## Why is Atom good?
-
-### 1. **Race Condition Prevention**
-
-All updates are atomic relative to the JavaScript event loop. No more lost updates or data corruption within synchronous execution.
-
-### 2. **Bounded History**
-
-Recent changes are recorded with timestamps and version numbers. Perfect for debugging without memory leaks.
-
-### 3. **Observable Changes**
-
-Watch value changes with synchronous, ordered notifications for reactive programming patterns.
-
-### 4. **STM Ready**
-
-Designed to support Software Transactional Memory for coordinated multi-atom updates.
-
-### 5. **Functional Updates**
-
-Update functions receive the current value and return the new value, making updates predictable and testable.
-
-## Usage Examples
-
-### Basic State Management
+## The Solution
 
 ```typescript
 import { createAtom } from "@phyxius/atom";
 import { createSystemClock } from "@phyxius/clock";
 
-// Simple counter requires a clock for deterministic timestamps
 const clock = createSystemClock();
 const counter = createAtom(0, clock);
 
-console.log(counter.deref()); // 0
-
-counter.reset(5);
-console.log(counter.deref()); // 5
-
+// Two atomic updates
 counter.swap((n) => n + 1);
-console.log(counter.deref()); // 6
+counter.swap((n) => n + 1);
+
+console.log(counter.deref()); // Always 2, never 1, never mystery
 ```
 
-### Configuration Management
+Every update is a pure function applied atomically. No race conditions. No lost writes. No mystery.
 
-```typescript
-interface AppConfig {
-  apiUrl: string;
-  timeout: number;
-  retries: number;
-  features: Set<string>;
-}
-
-const clock = createSystemClock();
-const config = createAtom<AppConfig>(
-  {
-    apiUrl: "https://api.example.com",
-    timeout: 5000,
-    retries: 3,
-    features: new Set(["auth", "logging"]),
-  },
-  clock,
-);
-
-// Safe updates that preserve type safety
-config.swap((cfg) => ({
-  ...cfg,
-  timeout: 10000,
-  features: new Set([...cfg.features, "analytics"]),
-}));
-
-// Watch config changes
-config.watch((change) => {
-  console.log("Config updated:", change.to);
-  // Reinitialize services with new config
-});
-
-// Recent history
-console.log("Config changes:", config.history());
-```
-
-### User Session Management
-
-```typescript
-interface UserSession {
-  userId: string;
-  permissions: Set<string>;
-  lastActivity: number;
-  metadata: Record<string, any>;
-}
-
-class SessionManager {
-  private sessions = new Map<string, Atom<UserSession>>();
-
-  constructor(private clock: Clock) {}
-
-  createSession(userId: string, permissions: string[]): string {
-    const sessionId = generateId();
-    const session = createAtom<UserSession>(
-      {
-        userId,
-        permissions: new Set(permissions),
-        lastActivity: this.clock.now().wallMs,
-        metadata: {},
-      },
-      this.clock,
-    );
-
-    this.sessions.set(sessionId, session);
-    return sessionId;
-  }
-
-  updateActivity(sessionId: string): boolean {
-    const session = this.sessions.get(sessionId);
-    if (!session) return false;
-
-    session.swap((s) => ({
-      ...s,
-      lastActivity: this.clock.now().wallMs,
-    }));
-
-    return true;
-  }
-
-  grantPermission(sessionId: string, permission: string): boolean {
-    const session = this.sessions.get(sessionId);
-    if (!session) return false;
-
-    session.swap((s) => ({
-      ...s,
-      permissions: new Set([...s.permissions, permission]),
-    }));
-
-    return true;
-  }
-
-  getSession(sessionId: string): UserSession | undefined {
-    return this.sessions.get(sessionId)?.deref();
-  }
-
-  // Get recent changes for a session
-  getSessionHistory(sessionId: string) {
-    return this.sessions.get(sessionId)?.history() || [];
-  }
-}
-
-// Usage
-const clock = createSystemClock();
-const sessionManager = new SessionManager(clock);
-const sessionId = sessionManager.createSession("user123", ["read"]);
-
-sessionManager.grantPermission(sessionId, "write");
-sessionManager.updateActivity(sessionId);
-
-// Full audit trail available
-const history = sessionManager.getSessionHistory(sessionId);
-console.log("Session changes:", history);
-```
-
-### Shopping Cart
-
-```typescript
-interface CartItem {
-  productId: string;
-  quantity: number;
-  price: number;
-}
-
-interface Cart {
-  items: CartItem[];
-  total: number;
-  discountCode?: string;
-  discountAmount: number;
-}
-
-class ShoppingCart {
-  private cart: Atom<Cart>;
-
-  constructor(private clock: Clock) {
-    this.cart = createAtom<Cart>(
-      {
-        items: [],
-        total: 0,
-        discountAmount: 0,
-      },
-      clock,
-    );
-  }
-
-  // Auto-calculate total when cart changes (after constructor)
-  private setupAutoCalculation() {
-    this.cart.watch((change) => {
-      const cart = change.to;
-      const itemsTotal = cart.items.reduce((sum, item) => sum + item.quantity * item.price, 0);
-      const total = itemsTotal - cart.discountAmount;
-
-      // Only update if total changed to avoid infinite loops
-      if (cart.total !== total) {
-        this.cart.swap((c) => ({ ...c, total }));
-      }
-    });
-  }
-
-  addItem(productId: string, price: number, quantity: number = 1) {
-    this.cart.swap((cart) => {
-      const existingIndex = cart.items.findIndex((item) => item.productId === productId);
-
-      if (existingIndex >= 0) {
-        // Update existing item
-        const newItems = [...cart.items];
-        newItems[existingIndex] = {
-          ...newItems[existingIndex]!,
-          quantity: newItems[existingIndex]!.quantity + quantity,
-        };
-        return { ...cart, items: newItems };
-      } else {
-        // Add new item
-        return {
-          ...cart,
-          items: [...cart.items, { productId, quantity, price }],
-        };
-      }
-    });
-  }
-
-  removeItem(productId: string) {
-    this.cart.swap((cart) => ({
-      ...cart,
-      items: cart.items.filter((item) => item.productId !== productId),
-    }));
-  }
-
-  applyDiscount(code: string, amount: number) {
-    this.cart.swap((cart) => ({
-      ...cart,
-      discountCode: code,
-      discountAmount: amount,
-    }));
-  }
-
-  get() {
-    return this.cart.deref();
-  }
-
-  // Get recent cart history for analytics
-  getHistory() {
-    return this.cart.history();
-  }
-
-  // Watch cart changes for UI updates
-  watch(callback: (change: Change<Cart>) => void) {
-    return this.cart.watch(callback);
-  }
-}
-
-// Usage
-const clock = createSystemClock();
-const cart = new ShoppingCart(clock);
-
-// Watch changes for UI updates
-cart.watch((change) => {
-  updateCartDisplay(change.to);
-  trackAnalytics("cart_changed", change.to);
-});
-
-cart.addItem("product-1", 29.99, 2);
-cart.addItem("product-2", 15.5);
-cart.applyDiscount("SAVE10", 5.0);
-
-console.log("Current cart:", cart.get());
-console.log("Cart history:", cart.getHistory());
-```
-
-### Application State with Undo/Redo
-
-```typescript
-interface AppState {
-  currentTool: string;
-  canvas: CanvasData;
-  layers: Layer[];
-  selectedLayer: number;
-}
-
-class UndoableState {
-  private state: Atom<AppState>;
-  private maxHistorySize = 50;
-
-  constructor(private clock: Clock) {
-    this.state = createAtom<AppState>(initialState, clock);
-  }
-
-  getCurrentState() {
-    return this.state.deref();
-  }
-
-  updateState(updater: (state: AppState) => AppState) {
-    this.state.swap(updater);
-  }
-
-  undo(): boolean {
-    const history = this.state.history();
-    if (history.length < 2) return false; // Need at least current + previous
-
-    const previousState = history[history.length - 2]!.value;
-    this.state.reset(previousState);
-    return true;
-  }
-
-  canUndo(): boolean {
-    return this.state.history().length > 1;
-  }
-
-  getHistory() {
-    return this.state.history();
-  }
-
-  // Watch state changes
-  watch(callback: (change: Change<AppState>) => void) {
-    return this.state.watch(callback);
-  }
-}
-
-// Usage
-const clock = createSystemClock();
-const appState = new UndoableState(clock);
-
-// Watch state changes for UI updates
-appState.watch((change) => {
-  renderCanvas(change.to.canvas);
-  updateToolbar(change.to.currentTool);
-  updateLayerPanel(change.to.layers, change.to.selectedLayer);
-});
-
-// Make changes
-appState.updateState((state) => ({
-  ...state,
-  currentTool: "brush",
-}));
-
-appState.updateState((state) => ({
-  ...state,
-  selectedLayer: 1,
-}));
-
-// Undo last change
-if (appState.canUndo()) {
-  appState.undo();
-  console.log("Undid last action");
-}
-```
-
-### Reactive Data Pipeline
-
-```typescript
-// Create atoms for different stages of data processing
-const clock = createSystemClock();
-const rawData = createAtom<number[]>([], clock);
-const filteredData = createAtom<number[]>([], clock);
-const processedData = createAtom<number[]>([], clock);
-const stats = createAtom({ count: 0, average: 0, max: 0 }, clock);
-
-// Set up reactive pipeline
-rawData.watch((change) => {
-  // Filter out negative numbers
-  const filtered = change.to.filter((n) => n >= 0);
-  filteredData.reset(filtered);
-});
-
-filteredData.watch((change) => {
-  // Apply processing (e.g., normalization)
-  const processed = change.to.map((n) => Math.round(n * 100) / 100);
-  processedData.reset(processed);
-});
-
-processedData.watch((change) => {
-  // Calculate statistics
-  const data = change.to;
-  const count = data.length;
-  const average = count > 0 ? data.reduce((a, b) => a + b) / count : 0;
-  const max = count > 0 ? Math.max(...data) : 0;
-
-  stats.reset({ count, average, max });
-});
-
-// Watch final results
-stats.watch((change) => {
-  const s = change.to;
-  console.log(`Processed ${s.count} items, avg: ${s.average}, max: ${s.max}`);
-});
-
-// Feed data into pipeline
-rawData.reset([1.234, -5, 3.456, 8.9, -2, 10.1]);
-// Triggers the entire pipeline automatically
-```
-
-## API Reference
-
-### Creating Atoms
+## Start Simple: Basic State
 
 ```typescript
 import { createAtom } from "@phyxius/atom";
 import { createSystemClock } from "@phyxius/clock";
 
 const clock = createSystemClock();
-const atom = createAtom<T>(initialValue: T, clock, options?: AtomOptions<T>);
+
+// Create atom with initial value
+const name = createAtom("Alice", clock);
+
+// Read current value
+console.log(name.deref()); // "Alice"
+
+// Update atomically
+name.reset("Bob");
+console.log(name.deref()); // "Bob"
 ```
 
-### Core Methods
+`deref()` reads the current value. `reset()` replaces it entirely. Both operations are thread-safe and atomic.
+
+## Add Transformations: Pure Updates
 
 ```typescript
-// Get current value
-const value = atom.deref();
+const counter = createAtom(0, clock);
 
-// Set new value
-atom.reset(newValue);
+// Increment by applying a pure function
+const newValue = counter.swap((n) => n + 1);
+console.log(newValue); // 1
+console.log(counter.deref()); // 1
 
-// Update with function
-atom.swap((currentValue) => newValue);
+// Multiple operations in sequence
+counter.swap((n) => n * 2); // 2
+counter.swap((n) => n + 10); // 12
+counter.swap((n) => n / 3); // 4
+```
 
-// Compare and set
-const success = atom.compareAndSet(expectedValue, newValue);
+`swap()` applies a pure function to transform the value atomically. The function receives the current value and returns the new value. No side effects, no mutations, no surprises.
 
-// Get current version
-const version = atom.version();
+## Add Safety: Compare-And-Set
 
-// Get current snapshot
-const snapshot = atom.snapshot();
+```typescript
+const balance = createAtom(100, clock);
 
-// Get recent history (bounded)
-const history = atom.history();
+// Only withdraw if balance is sufficient
+function withdraw(amount: number): boolean {
+  const current = balance.deref();
 
-// Watch changes (synchronous, ordered)
-const unsubscribe = atom.watch((change) => {
-  console.log(`Value changed: ${change.from} → ${change.to}`);
+  if (current >= amount) {
+    // Atomic compare-and-set prevents race conditions
+    return balance.compareAndSet(current, current - amount);
+  }
+
+  return false; // Insufficient funds
+}
+
+// Two concurrent withdrawals of $60
+const success1 = withdraw(60); // true (balance now 40)
+const success2 = withdraw(60); // false (balance still 40)
+
+console.log(balance.deref()); // 40 (not -20!)
+```
+
+`compareAndSet()` only updates if the current value equals the expected value. This prevents the classic "check-then-act" race condition that causes overdrafts, double-charges, and other financial disasters.
+
+## Add History: Time Travel
+
+```typescript
+const user = createAtom(
+  { name: "Alice", status: "offline" },
+  clock,
+  { historySize: 5 }, // Keep last 5 snapshots
+);
+
+user.swap((u) => ({ ...u, status: "online" }));
+user.swap((u) => ({ ...u, name: "Alice Smith" }));
+user.swap((u) => ({ ...u, status: "away" }));
+
+// Get complete history
+const history = user.history();
+console.log(
+  history.map((snap) => ({
+    value: snap.value,
+    version: snap.version,
+    timestamp: snap.at.wallMs,
+  })),
+);
+
+// Output:
+// [
+//   { value: { name: "Alice", status: "offline" }, version: 0, timestamp: 1000 },
+//   { value: { name: "Alice", status: "online" }, version: 1, timestamp: 1010 },
+//   { value: { name: "Alice Smith", status: "online" }, version: 2, timestamp: 1020 },
+//   { value: { name: "Alice Smith", status: "away" }, version: 3, timestamp: 1030 }
+// ]
+```
+
+Every state change is versioned and timestamped. Perfect for debugging ("what was the value at version 2?"), undo/redo, and audit trails.
+
+## Add Reactivity: Automatic Updates
+
+```typescript
+const temperature = createAtom(20, clock);
+
+// Subscribe to changes
+const unsubscribe = temperature.watch((change) => {
+  console.log(`Temperature changed from ${change.from}°C to ${change.to}°C`);
+  console.log(`Version: ${change.versionFrom} → ${change.versionTo}`);
+  console.log(`At: ${change.at.wallMs}`);
+
+  if (change.to > 30) {
+    console.log("🔥 Too hot! Turn on AC");
+  }
 });
 
-// Unsubscribe
-unsubscribe();
+temperature.reset(25); // Temperature changed from 20°C to 25°C
+temperature.swap((t) => t + 10); // Temperature changed from 25°C to 35°C
+// 🔥 Too hot! Turn on AC
 
-// Clear history buffer
-atom.clearHistory();
+// Clean up
+unsubscribe();
 ```
 
-### Snapshots and Changes
+Subscribers receive synchronous notifications with complete change details. Build reactive UIs, trigger side effects, maintain derived state - all with perfect ordering guarantees.
 
-Each snapshot contains:
+## Add Intelligence: Optimized Updates
 
 ```typescript
+const config = createAtom({ theme: "dark", language: "en" }, clock, {
+  // Custom equality to avoid no-op updates
+  equals: (a, b) => a.theme === b.theme && a.language === b.language,
+});
+
+let changeCount = 0;
+config.watch(() => changeCount++);
+
+// This triggers a change notification
+config.swap((c) => ({ ...c, theme: "light" }));
+console.log(changeCount); // 1
+
+// This does NOT trigger a change (same values)
+config.swap((c) => ({ theme: "light", language: "en" }));
+console.log(changeCount); // Still 1 (no-op detected)
+```
+
+Custom equality functions prevent spurious updates. Especially powerful for complex objects where deep equality or specific field comparisons matter more than reference equality.
+
+## Add Metadata: Causality Tracking
+
+```typescript
+const score = createAtom(0, clock);
+
+score.watch((change) => {
+  console.log(`Score: ${change.from} → ${change.to}`);
+  console.log(`Cause: ${change.cause}`);
+});
+
+// Track why changes happened
+score.swap((s) => s + 10, { cause: "level_completed" });
+// Score: 0 → 10, Cause: level_completed
+
+score.swap((s) => s + 5, { cause: "bonus_collected" });
+// Score: 10 → 15, Cause: bonus_collected
+
+score.reset(0, { cause: "game_reset" });
+// Score: 15 → 0, Cause: game_reset
+```
+
+The `cause` metadata flows through to change notifications. Perfect for event sourcing, debugging, analytics, and understanding the "why" behind every state change.
+
+## Advanced: Coordinated State
+
+```typescript
+// Multiple atoms working together
+const firstName = createAtom("Alice", clock);
+const lastName = createAtom("Smith", clock);
+const email = createAtom("alice@example.com", clock);
+
+// Coordinated update using versions for consistency
+function updateUser(first: string, last: string, newEmail: string) {
+  const v1 = firstName.version();
+  const v2 = lastName.version();
+  const v3 = email.version();
+
+  // Update all three
+  firstName.reset(first, { cause: "user_update" });
+  lastName.reset(last, { cause: "user_update" });
+  email.reset(newEmail, { cause: "user_update" });
+
+  return {
+    firstName: { from: v1, to: firstName.version() },
+    lastName: { from: v2, to: lastName.version() },
+    email: { from: v3, to: email.version() },
+  };
+}
+
+const changes = updateUser("Bob", "Jones", "bob.jones@example.com");
+// All atoms updated atomically, versions tracked
+```
+
+Version numbers provide coordination points. Multiple atoms can be updated in sequence with full traceability of what changed when.
+
+## Advanced: State Machines
+
+```typescript
+type ConnectionState =
+  | { status: "disconnected" }
+  | { status: "connecting"; attempt: number }
+  | { status: "connected"; connectedAt: number }
+  | { status: "error"; error: string; lastAttempt: number };
+
+const connection = createAtom<ConnectionState>({ status: "disconnected" }, clock);
+
+// State machine transitions
+function connect() {
+  const current = connection.deref();
+
+  if (current.status === "disconnected") {
+    connection.reset(
+      {
+        status: "connecting",
+        attempt: 1,
+      },
+      { cause: "user_connect" },
+    );
+
+    // Simulate async connection
+    setTimeout(() => {
+      const state = connection.deref();
+      if (state.status === "connecting") {
+        connection.reset(
+          {
+            status: "connected",
+            connectedAt: Date.now(),
+          },
+          { cause: "connection_success" },
+        );
+      }
+    }, 1000);
+  } else if (current.status === "error") {
+    connection.reset(
+      {
+        status: "connecting",
+        attempt: current.lastAttempt + 1,
+      },
+      { cause: "reconnect_attempt" },
+    );
+  }
+}
+
+// Type-safe state machine with atomic transitions
+connection.watch((change) => {
+  if (change.to.status === "connected") {
+    console.log("🎉 Connected!");
+  } else if (change.to.status === "error") {
+    console.log(`❌ Connection failed: ${change.to.error}`);
+  }
+});
+```
+
+Atoms + TypeScript discriminated unions = type-safe state machines with atomic transitions and complete audit trails.
+
+## Advanced: Derived State
+
+```typescript
+// Source of truth
+const cart = createAtom<Array<{ id: string; price: number; qty: number }>>([], clock);
+
+// Derived state that updates automatically
+const cartTotal = createAtom(0, clock);
+
+cart.watch((change) => {
+  const total = change.to.reduce((sum, item) => sum + item.price * item.qty, 0);
+  cartTotal.reset(total, { cause: "cart_changed" });
+});
+
+// Add items to cart
+cart.swap((items) => [...items, { id: "book", price: 10, qty: 2 }]);
+console.log(cartTotal.deref()); // 20
+
+cart.swap((items) => [...items, { id: "pen", price: 5, qty: 1 }]);
+console.log(cartTotal.deref()); // 25
+
+// Remove item
+cart.swap((items) => items.filter((item) => item.id !== "pen"));
+console.log(cartTotal.deref()); // 20
+```
+
+Reactive derived state with automatic consistency. Change the source, derived state updates immediately with full causality tracking.
+
+## The Full Power: Conflict-Free State Synchronization
+
+```typescript
+// Simulate distributed state across multiple nodes
+class NodeState {
+  private node: string;
+  private data: Atom<Map<string, { value: number; version: number; node: string }>>;
+
+  constructor(nodeId: string, clock: Clock) {
+    this.node = nodeId;
+    this.data = createAtom(new Map(), clock);
+  }
+
+  // Local update with node identifier
+  set(key: string, value: number) {
+    this.data.swap(
+      (map) => {
+        const current = map.get(key);
+        const newVersion = (current?.version ?? 0) + 1;
+
+        return new Map(map).set(key, {
+          value,
+          version: newVersion,
+          node: this.node,
+        });
+      },
+      { cause: `${this.node}_update` },
+    );
+  }
+
+  // Merge state from another node (last-writer-wins with version vectors)
+  mergeFrom(other: NodeState) {
+    const otherData = other.data.deref();
+
+    this.data.swap(
+      (localMap) => {
+        const merged = new Map(localMap);
+
+        for (const [key, remoteEntry] of otherData) {
+          const localEntry = merged.get(key);
+
+          if (!localEntry || remoteEntry.version > localEntry.version) {
+            // Remote is newer, accept it
+            merged.set(key, remoteEntry);
+          } else if (remoteEntry.version === localEntry.version && remoteEntry.node > localEntry.node) {
+            // Same version, use node ID as tiebreaker
+            merged.set(key, remoteEntry);
+          }
+          // Otherwise keep local version
+        }
+
+        return merged;
+      },
+      { cause: `merge_from_${other.node}` },
+    );
+  }
+
+  get(key: string): number | undefined {
+    return this.data.deref().get(key)?.value;
+  }
+
+  snapshot() {
+    return this.data.snapshot();
+  }
+}
+
+// Three nodes in a distributed system
+const nodeA = new NodeState("A", clock);
+const nodeB = new NodeState("B", clock);
+const nodeC = new NodeState("C", clock);
+
+// Concurrent updates
+nodeA.set("counter", 1);
+nodeB.set("counter", 2);
+nodeC.set("counter", 3);
+
+console.log("Before sync:");
+console.log("A:", nodeA.get("counter")); // 1
+console.log("B:", nodeB.get("counter")); // 2
+console.log("C:", nodeC.get("counter")); // 3
+
+// Synchronize state (gossip protocol)
+nodeA.mergeFrom(nodeB);
+nodeA.mergeFrom(nodeC);
+nodeB.mergeFrom(nodeA);
+nodeC.mergeFrom(nodeA);
+
+console.log("After sync:");
+console.log("A:", nodeA.get("counter")); // 3 (highest version wins)
+console.log("B:", nodeB.get("counter")); // 3
+console.log("C:", nodeC.get("counter")); // 3
+
+// Complete convergence with full audit trail
+const finalState = nodeA.snapshot();
+console.log("Final version:", finalState.version);
+console.log("Final timestamp:", finalState.at.wallMs);
+```
+
+This is the full power of Atom. Version vectors, conflict resolution, eventual consistency, complete audit trails. The building blocks for distributed systems that actually work.
+
+## Interface
+
+```typescript
+interface Atom<T> {
+  deref(): T;
+  version(): number;
+  swap(updater: (current: T) => T, opts?: { cause?: unknown }): T;
+  reset(next: T, opts?: { cause?: unknown }): T;
+  compareAndSet(expected: T, next: T, opts?: { cause?: unknown }): boolean;
+  snapshot(): AtomSnapshot<T>;
+  watch(fn: (change: Change<T>) => void): () => void;
+  history(): readonly AtomSnapshot<T>[];
+  clearHistory(): void;
+}
+
 interface AtomSnapshot<T> {
   readonly value: T;
   readonly version: number;
-  readonly at: Instant; // from injected Clock
+  readonly at: Instant;
 }
-```
 
-Each change contains:
-
-```typescript
 interface Change<T> {
   readonly from: T;
   readonly to: T;
   readonly versionFrom: number;
   readonly versionTo: number;
   readonly at: Instant;
-  readonly cause?: unknown; // optional metadata
+  readonly cause?: unknown;
+}
+
+interface AtomOptions<T> {
+  equals?: (a: T, b: T) => boolean;
+  baseVersion?: number;
+  historySize?: number;
 }
 ```
 
-## Testing Patterns
+## Installation
 
-### Testing State Changes
-
-```typescript
-describe("UserProfile", () => {
-  it("should track profile updates", () => {
-    const clock = createSystemClock();
-    const profile = createAtom({ name: "John", age: 30 }, clock);
-
-    profile.swap((p) => ({ ...p, age: 31 }));
-
-    expect(profile.deref().age).toBe(31);
-    expect(profile.version()).toBe(1);
-
-    const history = profile.history();
-    expect(history).toHaveLength(2);
-    expect(history[0]!.value.age).toBe(30);
-    expect(history[1]!.value.age).toBe(31);
-  });
-});
+```bash
+npm install @phyxius/atom @phyxius/clock
 ```
 
-### Testing Subscriptions
+## What You Get
 
-```typescript
-describe("Reactive Updates", () => {
-  it("should notify subscribers", () => {
-    const clock = createSystemClock();
-    const atom = createAtom(0, clock);
-    const changes: Change<number>[] = [];
+**State that can't race.** Every update is atomic. No lost writes, no race conditions, no mystery states.
 
-    atom.watch((change) => changes.push(change));
+**State with time.** Every change is versioned and timestamped. Perfect for debugging, undo/redo, and audit trails.
 
-    atom.reset(1);
-    atom.reset(2);
-    atom.swap((n) => n + 1);
+**State you can trust.** Compare-and-set prevents conflicts. Custom equality avoids no-ops. Reentrant-safe notifications prevent cascades.
 
-    expect(changes.map((c) => c.to)).toEqual([1, 2, 3]);
-  });
-});
-```
+**State that scales.** From simple counters to distributed CRDTs. From reactive UIs to event-sourced systems.
 
-### Testing Concurrent Updates
-
-```typescript
-describe("Concurrent Access", () => {
-  it("should handle concurrent updates safely", async () => {
-    const clock = createSystemClock();
-    const counter = createAtom(0, clock);
-
-    // Simulate concurrent updates in the same event loop
-    const promises = Array.from({ length: 100 }, () => Promise.resolve().then(() => counter.swap((n) => n + 1)));
-
-    await Promise.all(promises);
-
-    expect(counter.deref()).toBe(100);
-    expect(counter.version()).toBe(100); // 100 updates from initial version 0
-  });
-});
-```
-
----
-
-Atom provides the foundation for safe, observable state management within the JavaScript event loop. By combining atomic updates with bounded history tracking, it eliminates race conditions in synchronous execution while providing the transparency needed for debugging. Its design makes it perfect for building larger abstractions like Software Transactional Memory systems.
+Atom solves state. Everything else builds on that foundation.
