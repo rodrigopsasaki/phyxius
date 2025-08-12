@@ -1,215 +1,101 @@
-import type { Supervisor, Process, ProcessBehavior, ProcessId, Message, SupervisionStrategy, EmitFn } from "./types.js";
-import { createProcessId } from "./process-id.js";
-import { ProcessImpl } from "./process.js";
+import type { SupervisionStrategy, ProcessId, EmitFn } from "./types.js";
+import type { Clock, Millis } from "@phyxius/clock";
 
-interface SupervisedProcess {
-  process: Process;
-  strategy: SupervisionStrategy;
+export interface RestartWindow {
+  startTime: number;
+  restarts: number;
 }
 
-export class SupervisorImpl implements Supervisor {
-  readonly id: ProcessId;
-  private readonly children = new Map<string, SupervisedProcess>();
-  private readonly emit: EmitFn | undefined;
-  private stopped = false;
+export class Supervisor {
+  private readonly strategy: SupervisionStrategy;
+  private readonly clock: Clock;
+  private readonly emit?: EmitFn;
+  private readonly restartWindows = new Map<ProcessId, RestartWindow>();
 
-  constructor(options?: { id?: ProcessId; emit?: EmitFn }) {
-    this.id = options?.id ?? createProcessId();
-    this.emit = options?.emit;
-
-    this.emit?.({
-      type: "supervisor:created",
-      supervisorId: this.id.value,
-      timestamp: Date.now(),
-    });
+  constructor(strategy: SupervisionStrategy, clock: Clock, emit?: EmitFn) {
+    this.strategy = strategy;
+    this.clock = clock;
+    if (emit) this.emit = emit;
   }
 
-  async spawn<T extends Message = Message>(behavior: ProcessBehavior<T>): Promise<Process> {
-    if (this.stopped) {
-      throw new Error("Cannot spawn process: supervisor is stopped");
+  shouldRestart(processId: ProcessId): boolean {
+    if (this.strategy.type === "none") {
+      return false;
     }
 
-    const process = new ProcessImpl(behavior, this.emit ? { emit: this.emit } : {});
+    if (!this.strategy.maxRestarts) {
+      return true; // No limit, always restart
+    }
 
-    this.emit?.({
-      type: "supervisor:spawning",
-      supervisorId: this.id.value,
-      processId: process.id.value,
-      timestamp: Date.now(),
-    });
+    const now = this.clock.now().wallMs;
+    const window = this.restartWindows.get(processId);
 
-    try {
-      await process.start();
-
-      // Default supervision strategy
-      this.supervise(process, "restart");
-
-      this.emit?.({
-        type: "supervisor:spawned",
-        supervisorId: this.id.value,
-        processId: process.id.value,
-        timestamp: Date.now(),
+    if (!window) {
+      // First restart
+      this.restartWindows.set(processId, {
+        startTime: now,
+        restarts: 1,
       });
+      return true;
+    }
 
-      return process;
-    } catch (error) {
-      this.emit?.({
-        type: "supervisor:spawn:failed",
-        supervisorId: this.id.value,
-        processId: process.id.value,
-        error,
-        timestamp: Date.now(),
+    const windowElapsed = now - window.startTime;
+
+    if (windowElapsed > this.strategy.maxRestarts.within) {
+      // Window expired, reset
+      this.restartWindows.set(processId, {
+        startTime: now,
+        restarts: 1,
       });
-
-      throw error;
-    }
-  }
-
-  supervise(process: Process, strategy: SupervisionStrategy): void {
-    this.children.set(process.id.value, { process, strategy });
-
-    this.emit?.({
-      type: "supervisor:supervising",
-      supervisorId: this.id.value,
-      processId: process.id.value,
-      strategy,
-      timestamp: Date.now(),
-    });
-
-    // Monitor the process
-    this.monitorProcess(process, strategy);
-  }
-
-  async stop(): Promise<void> {
-    if (this.stopped) {
-      return;
+      return true;
     }
 
-    this.stopped = true;
-
-    this.emit?.({
-      type: "supervisor:stopping",
-      supervisorId: this.id.value,
-      childCount: this.children.size,
-      timestamp: Date.now(),
-    });
-
-    // Stop all children
-    const stopPromises = Array.from(this.children.values()).map(async ({ process }) => {
-      try {
-        await process.stop();
-      } catch (error) {
-        // Log error but continue stopping other processes
-        this.emit?.({
-          type: "supervisor:child:stop:error",
-          supervisorId: this.id.value,
-          processId: process.id.value,
-          error,
-          timestamp: Date.now(),
-        });
-      }
-    });
-
-    await Promise.all(stopPromises);
-    this.children.clear();
-
-    this.emit?.({
-      type: "supervisor:stopped",
-      supervisorId: this.id.value,
-      timestamp: Date.now(),
-    });
-  }
-
-  getChildren(): Process[] {
-    return Array.from(this.children.values()).map(({ process }) => process);
-  }
-
-  private async monitorProcess(process: Process, strategy: SupervisionStrategy): Promise<void> {
-    // Simple monitoring - in a real implementation, this would be more sophisticated
-    const checkInterval = setInterval(async () => {
-      if (this.stopped || !this.children.has(process.id.value)) {
-        clearInterval(checkInterval);
-        return;
-      }
-
-      const info = process.getInfo();
-
-      if (info.state === "failed") {
-        clearInterval(checkInterval);
-        await this.handleFailedProcess(process, strategy);
-      }
-    }, 100); // Check every 100ms
-  }
-
-  private async handleFailedProcess(process: Process, strategy: SupervisionStrategy): Promise<void> {
-    this.emit?.({
-      type: "supervisor:child:failed",
-      supervisorId: this.id.value,
-      processId: process.id.value,
-      strategy,
-      timestamp: Date.now(),
-    });
-
-    switch (strategy) {
-      case "restart":
-        try {
-          if (process instanceof ProcessImpl) {
-            await process.restart();
-
-            this.emit?.({
-              type: "supervisor:child:restarted",
-              supervisorId: this.id.value,
-              processId: process.id.value,
-              timestamp: Date.now(),
-            });
-
-            // Resume monitoring
-            this.monitorProcess(process, strategy);
-          }
-        } catch (error) {
-          // If restart fails, remove from supervision
-          this.children.delete(process.id.value);
-
-          this.emit?.({
-            type: "supervisor:child:restart:failed",
-            supervisorId: this.id.value,
-            processId: process.id.value,
-            error,
-            timestamp: Date.now(),
-          });
-        }
-        break;
-
-      case "stop":
-        this.children.delete(process.id.value);
-        try {
-          await process.stop();
-        } catch {
-          // Ignore stop errors
-        }
-
-        this.emit?.({
-          type: "supervisor:child:stopped",
-          supervisorId: this.id.value,
-          processId: process.id.value,
-          timestamp: Date.now(),
-        });
-        break;
-
-      case "escalate":
-        // Remove from supervision and escalate to parent supervisor
-        this.children.delete(process.id.value);
-
-        this.emit?.({
-          type: "supervisor:escalate",
-          supervisorId: this.id.value,
-          processId: process.id.value,
-          error: process.getInfo().lastError,
-          timestamp: Date.now(),
-        });
-
-        // In a full implementation, this would notify a parent supervisor
-        break;
+    if (window.restarts >= this.strategy.maxRestarts.count) {
+      // Too many restarts in window
+      this.emit?.({
+        type: "supervisor:giveup",
+        id: processId,
+        attempts: window.restarts,
+        withinMs: windowElapsed,
+      });
+      return false;
     }
+
+    // Allow restart and increment counter
+    window.restarts++;
+    return true;
+  }
+
+  getRestartDelay(processId: ProcessId): Millis {
+    if (!this.strategy.backoff) {
+      return 0 as Millis;
+    }
+
+    const window = this.restartWindows.get(processId);
+    const attempt = window ? window.restarts : 1;
+
+    const { initial, max, factor, jitter } = this.strategy.backoff;
+    let delay = initial * Math.pow(factor, attempt - 1);
+    delay = Math.min(delay, max);
+
+    // Apply jitter if specified (±5%)
+    if (jitter !== undefined) {
+      const jitterAmount = delay * (jitter / 100);
+      delay += (Math.random() - 0.5) * 2 * jitterAmount;
+      delay = Math.max(0, delay);
+    }
+
+    this.emit?.({
+      type: "supervisor:restart",
+      id: processId,
+      attempt,
+      delayMs: delay,
+    });
+
+    return delay as Millis;
+  }
+
+  clearRestartHistory(processId: ProcessId): void {
+    this.restartWindows.delete(processId);
   }
 }

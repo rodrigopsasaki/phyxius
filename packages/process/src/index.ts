@@ -1,30 +1,31 @@
-export type {
-  EmitFn,
-  Message,
-  ProcessId,
-  ProcessState,
-  SupervisionStrategy,
-  ProcessInfo,
-  ProcessBehavior,
-  Process,
-  Supervisor,
-} from "./types.js";
+// Public API exports (≤12 exports total per acceptance gate)
+export type { ProcessSpec, ProcessRef, ProcessId, StopReason, Tools, RootSupervisorOptions } from "./types.js";
+export { createProcessId } from "./process.js";
+export { Supervisor } from "./supervisor.js";
+export { TimeoutError, ProcessError } from "./types.js";
 
-export { ProcessIdImpl, createProcessId } from "./process-id.js";
-export { ProcessImpl } from "./process.js";
-export { SupervisorImpl } from "./supervisor.js";
-
+import type { ProcessSpec, RootSupervisorOptions, ProcessRef } from "./types.js";
+import type { Clock } from "@phyxius/clock";
 import { ProcessImpl } from "./process.js";
-import { SupervisorImpl } from "./supervisor.js";
-import type { ProcessBehavior, EmitFn, ProcessId, Message } from "./types.js";
 
-export function createProcess<T extends Message = Message>(
-  behavior: ProcessBehavior<T>,
-  options?: { id?: ProcessId; emit?: EmitFn },
-): ProcessImpl {
-  return new ProcessImpl(behavior, options);
+// Spawn process function (public function)
+export function spawn<TMsg, TState, TCtx = unknown>(
+  spec: ProcessSpec<TMsg, TState, TCtx>,
+  ctx: TCtx,
+  clock: Clock,
+): ProcessRef<TMsg> {
+  const process = new ProcessImpl(spec, ctx, clock);
+  process.start();
+  return process;
 }
 
-export function createSupervisor(options?: { id?: ProcessId; emit?: EmitFn }): SupervisorImpl {
-  return new SupervisorImpl(options);
+// Root supervisor function (public function)
+export function createRootSupervisor(options: RootSupervisorOptions) {
+  return {
+    spawn<TMsg, TState, TCtx = unknown>(spec: ProcessSpec<TMsg, TState, TCtx>, ctx: TCtx): ProcessRef<TMsg> {
+      const process = new ProcessImpl(spec, ctx, options.clock, options.emit);
+      process.start();
+      return process;
+    },
+  };
 }

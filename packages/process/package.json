@@ -2,7 +2,7 @@
   "name": "@phyxius/process",
   "version": "0.0.0",
   "type": "module",
-  "description": "Actor-like units with supervision for Node.js applications",
+  "description": "Single-threaded, message-driven process with deterministic time and supervision",
   "main": "./dist/index.js",
   "module": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -26,6 +26,9 @@
     "lint": "eslint .",
     "size": "size-limit"
   },
+  "dependencies": {
+    "@phyxius/clock": "workspace:*"
+  },
   "devDependencies": {
     "@size-limit/preset-small-lib": "^11.1.7",
     "@vitest/coverage-v8": "^2.1.8",
@@ -37,7 +40,7 @@
   "size-limit": [
     {
       "path": "dist/index.js",
-      "limit": "8 KB"
+      "limit": "12 KB"
     }
   ],
   "publishConfig": {
@@ -47,15 +50,22 @@
   "author": "Rodrigo Sasaki",
   "repository": {
     "type": "git",
-    "url": "https://github.com/rodrigopsasaki/phyxius.git",
+    "url": "git+https://github.com/rodrigopsasaki/phyxius.git",
     "directory": "packages/process"
   },
   "keywords": [
     "process",
     "actor",
+    "message-driven",
     "supervision",
-    "concurrent",
-    "messaging",
-    "fault-tolerant"
-  ]
+    "deterministic",
+    "backpressure"
+  ],
+  "directories": {
+    "test": "test"
+  },
+  "bugs": {
+    "url": "https://github.com/rodrigopsasaki/phyxius/issues"
+  },
+  "homepage": "https://github.com/rodrigopsasaki/phyxius#readme"
 }
