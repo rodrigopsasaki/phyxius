@@ -26,6 +26,9 @@
     "lint": "eslint .",
     "size": "size-limit"
   },
+  "dependencies": {
+    "@phyxius/clock": "workspace:*"
+  },
   "devDependencies": {
     "@size-limit/preset-small-lib": "^11.1.7",
     "@vitest/coverage-v8": "^2.1.8",
@@ -47,7 +50,7 @@
   "author": "Rodrigo Sasaki",
   "repository": {
     "type": "git",
-    "url": "https://github.com/rodrigopsasaki/phyxius.git",
+    "url": "git+https://github.com/rodrigopsasaki/phyxius.git",
     "directory": "packages/journal"
   },
   "keywords": [
@@ -57,5 +60,12 @@
     "replay",
     "debugging",
     "event-sourcing"
-  ]
+  ],
+  "directories": {
+    "test": "test"
+  },
+  "bugs": {
+    "url": "https://github.com/rodrigopsasaki/phyxius/issues"
+  },
+  "homepage": "https://github.com/rodrigopsasaki/phyxius#readme"
 }

@@ -1,9 +1,15 @@
-export type { Journal, JournalEntry, JournalSnapshot, EmitFn } from "./types.js";
-export { JournalImpl } from "./journal.js";
-
-import { JournalImpl } from "./journal.js";
-import type { EmitFn } from "./types.js";
-
-export function journal<T = unknown>(options?: { emit?: EmitFn }) {
-  return new JournalImpl<T>(options);
-}
+export { Journal } from "./journal.js";
+export type {
+  JournalEntry,
+  JournalOptions,
+  JournalSnapshot,
+  SerializedJournal,
+  IdGenerator,
+  Subscriber,
+  Unsubscribe,
+  JournalEvent,
+  OverflowPolicy,
+  Serializer,
+  EmitFn,
+} from "./types.js";
+export { JournalReentrancyError, JournalOverflowError } from "./types.js";

@@ -1,157 +1,292 @@
-import { randomUUID } from "node:crypto";
-import type { Journal, JournalEntry, JournalSnapshot, EmitFn } from "./types.js";
+import type { Clock } from "@phyxius/clock";
+import type {
+  JournalEntry,
+  JournalOptions,
+  JournalSnapshot,
+  Subscriber,
+  Unsubscribe,
+  JournalEvent,
+  SerializedJournal,
+  IdGenerator,
+} from "./types.js";
+import { JournalReentrancyError, JournalOverflowError } from "./types.js";
 
-export class JournalImpl<T = unknown> implements Journal<T> {
-  private entries: JournalEntry<T>[] = [];
-  private sequenceCounter = 0;
-  private readonly emit: EmitFn | undefined;
-  private readonly subscribers: Set<(entry: JournalEntry<T>) => void> = new Set();
+export class Journal<T> {
+  private readonly clock: Clock;
+  private readonly idGenerator: IdGenerator;
+  private readonly emit: ((event: JournalEvent) => void) | undefined;
+  private readonly maxEntries: number | undefined;
+  private readonly overflow: "none" | "bounded:drop_oldest" | "bounded:error";
+  private readonly serializer:
+    | {
+        serialize(data: T): unknown;
+        deserialize(data: unknown): T;
+      }
+    | undefined;
 
-  constructor(options?: { emit?: EmitFn }) {
-    this.emit = options?.emit;
+  private entries: (JournalEntry<T> | undefined)[] = [];
+  private firstSequence = 0;
+  private nextSequence = 0;
+  private subscribers = new Set<Subscriber<T>>();
+  private isProcessingSubscribers = false;
+  private readonly journalId: string;
+  private readonly createdAt;
+
+  constructor(options: JournalOptions<T>) {
+    this.clock = options.clock;
+    this.idGenerator = options.idGenerator ?? (() => Math.random().toString(36).slice(2));
+    this.emit = options.emit;
+    this.maxEntries = options.maxEntries;
+    this.overflow = options.overflow ?? "none";
+    this.serializer = options.serializer;
+
+    this.journalId = this.idGenerator();
+    this.createdAt = this.clock.now();
 
     this.emit?.({
       type: "journal:create",
-      timestamp: Date.now(),
+      journalId: this.journalId,
+      at: this.createdAt,
     });
   }
 
-  append(payload: T): JournalEntry<T> {
+  append(data: T): JournalEntry<T> {
+    if (this.isProcessingSubscribers) {
+      throw new JournalReentrancyError();
+    }
+
+    // Check overflow policy
+    if (this.maxEntries !== undefined && this.size() >= this.maxEntries) {
+      if (this.overflow === "bounded:error") {
+        this.emit?.({
+          type: "journal:overflow",
+          policy: this.overflow,
+          maxEntries: this.maxEntries,
+          at: this.clock.now(),
+        });
+        throw new JournalOverflowError(this.maxEntries);
+      } else if (this.overflow === "bounded:drop_oldest") {
+        // Drop the oldest entry to make room for one new entry
+        const droppedCount = 1;
+
+        // Find the first non-undefined entry (oldest) and drop it
+        for (let i = 0; i < this.entries.length; i++) {
+          if (this.entries[i] !== undefined) {
+            this.entries[i] = undefined;
+            // If this was at index 0, we need to advance the firstSequence
+            // and compact the array by removing leading undefined entries
+            if (i === 0) {
+              // Remove leading undefined entries and adjust firstSequence
+              let removeCount = 0;
+              while (removeCount < this.entries.length && this.entries[removeCount] === undefined) {
+                removeCount++;
+              }
+              this.entries.splice(0, removeCount);
+              this.firstSequence += removeCount;
+            }
+            break;
+          }
+        }
+
+        this.emit?.({
+          type: "journal:overflow",
+          policy: this.overflow,
+          maxEntries: this.maxEntries,
+          droppedCount,
+          at: this.clock.now(),
+        });
+      }
+    }
+
     const entry: JournalEntry<T> = {
-      id: randomUUID(),
-      payload,
-      timestamp: Date.now(),
-      sequence: this.sequenceCounter++,
+      id: this.idGenerator(),
+      sequence: this.nextSequence++,
+      timestamp: this.clock.now(),
+      data,
     };
 
-    this.entries.push(entry);
+    // O(1) append using dense array
+    const index = entry.sequence - this.firstSequence;
+    this.entries[index] = entry;
 
     this.emit?.({
       type: "journal:append",
-      entryId: entry.id,
-      sequence: entry.sequence,
-      timestamp: entry.timestamp,
+      id: entry.id,
+      seq: entry.sequence,
+      size: this.size(),
+      at: entry.timestamp,
     });
 
+    // Notify subscribers
     this.notifySubscribers(entry);
 
     return entry;
   }
 
-  read(fromSequence = 0, limit?: number): JournalEntry<T>[] {
-    this.emit?.({
-      type: "journal:read",
-      fromSequence,
-      limit,
-      timestamp: Date.now(),
-    });
-
-    let result = this.entries.filter((entry) => entry.sequence >= fromSequence);
-
-    if (limit !== undefined && limit > 0) {
-      result = result.slice(0, limit);
-    }
-
-    return result;
-  }
-
-  readAll(): JournalEntry<T>[] {
-    this.emit?.({
-      type: "journal:read:all",
-      entryCount: this.entries.length,
-      timestamp: Date.now(),
-    });
-
-    return [...this.entries];
-  }
-
   getEntry(sequence: number): JournalEntry<T> | undefined {
-    const entry = this.entries.find((e) => e.sequence === sequence);
+    if (sequence < this.firstSequence || sequence >= this.nextSequence) {
+      return undefined;
+    }
+    // O(1) access using dense array
+    const index = sequence - this.firstSequence;
+    return this.entries[index];
+  }
+
+  getFirst(): JournalEntry<T> | undefined {
+    if (this.isEmpty()) return undefined;
+    // Find first non-undefined entry
+    for (let i = 0; i < this.entries.length; i++) {
+      if (this.entries[i] !== undefined) {
+        return this.entries[i];
+      }
+    }
+    return undefined;
+  }
+
+  getLast(): JournalEntry<T> | undefined {
+    if (this.isEmpty()) return undefined;
+    // Find last non-undefined entry
+    for (let i = this.entries.length - 1; i >= 0; i--) {
+      if (this.entries[i] !== undefined) {
+        return this.entries[i];
+      }
+    }
+    return undefined;
+  }
+
+  size(): number {
+    // Count non-undefined entries
+    let count = 0;
+    for (const entry of this.entries) {
+      if (entry !== undefined) count++;
+    }
+    return count;
+  }
+
+  isEmpty(): boolean {
+    return this.size() === 0;
+  }
+
+  clear(): void {
+    const previousSize = this.size();
+    this.entries = [];
+    this.firstSequence = this.nextSequence;
 
     this.emit?.({
-      type: "journal:get",
-      sequence,
-      found: entry !== undefined,
-      timestamp: Date.now(),
+      type: "journal:clear",
+      previousSize,
+      at: this.clock.now(),
     });
+  }
 
-    return entry;
+  subscribe(fn: Subscriber<T>): Unsubscribe {
+    this.subscribers.add(fn);
+    return () => {
+      this.subscribers.delete(fn);
+    };
   }
 
   getSnapshot(): JournalSnapshot<T> {
-    const snapshot: JournalSnapshot<T> = {
-      entries: [...this.entries],
-      totalCount: this.entries.length,
-      firstSequence: this.entries[0]?.sequence ?? 0,
-      lastSequence: this.entries[this.entries.length - 1]?.sequence ?? -1,
-      timestamp: Date.now(),
-    };
+    const allEntries: JournalEntry<T>[] = [];
+    for (const entry of this.entries) {
+      if (entry !== undefined) {
+        allEntries.push(entry);
+      }
+    }
 
-    this.emit?.({
-      type: "journal:snapshot",
-      totalCount: snapshot.totalCount,
-      firstSequence: snapshot.firstSequence,
-      lastSequence: snapshot.lastSequence,
-      timestamp: snapshot.timestamp,
-    });
+    const snapshot: JournalSnapshot<T> = {
+      firstSequence: this.firstSequence,
+      lastSequence: this.nextSequence - 1,
+      totalCount: allEntries.length,
+      timestamp: this.clock.now(),
+      entries: deepFreeze(structuredClone(allEntries)),
+    };
 
     return snapshot;
   }
 
-  size(): number {
-    this.emit?.({
-      type: "journal:size",
-      size: this.entries.length,
-      timestamp: Date.now(),
-    });
+  toJSON(): SerializedJournal {
+    const entries: SerializedJournal["entries"] = [];
 
-    return this.entries.length;
-  }
-
-  clear(): void {
-    const oldSize = this.entries.length;
-    this.entries = [];
-    this.sequenceCounter = 0;
-
-    this.emit?.({
-      type: "journal:clear",
-      clearedCount: oldSize,
-      timestamp: Date.now(),
-    });
-  }
-
-  subscribe(callback: (entry: JournalEntry<T>) => void): () => void {
-    this.subscribers.add(callback);
-
-    this.emit?.({
-      type: "journal:subscribe",
-      subscriberCount: this.subscribers.size,
-      timestamp: Date.now(),
-    });
-
-    return () => {
-      this.subscribers.delete(callback);
-      this.emit?.({
-        type: "journal:unsubscribe",
-        subscriberCount: this.subscribers.size,
-        timestamp: Date.now(),
-      });
-    };
-  }
-
-  private notifySubscribers(entry: JournalEntry<T>): void {
-    for (const callback of this.subscribers) {
-      try {
-        callback(entry);
-      } catch (error) {
-        this.emit?.({
-          type: "journal:subscriber:error",
-          error,
-          entryId: entry.id,
+    for (const entry of this.entries) {
+      if (entry !== undefined) {
+        entries.push({
+          id: entry.id,
           sequence: entry.sequence,
-          timestamp: Date.now(),
+          timestamp: entry.timestamp,
+          data: this.serializer ? this.serializer.serialize(entry.data) : entry.data,
         });
       }
     }
+
+    return {
+      entries,
+      nextSequence: this.nextSequence,
+      createdAt: this.createdAt,
+    };
   }
+
+  static fromJSON<T>(json: SerializedJournal, options: JournalOptions<T>): Journal<T> {
+    const journal = new Journal(options);
+
+    // Restore state
+    if (json.entries.length > 0) {
+      const firstEntry = json.entries[0];
+      if (firstEntry) {
+        journal.firstSequence = firstEntry.sequence;
+      }
+      journal.nextSequence = json.nextSequence;
+
+      // Rebuild entries array
+      for (const entry of json.entries) {
+        const index = entry.sequence - journal.firstSequence;
+        journal.entries[index] = {
+          id: entry.id,
+          sequence: entry.sequence,
+          timestamp: entry.timestamp,
+          data: options.serializer ? options.serializer.deserialize(entry.data) : (entry.data as T),
+        };
+      }
+    }
+
+    return journal;
+  }
+
+  private notifySubscribers(entry: JournalEntry<T>): void {
+    if (this.subscribers.size === 0) return;
+
+    this.isProcessingSubscribers = true;
+
+    try {
+      for (const subscriber of this.subscribers) {
+        try {
+          subscriber(entry);
+        } catch (error) {
+          this.emit?.({
+            type: "journal:subscriber:error",
+            seq: entry.sequence,
+            id: entry.id,
+            error,
+            at: this.clock.now(),
+          });
+        }
+      }
+    } finally {
+      this.isProcessingSubscribers = false;
+    }
+  }
+}
+
+function deepFreeze<T>(obj: T): T {
+  if (obj === null || typeof obj !== "object") return obj;
+
+  Object.freeze(obj);
+
+  if (Array.isArray(obj)) {
+    obj.forEach((item) => deepFreeze(item));
+  } else {
+    Object.values(obj).forEach((value) => deepFreeze(value));
+  }
+
+  return obj;
 }
