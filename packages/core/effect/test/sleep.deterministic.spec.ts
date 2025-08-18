@@ -5,7 +5,7 @@ import { createControlledClock, ms } from "@phyxius/clock";
 describe("Effect Sleep Deterministic", () => {
   it("should use ControlledClock and not perform real waiting", async () => {
     const clock = createControlledClock({ initialTime: 0 });
-    const startTime = Date.now();  
+    const startTime = Date.now();
 
     // Create effect that sleeps for 1 second using controlled clock
     const sleepEffect = sleep(ms(1000));
@@ -19,7 +19,7 @@ describe("Effect Sleep Deterministic", () => {
     // Sleep should complete immediately after clock advance
     await sleepPromise;
 
-    const endTime = Date.now();  
+    const endTime = Date.now();
     const realTimeElapsed = endTime - startTime;
 
     // Should complete in much less than 1 second (no real waiting)
@@ -192,7 +192,7 @@ describe("Effect Sleep Deterministic", () => {
         { requested: 50, actual: 50 },
         { requested: 200, actual: 200 },
         { requested: 25, actual: 25 },
-      ]
+      ],
     });
   });
 
@@ -202,29 +202,29 @@ describe("Effect Sleep Deterministic", () => {
 
     // Create a sleep with a timeout that will interrupt it mid-way
     const sleepEffect = sleep(ms(1000)).timeout(ms(500));
-    
+
     // Start the sleep
     const resultPromise = sleepEffect.unsafeRunPromise({ clock });
-    
+
     // Allow initial execution
-    await new Promise(resolve => setImmediate(resolve));
-    
+    await new Promise((resolve) => setImmediate(resolve));
+
     // Verify we have pending timers (sleep + timeout)
     expect(clock.getPendingTimerCount()).toBeGreaterThan(0);
-    
+
     // Advance to trigger timeout (which should cancel the sleep)
     clock.advanceBy(ms(500));
-    await new Promise(resolve => setImmediate(resolve));
-    
+    await new Promise((resolve) => setImmediate(resolve));
+
     const result = await resultPromise;
     const endTime = clock.now().monoMs;
-    
+
     // Should timeout, not complete the sleep
     expect(result).toEqual({ _tag: "Err", error: { _tag: "Timeout" } });
-    
+
     // Should have resolved early (after 500ms, not 1000ms)
     expect(endTime - startTime).toBe(500);
-    
+
     // The timeout interrupted the sleep, proving cancellation works
     // Note: The controlled clock's sleep method doesn't support cancellation
     // so we may have 1 remaining timer, but the important thing is that

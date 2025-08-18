@@ -45,7 +45,7 @@ importers:
         specifier: ^2.1.8
         version: 2.1.9(@types/node@22.17.1)
 
-  packages/atom:
+  packages/core/atom:
     dependencies:
       '@phyxius/clock':
         specifier: workspace:*
@@ -70,7 +70,7 @@ importers:
         specifier: ^2.1.8
         version: 2.1.9(@types/node@22.17.1)
 
-  packages/clock:
+  packages/core/clock:
     devDependencies:
       '@size-limit/preset-small-lib':
         specifier: ^11.1.7
@@ -91,7 +91,7 @@ importers:
         specifier: ^2.1.8
         version: 2.1.9(@types/node@22.17.1)
 
-  packages/effect:
+  packages/core/effect:
     dependencies:
       '@phyxius/clock':
         specifier: workspace:*
@@ -122,7 +122,7 @@ importers:
         specifier: ^2.1.8
         version: 2.1.9(@types/node@22.17.1)
 
-  packages/journal:
+  packages/core/journal:
     dependencies:
       '@phyxius/clock':
         specifier: workspace:*
@@ -147,7 +147,7 @@ importers:
         specifier: ^2.1.8
         version: 2.1.9(@types/node@22.17.1)
 
-  packages/process:
+  packages/core/process:
     dependencies:
       '@phyxius/clock':
         specifier: workspace:*

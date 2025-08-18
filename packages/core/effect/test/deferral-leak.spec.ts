@@ -66,7 +66,7 @@ describe("Deferral and Leak Prevention", () => {
             return "step2";
           }),
         )
-        .map((value) => `${value  }-final`);
+        .map((value) => `${value}-final`);
 
       // Nothing should be executed
       expect(step1Executed).toBe(false);

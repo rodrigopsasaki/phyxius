@@ -325,7 +325,7 @@ export class EffectImpl<E, A> implements Effect<E, A> {
 
     if (result._tag === "Err") {
       // For backward compatibility, throw a proper Error object
-      const {error} = result;
+      const { error } = result;
       if (error && typeof error === "object" && "_tag" in error) {
         if (error._tag === "Timeout") {
           // Try to extract timeout info from the context if available
