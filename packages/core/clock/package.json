@@ -1,5 +1,5 @@
 {
-  "name": "@phyxius/clock",
+  "name": "@phyxiusjs/clock",
   "version": "0.0.0",
   "type": "module",
   "description": "Deterministic time control for Node.js applications",
