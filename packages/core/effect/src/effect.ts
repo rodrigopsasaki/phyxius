@@ -14,6 +14,11 @@ export class EffectImpl<E, A> implements Effect<E, A> {
     this.emit = emit;
   }
 
+  // Public method to access the function for internal use
+  public runFn(env: EffectEnv): Promise<Result<E, A>> {
+    return this.fn(env);
+  }
+
   async unsafeRunPromise(env: Partial<Omit<EffectEnv, "cancel" | "scope">> = {}): Promise<Result<E, A>> {
     const rootCancel = createCancelToken();
     const rootScope = new Scope();
@@ -27,7 +32,7 @@ export class EffectImpl<E, A> implements Effect<E, A> {
     this.emit?.({
       type: "effect:start",
       effectId: this.id,
-      timestamp: env.clock?.now().wallMs ?? Date.now(),
+      timestamp: env.clock?.now().wallMs ?? 0,
     });
 
     let result: Result<E, A>;
@@ -42,7 +47,7 @@ export class EffectImpl<E, A> implements Effect<E, A> {
       this.emit?.({
         type: "effect:success",
         effectId: this.id,
-        timestamp: env.clock?.now().wallMs ?? Date.now(),
+        timestamp: env.clock?.now().wallMs ?? 0,
       });
     } catch (error) {
       result = { _tag: "Err", error: error as E };
@@ -51,12 +56,19 @@ export class EffectImpl<E, A> implements Effect<E, A> {
         type: "effect:error",
         effectId: this.id,
         error,
-        timestamp: env.clock?.now().wallMs ?? Date.now(),
+        timestamp: env.clock?.now().wallMs ?? 0,
       });
     }
 
     // Always run finalizers
-    const cause = rootCancel.isCanceled() ? "interrupted" : result._tag === "Err" ? "error" : "ok";
+    let cause: "interrupted" | "error" | "ok";
+    if (rootCancel.isCanceled()) {
+      cause = "interrupted";
+    } else if (result._tag === "Err") {
+      cause = "error";
+    } else {
+      cause = "ok";
+    }
 
     try {
       await rootScope.close(cause);
@@ -87,7 +99,7 @@ export class EffectImpl<E, A> implements Effect<E, A> {
       if (result._tag === "Err") return result;
 
       const nextEffect = fn(result.value);
-      return (nextEffect as EffectImpl<E2, B>).fn(env);
+      return (nextEffect as EffectImpl<E2, B>).runFn(env);
     }, this.emit);
   }
 
@@ -97,7 +109,7 @@ export class EffectImpl<E, A> implements Effect<E, A> {
       if (result._tag === "Ok") return result;
 
       const recoveryEffect = fn(result.error);
-      return (recoveryEffect as EffectImpl<E2, B>).fn(env);
+      return (recoveryEffect as EffectImpl<E2, B>).runFn(env);
     }, this.emit);
   }
 
@@ -111,10 +123,10 @@ export class EffectImpl<E, A> implements Effect<E, A> {
         type: "effect:timeout:start",
         effectId: this.id,
         timeoutMs: ms,
-        timestamp: env.clock?.now().wallMs ?? Date.now(),
+        timestamp: env.clock?.now().wallMs ?? 0,
       });
 
-      let timeoutHandle: any;
+      // timeoutHandle no longer needed since we don't use setTimeout
       let timeoutPromise: Promise<Result<E | { _tag: "Timeout" }, A>>;
 
       if (env.clock && typeof env.clock.sleep === "function") {
@@ -125,24 +137,13 @@ export class EffectImpl<E, A> implements Effect<E, A> {
             type: "effect:timeout:triggered",
             effectId: this.id,
             timeoutMs: ms,
-            timestamp: env.clock?.now().wallMs ?? Date.now(),
+            timestamp: env.clock?.now().wallMs ?? 0,
           });
           return { _tag: "Err", error: { _tag: "Timeout" } } as Result<E | { _tag: "Timeout" }, A>;
         });
       } else {
-        // Use real setTimeout
-        timeoutPromise = new Promise<Result<E | { _tag: "Timeout" }, A>>((resolve) => {
-          timeoutHandle = setTimeout(() => {
-            childCancel.cancel({ _tag: "Timeout" });
-            this.emit?.({
-              type: "effect:timeout:triggered",
-              effectId: this.id,
-              timeoutMs: ms,
-              timestamp: env.clock?.now().wallMs ?? Date.now(),
-            });
-            resolve({ _tag: "Err", error: { _tag: "Timeout" } });
-          }, ms);
-        });
+        // Fallback when no clock provided (should not happen in well-formed Effect environments)
+        throw new Error("Effect environment must provide a Clock instance");
       }
 
       // Start effect
@@ -151,35 +152,27 @@ export class EffectImpl<E, A> implements Effect<E, A> {
       // Race them
       const result = await Promise.race([effectPromise, timeoutPromise]);
 
-      // Cleanup timeout if it's still running
-      if (timeoutHandle) {
-        clearTimeout(timeoutHandle);
-      }
-
       // Cancel child to clean up any remaining operations
       if (!childCancel.isCanceled()) {
         childCancel.cancel("completed");
       }
 
       // Cleanup child scope
-      const cause =
-        childCancel.isCanceled() && result._tag === "Err" && result.error._tag === "Timeout"
-          ? "interrupted"
-          : result._tag === "Err"
-            ? "error"
-            : "ok";
+      let cause: "interrupted" | "error" | "ok";
+      if (
+        childCancel.isCanceled() &&
+        result._tag === "Err" &&
+        (result.error as { _tag?: string })?._tag === "Timeout"
+      ) {
+        cause = "interrupted";
+      } else if (result._tag === "Err") {
+        cause = "error";
+      } else {
+        cause = "ok";
+      }
       await childScope.close(cause);
 
       return result;
-    }, this.emit);
-  }
-
-  withContext<U>(_key: string, _value: U): Effect<E, A> {
-    // For backward compatibility, we'll store context in the legacy way for now
-    return new EffectImpl<E, A>(async (env) => {
-      // Create a context and add it to the environment somehow
-      // This is a simplified implementation that doesn't fully integrate with the new env
-      return this.fn(env);
     }, this.emit);
   }
 
@@ -192,7 +185,7 @@ export class EffectImpl<E, A> implements Effect<E, A> {
       // Register the cleanup to run on interruption
       const unsubscribe = env.cancel.onCancel(async () => {
         try {
-          await cleanup().unsafeRunPromise({ clock: env.clock });
+          await cleanup().unsafeRunPromise({ clock: env.clock! });
           // Ignore cleanup result - interruption cleanup should not fail the effect
         } catch {
           // Ignore cleanup errors during interruption
@@ -212,7 +205,7 @@ export class EffectImpl<E, A> implements Effect<E, A> {
 
   retry(policy: RetryPolicy): Effect<E | { _tag: "Interrupted" }, A> {
     return new EffectImpl<E | { _tag: "Interrupted" }, A>(async (env) => {
-      let lastError: E;
+      let lastError: E | undefined;
       let attempt = 0;
 
       while (attempt < policy.maxAttempts) {
@@ -226,7 +219,7 @@ export class EffectImpl<E, A> implements Effect<E, A> {
           effectId: this.id,
           attempt: attempt + 1,
           maxAttempts: policy.maxAttempts,
-          timestamp: env.clock?.now().wallMs ?? Date.now(),
+          timestamp: env.clock?.now().wallMs ?? 0,
         });
 
         const result = await this.fn(env);
@@ -236,7 +229,7 @@ export class EffectImpl<E, A> implements Effect<E, A> {
             type: "effect:retry:success",
             effectId: this.id,
             attempt: attempt + 1,
-            timestamp: env.clock?.now().wallMs ?? Date.now(),
+            timestamp: env.clock?.now().wallMs ?? 0,
           });
           return result;
         }
@@ -259,11 +252,14 @@ export class EffectImpl<E, A> implements Effect<E, A> {
             effectId: this.id,
             attempt,
             delayMs: delay,
-            timestamp: env.clock?.now().wallMs ?? Date.now(),
+            timestamp: env.clock?.now().wallMs ?? 0,
           });
 
           // Sleep with the calculated delay
-          await sleep(delay).unsafeRunPromise({ clock: env.clock });
+          const sleepResult = await sleep(delay).unsafeRunPromise(env);
+          if (sleepResult._tag === "Err") {
+            return { _tag: "Err", error: { _tag: "Interrupted" } };
+          }
 
           // If sleep was interrupted, return interrupted
           if (env.cancel.isCanceled()) {
@@ -276,14 +272,14 @@ export class EffectImpl<E, A> implements Effect<E, A> {
         type: "effect:retry:exhausted",
         effectId: this.id,
         attempts: policy.maxAttempts,
-        timestamp: env.clock?.now().wallMs ?? Date.now(),
+        timestamp: env.clock?.now().wallMs ?? 0,
       });
 
       return { _tag: "Err", error: lastError! };
     }, this.emit);
   }
 
-  private forkInternal(registerWithParent: boolean = true): Effect<never, Fiber<E, A>> {
+  public forkInternal(registerWithParent: boolean = true): Effect<never, Fiber<E, A>> {
     return effect(async (env) => {
       // Create child cancel token that inherits from parent
       const childCancel = createCancelToken(env.cancel);
@@ -293,7 +289,14 @@ export class EffectImpl<E, A> implements Effect<E, A> {
       // Start the effect in the background
       const promise = this.fn(childEnv).then(async (result) => {
         // Close child scope when effect completes
-        const cause = childCancel.isCanceled() ? "interrupted" : result._tag === "Err" ? "error" : "ok";
+        let cause: "interrupted" | "error" | "ok";
+        if (childCancel.isCanceled()) {
+          cause = "interrupted";
+        } else if (result._tag === "Err") {
+          cause = "error";
+        } else {
+          cause = "ok";
+        }
         try {
           await childScope.close(cause);
         } catch {
@@ -316,33 +319,6 @@ export class EffectImpl<E, A> implements Effect<E, A> {
 
       return { _tag: "Ok", value: fiber };
     });
-  }
-
-  // Backward compatibility method - wraps unsafeRunPromise but throws on error
-  async run(context?: any): Promise<A> {
-    const clock = context?.get ? context.get("clock") : undefined;
-    const result = await this.unsafeRunPromise({ clock });
-
-    if (result._tag === "Err") {
-      // For backward compatibility, throw a proper Error object
-      const { error } = result;
-      if (error && typeof error === "object" && "_tag" in error) {
-        if (error._tag === "Timeout") {
-          // Try to extract timeout info from the context if available
-          throw new Error("Effect timed out");
-        } else if (error._tag === "Interrupted") {
-          throw new Error("Effect was interrupted");
-        }
-      }
-      // If it's already an Error, throw it directly
-      if (error instanceof Error) {
-        throw error;
-      }
-      // Otherwise create a new Error with the error as message
-      throw new Error(String(error));
-    }
-
-    return result.value;
   }
 }
 
@@ -406,39 +382,59 @@ export function sleep(ms: number, options?: { emit?: EmitFn }): Effect<never, vo
             }
           });
       } else {
-        // Fallback to real setTimeout
-        const timeoutId = setTimeout(() => {
-          if (!completed) {
-            completed = true;
-            cleanupFns.forEach((cleanup) => cleanup());
-            resolve({ _tag: "Ok", value: undefined });
-          }
-        }, ms);
-
-        cleanupFns.push(() => clearTimeout(timeoutId));
+        // Fallback when no clock provided (should not happen in well-formed Effect environments)
+        if (!completed) {
+          completed = true;
+          cleanupFns.forEach((cleanup) => cleanup());
+          resolve({ _tag: "Err", error: new Error("Effect environment must provide a Clock instance") } as Result<
+            never,
+            void
+          >);
+        }
       }
     });
   }, options);
 }
 
-// Temporary implementations for backward compatibility
-export function all<T extends readonly Effect<any, any>[]>(
+export function all<T extends readonly Effect<unknown, unknown>[]>(
   effects: T,
   options?: { emit?: EmitFn },
-): Effect<any, any[]> {
+): Effect<unknown, unknown[]> {
   return effect(async (env) => {
-    const envPartial = env.clock ? { clock: env.clock } : {};
-    const results = await Promise.all(effects.map((eff) => eff.unsafeRunPromise(envPartial)));
-    const values = [];
-
-    for (const result of results) {
-      if (result._tag === "Err") {
-        return result;
-      }
-      values.push(result.value);
+    if (effects.length === 0) {
+      return { _tag: "Ok", value: [] };
     }
 
-    return { _tag: "Ok", value: values };
+    if (effects.length === 1) {
+      const result = await effects[0]!.unsafeRunPromise({ clock: env.clock! });
+      if (result._tag === "Err") return result;
+      return { _tag: "Ok", value: [result.value] };
+    }
+
+    const envPartial = env.clock ? { clock: env.clock } : {};
+
+    // Convert each effect to a promise that throws on error for fail-fast behavior
+    const promises = effects.map(async (eff, index) => {
+      const result = await eff.unsafeRunPromise(envPartial);
+      if (result._tag === "Err") {
+        // Throw the error to make Promise.all fail fast
+        throw { index, error: result.error };
+      }
+      return { index, value: result.value };
+    });
+
+    try {
+      const results = await Promise.all(promises);
+
+      // Sort by index to maintain order
+      results.sort((a, b) => a.index - b.index);
+
+      return { _tag: "Ok", value: results.map((r) => r.value) };
+    } catch (errorInfo: unknown) {
+      const errorData = errorInfo as { index: number; error: unknown };
+      // Return the first error that occurred
+      return { _tag: "Err", error: errorData.error };
+    }
   }, options);
 }
 
@@ -448,9 +444,9 @@ export function acquireUseRelease<R, E, A, E2>(
   release: (resource: R, cause: "ok" | "error" | "interrupted") => Effect<never, void>,
   options?: { emit?: EmitFn },
 ): Effect<E | E2, A> {
-  return effect(async (env) => {
+  return effect<E | E2, A>(async (env) => {
     // First acquire the resource
-    const acquireResult = await acquire.unsafeRunPromise({ clock: env.clock });
+    const acquireResult = await (acquire as EffectImpl<E, R>).runFn(env);
     if (acquireResult._tag === "Err") {
       return acquireResult;
     }
@@ -460,7 +456,8 @@ export function acquireUseRelease<R, E, A, E2>(
     // Register the release to run when the scope closes - with cause propagation
     env.scope.push(async (cause) => {
       try {
-        await release(resource, cause).unsafeRunPromise({ clock: env.clock });
+        await (release(resource, cause) as EffectImpl<never, void>).runFn(env);
+        // Ignore release result
       } catch {
         // Ignore release errors - they shouldn't fail the effect
       }
@@ -468,16 +465,19 @@ export function acquireUseRelease<R, E, A, E2>(
 
     // Use the resource
     try {
-      const useResult = await use(resource).unsafeRunPromise({ clock: env.clock });
+      const useResult = await (use(resource) as EffectImpl<E2, A>).runFn(env);
       return useResult;
     } catch (error) {
       // Use failed, but release will still be called via the finalizer
-      return { _tag: "Err", error };
+      return { _tag: "Err", error: error as E | E2 };
     }
   }, options);
 }
 
-export function race<T extends readonly Effect<any, any>[]>(effects: T, options?: { emit?: EmitFn }): Effect<any, any> {
+export function race<T extends readonly Effect<unknown, unknown>[]>(
+  effects: T,
+  options?: { emit?: EmitFn },
+): Effect<unknown, unknown> {
   return effect(async (env) => {
     if (effects.length === 0) {
       // Empty race - hang forever (this is the standard behavior)
@@ -486,15 +486,15 @@ export function race<T extends readonly Effect<any, any>[]>(effects: T, options?
 
     if (effects.length === 1) {
       // Single effect - just run it
-      return (effects[0] as EffectImpl<any, any>).fn(env);
+      return (effects[0] as EffectImpl<unknown, unknown>).runFn(env);
     }
 
     // Fork all effects to run them concurrently (without parent scope auto-cleanup)
     const forkResults = await Promise.all(
       effects.map(async (effect) => {
-        const forkResult = await (effect as EffectImpl<any, any>)
+        const forkResult = await (effect as EffectImpl<unknown, unknown>)
           .forkInternal(false)
-          .unsafeRunPromise({ clock: env.clock });
+          .unsafeRunPromise({ clock: env.clock! });
         if (forkResult._tag === "Err") throw forkResult.error;
         return forkResult.value;
       }),
@@ -509,7 +509,7 @@ export function race<T extends readonly Effect<any, any>[]>(effects: T, options?
       if (cause === "interrupted") {
         const cancelPromises = fibers.map(async (fiber) => {
           try {
-            await fiber.interrupt().unsafeRunPromise({ clock: env.clock });
+            await fiber.interrupt().unsafeRunPromise({ clock: env.clock! });
           } catch {
             // Ignore interrupt errors
           }
@@ -522,7 +522,7 @@ export function race<T extends readonly Effect<any, any>[]>(effects: T, options?
       // Race all the fiber results
       const winnerResult = await Promise.race(
         fibers.map(async (fiber, index) => {
-          const result = await fiber.join().unsafeRunPromise({ clock: env.clock });
+          const result = await fiber.join().unsafeRunPromise({ clock: env.clock! });
           return { result, index };
         }),
       );
@@ -533,7 +533,7 @@ export function race<T extends readonly Effect<any, any>[]>(effects: T, options?
       const cancelPromises = fibers.map(async (fiber, index) => {
         if (index !== winnerResult.index) {
           try {
-            await fiber.interrupt().unsafeRunPromise({ clock: env.clock });
+            await fiber.interrupt().unsafeRunPromise({ clock: env.clock! });
           } catch {
             // Ignore interrupt errors
           }
@@ -548,7 +548,7 @@ export function race<T extends readonly Effect<any, any>[]>(effects: T, options?
       if (!raceCompleted) {
         const cancelPromises = fibers.map(async (fiber) => {
           try {
-            await fiber.interrupt().unsafeRunPromise({ clock: env.clock });
+            await fiber.interrupt().unsafeRunPromise({ clock: env.clock! });
           } catch {
             // Ignore interrupt errors
           }

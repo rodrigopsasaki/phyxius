@@ -110,8 +110,8 @@ describe("Atom Deterministic Time", () => {
     const atom1 = createAtom("atom1", clock);
     const atom2 = createAtom("atom2", clock);
 
-    const atom1Changes: Array<{ at: any }> = [];
-    const atom2Changes: Array<{ at: any }> = [];
+    const atom1Changes: Array<{ at: number }> = [];
+    const atom2Changes: Array<{ at: number }> = [];
 
     atom1.watch((change) => atom1Changes.push({ at: change.at }));
     atom2.watch((change) => atom2Changes.push({ at: change.at }));

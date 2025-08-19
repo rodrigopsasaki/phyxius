@@ -12,24 +12,29 @@ import type {
 import type { Clock, Millis } from "@phyxius/clock";
 import { Mailbox } from "./mailbox.js";
 import {
+  emitProcessStarting,
   emitProcessStart,
-  emitProcessReady,
+  emitProcessStarted,
+  emitProcessStopping,
+  emitProcessStopped,
   emitProcessStop,
   emitProcessFail,
+  emitMessageQueued,
+  emitMessageProcessing,
+  emitMessageProcessed,
   emitMessageStart,
   emitMessageEnd,
   emitMessageError,
 } from "./events.js";
 import { TimeoutError, ProcessError } from "./types.js";
+import { createProcessId as createId } from "./process-id.js";
 
-export function createProcessId(): ProcessId {
-  return crypto.randomUUID() as ProcessId;
-}
+// Use the createProcessId from process-id.ts instead of this one
 
 export class ProcessImpl<TMsg, TState, TCtx> implements ProcessRef<TMsg> {
-  readonly id: ProcessId = createProcessId();
+  readonly id: ProcessId;
   private _status: ProcessStatus = "starting";
-  private state: TState | undefined;
+  private processState: TState | undefined;
   private readonly mailbox: Mailbox<TMsg>;
   private readonly scheduledMessages = new Map<string, ScheduledMessage<TMsg>>();
   private readonly pendingAsks = new Map<string, PendingAsk<unknown>>();
@@ -37,39 +42,58 @@ export class ProcessImpl<TMsg, TState, TCtx> implements ProcessRef<TMsg> {
   private nextAskId = 0;
   private isProcessing = false;
   private shouldStop = false;
+  private startedAt = 0;
+  private restartCount = 0;
+  private lastError?: Error;
 
   constructor(
     private readonly spec: ProcessSpec<TMsg, TState, TCtx>,
     private readonly ctx: TCtx,
     private readonly clock: Clock,
     private readonly emit?: EmitFn,
+    id?: ProcessId,
   ) {
+    this.id = id || createId();
     const maxInbox = spec.maxInbox ?? 1024;
     const policy = spec.mailboxPolicy ?? "reject";
     this.mailbox = new Mailbox(maxInbox, { type: policy }, this.id, emit);
   }
 
   async start(): Promise<void> {
-    if (this._status !== "starting") throw new ProcessError(`Process ${this.id} already started`, this.id);
+    if (this._status !== "starting") throw new ProcessError(`Cannot start process in state: ${this._status}`, this.id);
 
+    emitProcessStarting(this.emit, this.spec.name, this.id);
     emitProcessStart(this.emit, this.spec.name, this.id);
     try {
-      this.state = await this.spec.init(this.ctx);
+      this.startedAt = this.clock.now().wallMs;
+      if (this.spec.init) {
+        this.processState = await this.spec.init(this.ctx);
+      }
       this._status = "running";
-      emitProcessReady(this.emit, this.id, this.clock.now().wallMs);
-      this.pump();
+      emitProcessStarted(this.emit, this.id, this.startedAt);
+      // Start message processing asynchronously
+      this.startMessagePump();
     } catch (error) {
       this._status = "failed";
+      this.lastError = error instanceof Error ? error : new Error(String(error));
       emitProcessFail(this.emit, this.id, error);
       throw error;
     }
   }
 
-  send(msg: TMsg): boolean {
-    if (this._status !== "running") return false;
+  async send(msg: TMsg): Promise<boolean> {
+    if (this._status !== "running") {
+      throw new ProcessError(`Cannot send message to process in state: ${this._status}`, this.id);
+    }
     const success = this.mailbox.enqueue(msg, this.clock.now().wallMs);
-    if (success && !this.isProcessing) {
-      this.clock.timeout(0 as Millis).then(() => this.pump());
+    if (success) {
+      const msgType = msg?.constructor?.name || "unknown";
+      const seq = this.mailbox.size(); // Approximate sequence number
+      emitMessageQueued(this.emit, this.id, msgType, seq, this.clock.now().wallMs);
+
+      if (!this.isProcessing) {
+        this.startMessagePump();
+      }
     }
     return success;
   }
@@ -79,21 +103,26 @@ export class ProcessImpl<TMsg, TState, TCtx> implements ProcessRef<TMsg> {
 
     this.shouldStop = true;
     this._status = "stopping";
+    emitProcessStopping(this.emit, this.id, reason);
     this.cancelAll();
 
     while (this.isProcessing) {
       await this.clock.timeout(1 as Millis);
     }
 
-    if (this.spec.onStop && this.state !== undefined) {
+    if (this.spec.onStop) {
       try {
-        await this.spec.onStop(this.state, reason, this.ctx);
+        await this.spec.onStop(this.processState!, reason, this.ctx);
       } catch (error) {
+        this.lastError = error instanceof Error ? error : new Error(String(error));
+        this._status = "failed";
         emitProcessFail(this.emit, this.id, error);
+        throw error;
       }
     }
 
     this._status = "stopped";
+    emitProcessStopped(this.emit, this.id, reason);
     emitProcessStop(this.emit, this.id, reason);
   }
 
@@ -119,7 +148,13 @@ export class ProcessImpl<TMsg, TState, TCtx> implements ProcessRef<TMsg> {
         }
       };
 
-      this.pendingAsks.set(askId, { id: askId, resolve, reject, timeout: timeoutAt, cancelled: false });
+      this.pendingAsks.set(askId, {
+        id: askId,
+        resolve: resolve as (value: unknown) => void,
+        reject,
+        timeout: timeoutAt,
+        cancelled: false,
+      });
 
       const msg = build(reply);
       if (!this.send(msg)) {
@@ -133,10 +168,36 @@ export class ProcessImpl<TMsg, TState, TCtx> implements ProcessRef<TMsg> {
     return this._status;
   }
 
-  private pump(): void {
+  get state(): ProcessStatus {
+    return this._status;
+  }
+
+  getInfo() {
+    const info: {
+      id: ProcessId;
+      state: ProcessStatus;
+      startedAt: number;
+      restartCount: number;
+      lastError?: Error;
+    } = {
+      id: this.id,
+      state: this._status,
+      startedAt: this.startedAt,
+      restartCount: this.restartCount,
+    };
+
+    if (this.lastError) {
+      info.lastError = this.lastError;
+    }
+
+    return info;
+  }
+
+  private startMessagePump(): void {
     if (this.isProcessing || this.shouldStop || this._status !== "running") return;
     this.isProcessing = true;
-    this.processNext();
+    // Schedule processing on next tick to avoid blocking
+    this.clock.timeout(0 as Millis).then(() => this.processNext());
   }
 
   private processNext(): void {
@@ -156,6 +217,7 @@ export class ProcessImpl<TMsg, TState, TCtx> implements ProcessRef<TMsg> {
     const msgType = msg?.constructor?.name || "unknown";
     const startTime = this.clock.now().wallMs;
 
+    emitMessageProcessing(this.emit, this.id, msgType, seq, startTime);
     emitMessageStart(this.emit, this.id, msgType, seq, startTime);
 
     try {
@@ -201,22 +263,26 @@ export class ProcessImpl<TMsg, TState, TCtx> implements ProcessRef<TMsg> {
         schedule: (after: Millis, msg: TMsg) => this.scheduleMessage(after, msg),
       };
 
-      const newStateOrPromise = this.spec.handle(this.state!, msg, tools);
+      const newStateOrPromise = this.spec.handle(this.processState!, msg, tools);
 
       Promise.resolve(newStateOrPromise)
         .then((newState) => {
-          this.state = newState;
+          this.processState = newState;
           const duration = this.clock.now().wallMs - startTime;
+          emitMessageProcessed(this.emit, this.id, msgType, seq, duration);
           emitMessageEnd(this.emit, this.id, msgType, seq, duration);
+          // Continue processing more messages
           this.clock.timeout(0 as Millis).then(() => this.processNext());
         })
         .catch((error) => {
+          this.lastError = error instanceof Error ? error : new Error(String(error));
           emitMessageError(this.emit, this.id, msgType, seq, error);
           this._status = "failed";
           this.isProcessing = false;
           emitProcessFail(this.emit, this.id, error);
         });
     } catch (error) {
+      this.lastError = error instanceof Error ? error : new Error(String(error));
       emitMessageError(this.emit, this.id, msgType, seq, error);
       this._status = "failed";
       this.isProcessing = false;

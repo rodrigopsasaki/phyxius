@@ -16,7 +16,9 @@ export class Mailbox<TMsg> {
     this.maxSize = maxSize;
     this.policy = policy;
     this.processId = processId;
-    this.emit = emit;
+    if (emit) {
+      this.emit = emit;
+    }
   }
 
   enqueue(msg: TMsg, enqueuedAt: number): boolean {

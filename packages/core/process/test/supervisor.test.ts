@@ -2,6 +2,11 @@ import { describe, it, expect, beforeEach } from "vitest";
 import { createSupervisor, createProcessId } from "../src/index.js";
 import type { ProcessBehavior } from "../src/index.js";
 
+interface TestEvent {
+  type: string;
+  [key: string]: unknown;
+}
+
 describe("Supervisor", () => {
   let events: unknown[] = [];
   const emit = (event: unknown) => events.push(event);
@@ -47,7 +52,8 @@ describe("Supervisor", () => {
       await supervisor.spawn(behavior);
 
       const spawnEvents = events.filter(
-        (e: any) => e.type === "supervisor:spawning" || e.type === "supervisor:spawned",
+        (e: unknown) =>
+          (e as TestEvent).type === "supervisor:spawning" || (e as TestEvent).type === "supervisor:spawned",
       );
       expect(spawnEvents).toHaveLength(2);
     });
@@ -75,7 +81,7 @@ describe("Supervisor", () => {
 
       await expect(supervisor.spawn(behavior)).rejects.toThrow("Spawn failed");
 
-      const failEvents = events.filter((e: any) => e.type === "supervisor:spawn:failed");
+      const failEvents = events.filter((e: unknown) => (e as TestEvent).type === "supervisor:spawn:failed");
       expect(failEvents).toHaveLength(1);
     });
   });
@@ -91,7 +97,7 @@ describe("Supervisor", () => {
 
       supervisor.supervise(process, "stop");
 
-      const supervisionEvents = events.filter((e: any) => e.type === "supervisor:supervising");
+      const supervisionEvents = events.filter((e: unknown) => (e as TestEvent).type === "supervisor:supervising");
       expect(supervisionEvents).toHaveLength(2); // Default + custom
     });
 
@@ -106,17 +112,25 @@ describe("Supervisor", () => {
         },
       };
 
-      const supervisor = createSupervisor({ emit });
+      // Use supervisor with no restart delay to make test faster
+      const supervisor = createSupervisor({
+        emit,
+        strategy: {
+          type: "one-for-one",
+          maxRestarts: { count: 3, within: 10000 },
+          backoff: { initial: 0, max: 100, factor: 1 }, // No delay for testing
+        },
+      });
       const process = await supervisor.spawn(behavior);
 
       // Send message that will cause failure
       await process.send({ type: "test" });
 
       // Wait for failure and restart
-      await new Promise((resolve) => setTimeout(resolve, 200));
+      await new Promise((resolve) => setTimeout(resolve, 100));
 
       // Process should be restarted
-      const restartEvents = events.filter((e: any) => e.type === "supervisor:child:restarted");
+      const restartEvents = events.filter((e: unknown) => (e as TestEvent).type === "supervisor:child:restarted");
       expect(restartEvents.length).toBeGreaterThan(0);
     });
 
@@ -131,7 +145,9 @@ describe("Supervisor", () => {
       // Test that we can apply stop strategy
       supervisor.supervise(process, "stop");
 
-      const supervisionEvents = events.filter((e: any) => e.type === "supervisor:supervising" && e.strategy === "stop");
+      const supervisionEvents = events.filter(
+        (e: unknown) => (e as TestEvent).type === "supervisor:supervising" && (e as TestEvent).strategy === "stop",
+      );
       expect(supervisionEvents).toHaveLength(1);
     });
 
@@ -147,7 +163,7 @@ describe("Supervisor", () => {
       supervisor.supervise(process, "escalate");
 
       const supervisionEvents = events.filter(
-        (e: any) => e.type === "supervisor:supervising" && e.strategy === "escalate",
+        (e: unknown) => (e as TestEvent).type === "supervisor:supervising" && (e as TestEvent).strategy === "escalate",
       );
       expect(supervisionEvents).toHaveLength(1);
     });
@@ -181,7 +197,10 @@ describe("Supervisor", () => {
       await supervisor.spawn(behavior);
       await supervisor.stop();
 
-      const stopEvents = events.filter((e: any) => e.type === "supervisor:stopping" || e.type === "supervisor:stopped");
+      const stopEvents = events.filter(
+        (e: unknown) =>
+          (e as TestEvent).type === "supervisor:stopping" || (e as TestEvent).type === "supervisor:stopped",
+      );
       expect(stopEvents).toHaveLength(2);
     });
 
@@ -199,7 +218,7 @@ describe("Supervisor", () => {
       // Should not throw despite child stop error
       await expect(supervisor.stop()).resolves.not.toThrow();
 
-      const errorEvents = events.filter((e: any) => e.type === "supervisor:child:stop:error");
+      const errorEvents = events.filter((e: unknown) => (e as TestEvent).type === "supervisor:child:stop:error");
       expect(errorEvents).toHaveLength(1);
     });
 
@@ -224,7 +243,15 @@ describe("Supervisor", () => {
         },
       };
 
-      const supervisor = createSupervisor({ emit });
+      // Use supervisor with minimal restart delay for testing
+      const supervisor = createSupervisor({
+        emit,
+        strategy: {
+          type: "one-for-one",
+          maxRestarts: { count: 5, within: 10000 },
+          backoff: { initial: 10, max: 100, factor: 1 }, // Minimal delay for testing
+        },
+      });
       const process = await supervisor.spawn(behavior);
 
       // Send messages that will fail initially
@@ -233,10 +260,10 @@ describe("Supervisor", () => {
       await process.send({ type: "test3" });
 
       // Wait for processing and restarts
-      await new Promise((resolve) => setTimeout(resolve, 500));
+      await new Promise((resolve) => setTimeout(resolve, 300));
 
       // Should have multiple restart attempts
-      const restartEvents = events.filter((e: any) => e.type === "supervisor:child:restarted");
+      const restartEvents = events.filter((e: unknown) => (e as TestEvent).type === "supervisor:child:restarted");
       expect(restartEvents.length).toBeGreaterThan(0);
     });
 

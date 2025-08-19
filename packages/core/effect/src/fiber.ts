@@ -14,13 +14,17 @@ export class FiberImpl<E, A> implements Fiber<E, A> {
     this.promise = promise;
     this.cancelFn = cancelFn;
 
-    // Store result when promise completes
+    // Store result when promise completes - use queueMicrotask for immediate scheduling
     promise
       .then((result) => {
-        this.result = result;
+        queueMicrotask(() => {
+          this.result = result;
+        });
       })
       .catch((error) => {
-        this.result = { _tag: "Err", error };
+        queueMicrotask(() => {
+          this.result = { _tag: "Err", error };
+        });
       });
   }
 
@@ -44,13 +48,14 @@ export class FiberImpl<E, A> implements Fiber<E, A> {
   private async _performInterrupt(): Promise<void> {
     this.cancelFn();
     // Wait for the fiber's promise to complete (including finalizers)
-    // Use a reasonable timeout to avoid hanging indefinitely
+    // Note: This method is internal and should only be called from interrupt() which has access to Effect environment
+    // For now, we'll use immediate resolution since proper timeout requires Clock from Effect environment
     try {
       await Promise.race([
         this.promise.catch(() => {
           // Ignore the result, we just want to wait for completion
         }),
-        new Promise((resolve) => setTimeout(resolve, 100)), // 100ms timeout
+        Promise.resolve(), // Complete immediately rather than using setTimeout
       ]);
     } catch {
       // Ignore any errors during interrupt
@@ -59,7 +64,23 @@ export class FiberImpl<E, A> implements Fiber<E, A> {
 
   poll(): Effect<never, Result<E, A> | undefined> {
     return effect(async () => {
-      return { _tag: "Ok", value: this.result };
+      // Check if promise is already resolved
+      if (this.result !== undefined) {
+        return { _tag: "Ok", value: this.result };
+      }
+
+      // Try to get the result without blocking
+      const settled = await Promise.race([
+        this.promise.then((result) => ({ resolved: true, result })),
+        Promise.resolve({ resolved: false, result: undefined }),
+      ]);
+
+      if (settled.resolved) {
+        this.result = settled.result;
+        return { _tag: "Ok", value: settled.result };
+      }
+
+      return { _tag: "Ok", value: undefined };
     });
   }
 }

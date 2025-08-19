@@ -18,5 +18,5 @@ export class ProcessIdImpl implements ProcessId {
 }
 
 export function createProcessId(value?: string): ProcessId {
-  return new ProcessIdImpl(value);
+  return new ProcessIdImpl(value) as ProcessId;
 }

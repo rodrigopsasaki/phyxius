@@ -1,12 +1,30 @@
 import type { Clock, Millis } from "@phyxius/clock";
 
 // Brands for type safety
-export type ProcessId = string & { readonly __brand: "ProcessId" };
+export interface ProcessId {
+  readonly value: string;
+  toString(): string;
+  equals(other: ProcessId): boolean;
+}
+
+// Basic message type for tests
+export type Message = unknown;
+
+// Simplified behavior interface for tests
+export interface ProcessBehavior<TMsg = Message, TState = unknown, TCtx = unknown> {
+  handle(
+    state?: TState,
+    msg?: TMsg,
+    tools?: Tools<TState, TMsg, TCtx>,
+  ): Promise<TState> | TState | Promise<void> | void;
+  init?(ctx?: TCtx): Promise<TState> | TState;
+  terminate?(state?: TState, reason?: StopReason, ctx?: TCtx): Promise<void> | void;
+}
 
 // Public types (6 types max per acceptance gate)
 export interface ProcessSpec<TMsg, TState, TCtx = unknown> {
   name: string;
-  init(ctx: TCtx): Promise<TState> | TState;
+  init?(ctx: TCtx): Promise<TState> | TState;
   handle(state: TState, msg: TMsg, tools: Tools<TState, TMsg, TCtx>): Promise<TState> | TState;
   onStop?(state: TState, reason: StopReason, ctx: TCtx): Promise<void> | void;
   maxInbox?: number; // default 1024
@@ -28,10 +46,21 @@ export interface Tools<TState, TMsg, TCtx> {
 
 export interface ProcessRef<TMsg> {
   id: ProcessId;
-  send(msg: TMsg): boolean;
+  state: ProcessStatus;
+  send(msg: TMsg): Promise<boolean>;
   stop(reason?: StopReason): Promise<void>;
   ask<TResp>(build: (reply: (r: TResp) => void) => TMsg, timeout?: Millis): Promise<TResp>;
   status(): ProcessStatus;
+  start(): Promise<void>;
+  getInfo(): ProcessInfo;
+}
+
+export interface ProcessInfo {
+  id: ProcessId;
+  state: ProcessStatus;
+  startedAt: number;
+  restartCount: number;
+  lastError?: Error;
 }
 
 export type StopReason = "normal" | "shutdown" | "error" | { type: "error"; error: unknown };
@@ -69,6 +98,13 @@ export interface ProcessEvent {
   attempts?: number;
   withinMs?: number;
   afterMs?: number;
+  // Supervisor-specific fields
+  supervisorId?: ProcessId;
+  processId?: ProcessId;
+  oldProcessId?: ProcessId;
+  newProcessId?: ProcessId;
+  strategy?: string;
+  timestamp?: number;
 }
 
 export type EmitFn = (event: ProcessEvent) => void;

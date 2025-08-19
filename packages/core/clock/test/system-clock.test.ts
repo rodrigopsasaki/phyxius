@@ -2,6 +2,11 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { createSystemClock } from "../src/system-clock.js";
 import type { Clock, Millis, DeadlineTarget } from "../src/types.js";
 
+interface ClockEvent {
+  type: string;
+  [key: string]: unknown;
+}
+
 describe("SystemClock", () => {
   let clock: Clock;
   let events: unknown[] = [];
@@ -87,8 +92,8 @@ describe("SystemClock", () => {
       const target: DeadlineTarget = { wallMs: Date.now() + 10 };
       await clock.deadline(target);
 
-      const deadlineStart = events.find((e: any) => e.type === "time:deadline:start");
-      const deadlineEnd = events.find((e: any) => e.type?.startsWith("time:deadline:"));
+      const deadlineStart = events.find((e: ClockEvent) => e.type === "time:deadline:start");
+      const deadlineEnd = events.find((e: ClockEvent) => e.type?.startsWith("time:deadline:"));
 
       expect(deadlineStart).toBeDefined();
       expect(deadlineEnd).toBeDefined();
@@ -98,7 +103,7 @@ describe("SystemClock", () => {
       const past: DeadlineTarget = { wallMs: Date.now() - 1000 };
       await clock.deadline(past);
 
-      const errEvent = events.find((e: any) => e.type === "time:deadline:err");
+      const errEvent = events.find((e: ClockEvent) => e.type === "time:deadline:err");
       expect(errEvent).toBeDefined();
     });
   });
@@ -123,9 +128,9 @@ describe("SystemClock", () => {
       await new Promise((resolve) => setTimeout(resolve, 45));
       handle.cancel();
 
-      const setEvent = events.find((e: any) => e.type === "time:interval:set");
-      const tickEvents = events.filter((e: any) => e.type === "time:interval:tick");
-      const cancelEvent = events.find((e: any) => e.type === "time:interval:cancel");
+      const setEvent = events.find((e: ClockEvent) => e.type === "time:interval:set");
+      const tickEvents = events.filter((e: ClockEvent) => e.type === "time:interval:tick");
+      const cancelEvent = events.find((e: ClockEvent) => e.type === "time:interval:cancel");
 
       expect(setEvent).toBeDefined();
       expect(tickEvents.length).toBeGreaterThanOrEqual(1);
@@ -145,7 +150,7 @@ describe("SystemClock", () => {
       handle.cancel();
 
       expect(callCount).toBeGreaterThanOrEqual(3);
-      const errorEvent = events.find((e: any) => e.type === "time:interval:error");
+      const errorEvent = events.find((e: ClockEvent) => e.type === "time:interval:error");
       expect(errorEvent).toBeDefined();
     });
 

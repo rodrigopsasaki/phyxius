@@ -192,7 +192,7 @@ describe("Atom Error Propagation", () => {
 
   it("should throw clear error on custom equals function failure", () => {
     const clock = createControlledClock({ initialTime: 0 });
-    const faultyEquals = (a: any, b: any) => {
+    const faultyEquals = (a: unknown, b: unknown) => {
       if (a === "trigger-error" || b === "trigger-error") {
         throw new Error("Custom equals error");
       }

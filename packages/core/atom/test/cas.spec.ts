@@ -40,7 +40,7 @@ describe("Atom Compare-and-Set Semantics", () => {
     const deepEquals = (a: { n: number }, b: { n: number }) => a.n === b.n;
     const clock = createControlledClock({ initialTime: 0 });
     const atom = createAtom({ n: 1 }, clock, { equals: deepEquals });
-    const changes: Array<{ from: any; to: any }> = [];
+    const changes: Array<{ from: { n: number }; to: { n: number } }> = [];
 
     atom.watch((change) => changes.push({ from: change.from, to: change.to }));
 
@@ -77,7 +77,7 @@ describe("Atom Compare-and-Set Semantics", () => {
   it("should support cause metadata in CAS", () => {
     const clock = createControlledClock({ initialTime: 0 });
     const atom = createAtom("initial", clock);
-    let capturedChange: any;
+    let capturedChange: { from: string; to: string };
 
     atom.watch((change) => {
       capturedChange = change;

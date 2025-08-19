@@ -2,6 +2,11 @@ import { describe, it, expect, beforeEach } from "vitest";
 import { createControlledClock } from "../src/controlled-clock.js";
 import type { Millis, DeadlineTarget } from "../src/types.js";
 
+interface ClockEvent {
+  type: string;
+  [key: string]: unknown;
+}
+
 describe("ControlledClock", () => {
   let clock: ReturnType<typeof createControlledClock>;
   let events: unknown[] = [];
@@ -54,7 +59,7 @@ describe("ControlledClock", () => {
       await sleepPromise;
 
       // Filter out advance events
-      const sleepEvents = events.filter((e: any) => e.type.startsWith("time:sleep"));
+      const sleepEvents = events.filter((e: ClockEvent) => e.type.startsWith("time:sleep"));
       expect(sleepEvents).toHaveLength(2);
       expect(sleepEvents[0]).toMatchObject({
         type: "time:sleep:start",
@@ -81,7 +86,7 @@ describe("ControlledClock", () => {
       clock.advanceBy(50 as Millis);
       await deadlinePromise;
 
-      const okEvent = events.find((e: any) => e.type === "time:deadline:ok");
+      const okEvent = events.find((e: ClockEvent) => e.type === "time:deadline:ok");
       expect(okEvent).toBeDefined();
     });
 
@@ -90,7 +95,7 @@ describe("ControlledClock", () => {
       const past: DeadlineTarget = { wallMs: clock.now().wallMs - 50 };
       await clock.deadline(past);
 
-      const errEvent = events.find((e: any) => e.type === "time:deadline:err");
+      const errEvent = events.find((e: ClockEvent) => e.type === "time:deadline:err");
       expect(errEvent).toBeDefined();
     });
   });
@@ -113,9 +118,9 @@ describe("ControlledClock", () => {
       clock.advanceBy(250 as Millis);
       handle.cancel();
 
-      const setEvent = events.find((e: any) => e.type === "time:interval:set");
-      const tickEvents = events.filter((e: any) => e.type === "time:interval:tick");
-      const cancelEvent = events.find((e: any) => e.type === "time:interval:cancel");
+      const setEvent = events.find((e: ClockEvent) => e.type === "time:interval:set");
+      const tickEvents = events.filter((e: ClockEvent) => e.type === "time:interval:tick");
+      const cancelEvent = events.find((e: ClockEvent) => e.type === "time:interval:cancel");
 
       expect(setEvent).toBeDefined();
       expect(tickEvents).toHaveLength(2);
@@ -135,7 +140,7 @@ describe("ControlledClock", () => {
       handle.cancel();
 
       expect(callCount).toBe(3);
-      const errorEvent = events.find((e: any) => e.type === "time:interval:error");
+      const errorEvent = events.find((e: ClockEvent) => e.type === "time:interval:error");
       expect(errorEvent).toBeDefined();
     });
 
@@ -158,7 +163,7 @@ describe("ControlledClock", () => {
     it("should emit advance events", async () => {
       clock.advanceBy(100 as Millis);
 
-      const advanceEvent = events.find((e: any) => e.type === "time:advance");
+      const advanceEvent = events.find((e: ClockEvent) => e.type === "time:advance");
       expect(advanceEvent).toMatchObject({
         type: "time:advance",
         byMs: 100,

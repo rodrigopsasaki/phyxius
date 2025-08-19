@@ -1,11 +1,11 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import { createControlledClock } from "@phyxius/clock";
-import type { Clock } from "@phyxius/clock";
+import type { ControlledClock } from "@phyxius/clock";
 import { Journal, JournalReentrancyError, JournalOverflowError } from "../src/index.js";
 import type { JournalEvent, IdGenerator } from "../src/index.js";
 
 describe("Journal", () => {
-  let clock: Clock;
+  let clock: ControlledClock;
   let idCounter: number;
   let events: JournalEvent[];
   let idGenerator: IdGenerator;
@@ -40,10 +40,10 @@ describe("Journal", () => {
         emit: (event) => events.push(event),
       });
 
-      (clock as any).advanceBy(100);
+      clock.advanceBy(100);
       const entry1 = journal.append({ message: "first" });
 
-      (clock as any).advanceBy(50);
+      clock.advanceBy(50);
       const entry2 = journal.append({ message: "second" });
 
       expect(entry1.sequence).toBe(0);
@@ -104,7 +104,7 @@ describe("Journal", () => {
       journal.append("b");
       expect(journal.size()).toBe(2);
 
-      (clock as any).advanceBy(200);
+      clock.advanceBy(200);
       journal.clear();
 
       expect(journal.size()).toBe(0);
@@ -122,7 +122,7 @@ describe("Journal", () => {
   describe("subscribers", () => {
     it("should notify subscribers on append", () => {
       const journal = new Journal({ clock, idGenerator });
-      const received: any[] = [];
+      const received: unknown[] = [];
 
       const unsubscribe = journal.subscribe((entry) => {
         received.push(entry.data);
@@ -149,7 +149,7 @@ describe("Journal", () => {
         throw new Error("Subscriber error");
       });
 
-      (clock as any).advanceBy(300);
+      clock.advanceBy(300);
       journal.append("test");
 
       const errorEvent = events.find((e) => e.type === "journal:subscriber:error");
@@ -243,9 +243,9 @@ describe("Journal", () => {
       const journal = new Journal({ clock, idGenerator });
 
       journal.append("first");
-      (clock as any).advanceBy(100);
+      clock.advanceBy(100);
       journal.append("second");
-      (clock as any).advanceBy(100);
+      clock.advanceBy(100);
 
       const snapshot = journal.getSnapshot();
 
@@ -270,9 +270,9 @@ describe("Journal", () => {
     it("should serialize and deserialize without custom serializer", () => {
       const journal = new Journal({ clock, idGenerator });
 
-      (clock as any).advanceBy(100);
+      clock.advanceBy(100);
       journal.append({ message: "first" });
-      (clock as any).advanceBy(50);
+      clock.advanceBy(50);
       journal.append({ message: "second" });
 
       const serialized = journal.toJSON();

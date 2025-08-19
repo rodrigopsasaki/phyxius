@@ -2,6 +2,11 @@ import { describe, it, expect, beforeEach } from "vitest";
 import { createProcess, createProcessId } from "../src/index.js";
 import type { ProcessBehavior, Message } from "../src/index.js";
 
+interface TestEvent {
+  type: string;
+  [key: string]: unknown;
+}
+
 describe("Process", () => {
   let events: unknown[] = [];
   const emit = (event: unknown) => events.push(event);
@@ -41,7 +46,7 @@ describe("Process", () => {
 
       expect(process.state).toBe("running");
 
-      const startEvents = events.filter((e: any) => e.type === "process:started");
+      const startEvents = events.filter((e: unknown) => (e as TestEvent).type === "process:started");
       expect(startEvents).toHaveLength(1);
     });
 
@@ -254,7 +259,7 @@ describe("Process", () => {
 
       // Simulate restart
       if ("restart" in process) {
-        await (process as any).restart();
+        await (process as { restart(): Promise<void> }).restart();
         expect(callCount).toBe(2);
         expect(process.getInfo().restartCount).toBe(1);
       }
@@ -271,7 +276,7 @@ describe("Process", () => {
       await process.start();
       await process.stop();
 
-      const eventTypes = events.map((e: any) => e.type);
+      const eventTypes = events.map((e: unknown) => (e as TestEvent).type);
       expect(eventTypes).toContain("process:starting");
       expect(eventTypes).toContain("process:started");
       expect(eventTypes).toContain("process:stopping");
@@ -292,7 +297,7 @@ describe("Process", () => {
       // Wait for processing
       await new Promise((resolve) => setTimeout(resolve, 10));
 
-      const eventTypes = events.map((e: any) => e.type);
+      const eventTypes = events.map((e: unknown) => (e as TestEvent).type);
       expect(eventTypes).toContain("process:message:queued");
       expect(eventTypes).toContain("process:message:processing");
       expect(eventTypes).toContain("process:message:processed");

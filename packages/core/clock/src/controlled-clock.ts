@@ -260,12 +260,7 @@ class ControlledClock implements Clock {
     for (const timer of this.timers) {
       if (timer.cancelled) continue;
 
-      let fireAt: number;
-      if (timer.kind === "timeout") {
-        fireAt = timer.fireAt;
-      } else {
-        fireAt = timer.nextMono;
-      }
+      const fireAt: number = timer.kind === "timeout" ? timer.fireAt : timer.nextMono;
 
       if (fireAt <= targetMono) {
         if (!earliest || fireAt < earliest.fireAt) {
