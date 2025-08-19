@@ -1,10 +1,9 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import { context } from "../src/index.js";
-import { createControlledClock } from "@phyxius/clock";
 
-describe("Context", () => {
+describe("Context - Static Data Bag", () => {
   beforeEach(() => {
-    // Clear any global context before each test by accessing the global runtime directly
+    // Clear any global context before each test
     // @ts-expect-error - accessing internal state for testing purposes
     if (globalThis.__phyxius_context_runtime__) {
       // @ts-expect-error - accessing internal state for testing purposes
@@ -14,162 +13,164 @@ describe("Context", () => {
     }
   });
 
-  describe("global context", () => {
-    it("should set and get global context", () => {
-      const clock = createControlledClock({ initialTime: 1000 });
+  describe("context.scope", () => {
+    it("should create context scope and execute callback", async () => {
+      const result = await context.scope(async () => {
+        const ctx = context.require();
+        expect(ctx.id).toBeDefined();
 
-      const globalCtx = context.global({
-        name: "test.global",
-        clock,
-        initial: { service: "test" },
+        context.set("test", "data");
+        expect(context.get("test")).toBe("data");
+
+        return "success";
       });
-
-      expect(globalCtx.name).toBe("test.global");
-      expect(globalCtx.clock).toBe(clock);
-      expect(globalCtx.data.get("service")).toBe("test");
-
-      const retrieved = context.globalContext();
-      expect(retrieved).toBe(globalCtx);
-    });
-  });
-
-  describe("observe", () => {
-    it("should create context and execute callback", async () => {
-      const clock = createControlledClock({ initialTime: 1000 });
-
-      const result = await context.observe(
-        {
-          name: "test.operation",
-          clock,
-          initial: { test: "data" },
-        },
-        async () => {
-          const ctx = context.require();
-          expect(ctx.name).toBe("test.operation");
-          expect(ctx.clock).toBe(clock);
-          expect(ctx.data.get("test")).toBe("data");
-          return "success";
-        },
-      );
 
       expect(result).toBe("success");
     });
 
-    it("should inherit from global context", async () => {
-      const clock = createControlledClock({ initialTime: 1000 });
-
-      context.global({
-        name: "global",
-        clock,
-        initial: { global: "value" },
-      });
-
-      await context.observe("test.operation", async () => {
-        const ctx = context.require();
-        expect(ctx.clock).toBe(clock);
-        expect(ctx.data.get("global")).toBe("value");
-      });
+    it("should support initial data", async () => {
+      await context.scope(
+        async () => {
+          const ctx = context.require();
+          expect(ctx.data.get("initial")).toBe("value");
+          expect(context.get("initial")).toBe("value");
+        },
+        { initial: "value" },
+      );
     });
 
     it("should inherit from parent context", async () => {
-      const clock = createControlledClock({ initialTime: 1000 });
-
-      await context.observe(
-        {
-          name: "parent",
-          clock,
-          initial: { parent: "data" },
-        },
+      await context.scope(
         async () => {
+          context.set("parent", "data");
           context.set("runtime", "added");
 
-          await context.observe("child", async () => {
-            const ctx = context.require();
-            expect(ctx.parentId).toBeDefined();
-            expect(ctx.data.get("parent")).toBe("data");
-            expect(ctx.data.get("runtime")).toBe("added");
+          await context.scope(async () => {
+            expect(context.get("parent")).toBe("data");
+            expect(context.get("runtime")).toBe("added");
+
+            // Child context can override parent values
+            context.set("runtime", "overridden");
+            expect(context.get("runtime")).toBe("overridden");
           });
+
+          // Parent context is unchanged
+          expect(context.get("runtime")).toBe("added");
         },
+        { initial: "parent" },
       );
     });
 
-    it("should not inherit when inherit is false", async () => {
-      const clock = createControlledClock({ initialTime: 1000 });
+    it("should override inherited values with initial data", async () => {
+      await context.scope(async () => {
+        context.set("shared", "parent");
+        context.set("unique", "parent");
 
-      await context.observe(
-        {
-          name: "parent",
-          clock,
-          initial: { parent: "data" },
-        },
-        async () => {
-          await context.observe(
-            {
-              name: "child",
-              inherit: false,
-              initial: { child: "only" },
-            },
-            async () => {
-              const ctx = context.require();
-              expect(ctx.data.get("parent")).toBeUndefined();
-              expect(ctx.data.get("child")).toBe("only");
-            },
-          );
-        },
-      );
+        await context.scope(
+          async () => {
+            expect(context.get("shared")).toBe("override");
+            expect(context.get("unique")).toBe("parent");
+          },
+          { shared: "override" },
+        );
+      });
     });
   });
 
-  describe("data manipulation", () => {
-    it("should set and get data", async () => {
-      const clock = createControlledClock({ initialTime: 1000 });
+  describe("data operations", () => {
+    it("should set and get values", async () => {
+      await context.scope(async () => {
+        context.set("user_id", "user123");
+        context.set("count", 42);
+        context.set("active", true);
 
-      await context.observe({ name: "test", clock }, async () => {
-        context.set("key1", "value1");
-        context.set("key2", 42);
-
-        expect(context.get("key1")).toBe("value1");
-        expect(context.get("key2")).toBe(42);
+        expect(context.get("user_id")).toBe("user123");
+        expect(context.get("count")).toBe(42);
+        expect(context.get("active")).toBe(true);
         expect(context.get("nonexistent")).toBeUndefined();
       });
     });
 
-    it("should push to arrays", async () => {
-      const clock = createControlledClock({ initialTime: 1000 });
-
-      await context.observe({ name: "test", clock }, async () => {
-        context.push("events", "event1");
-        context.push("events", "event2");
+    it("should push values to arrays", async () => {
+      await context.scope(async () => {
+        context.push("events", "login");
+        context.push("events", "purchase");
+        context.push("events", "logout");
 
         const events = context.get<string[]>("events");
-        expect(events).toEqual(["event1", "event2"]);
+        expect(events).toEqual(["login", "purchase", "logout"]);
       });
     });
 
     it("should merge objects", async () => {
-      const clock = createControlledClock({ initialTime: 1000 });
+      await context.scope(async () => {
+        context.merge("metadata", { version: "1.0.0", env: "prod" });
+        context.merge("metadata", { region: "us-east-1", debug: true });
 
-      await context.observe({ name: "test", clock }, async () => {
-        context.merge("metadata", { key1: "value1" });
-        context.merge("metadata", { key2: "value2" });
+        const metadata = context.get<Record<string, unknown>>("metadata");
+        expect(metadata).toEqual({
+          version: "1.0.0",
+          env: "prod",
+          region: "us-east-1",
+          debug: true,
+        });
+      });
+    });
 
-        const metadata = context.get("metadata");
-        expect(metadata).toEqual({ key1: "value1", key2: "value2" });
+    it("should handle mixed operations", async () => {
+      await context.scope(async () => {
+        // Set initial values
+        context.set("user_id", "user123");
+        context.merge("profile", { name: "Alice", role: "admin" });
+
+        // Add events
+        context.push("actions", "login");
+        context.push("actions", "view_dashboard");
+
+        // Merge more profile data
+        context.merge("profile", { last_login: "2024-01-01" });
+
+        // Verify all data
+        expect(context.get("user_id")).toBe("user123");
+        expect(context.get<string[]>("actions")).toEqual(["login", "view_dashboard"]);
+        expect(context.get<Record<string, unknown>>("profile")).toEqual({
+          name: "Alice",
+          role: "admin",
+          last_login: "2024-01-01",
+        });
       });
     });
   });
 
   describe("error handling", () => {
-    it("should throw when no context is available", () => {
+    it("should throw when accessing context outside of scope", () => {
       expect(() => context.require()).toThrow("No active context available");
+      expect(() => context.set("key", "value")).toThrow("No active context available");
+      expect(() => context.get("key")).toThrow("No active context available");
     });
 
-    it("should throw when no clock is available", async () => {
-      await expect(
-        context.observe("test", async () => {
-          // This should fail because no clock is provided and no global context
+    it("should return undefined when no context is active", () => {
+      const ctx = context.current();
+      expect(ctx).toBeUndefined();
+    });
+  });
+
+  describe("context isolation", () => {
+    it("should isolate concurrent contexts", async () => {
+      const results = await Promise.all([
+        context.scope(async () => {
+          context.set("worker", "A");
+          await new Promise((resolve) => setTimeout(resolve, 10));
+          return context.get("worker");
         }),
-      ).rejects.toThrow("No clock available");
+        context.scope(async () => {
+          context.set("worker", "B");
+          await new Promise((resolve) => setTimeout(resolve, 10));
+          return context.get("worker");
+        }),
+      ]);
+
+      expect(results).toEqual(["A", "B"]);
     });
   });
 });

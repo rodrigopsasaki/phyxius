@@ -1,24 +1,20 @@
-import { requireCurrentContext } from "./global.js";
+import { requireCurrentContext, getContextStore, getCurrentContext } from "./global.js";
 import type { PhyxiusContext } from "./types.js";
+import { generateId } from "../utils/generateId.js";
 
 /**
  * Retrieves the current active context.
  *
  * This function returns the context that is currently active in the
- * async execution scope. It's useful for accessing context metadata or
- * for getting the current clock instance.
+ * async execution scope.
  *
  * @returns The current active context
  * @throws {Error} If called outside of a context scope
  *
  * @example
  * ```typescript
- * await context.observe("my.workflow", async () => {
- *   const ctx = getContext();
- *   console.log("Working in context:", ctx.name);
- *   console.log("Context ID:", ctx.id);
- *   console.log("Clock:", ctx.clock);
- * });
+ * const ctx = getContext();
+ * console.log("Context ID:", ctx.id);
  * ```
  */
 export function getContext(): PhyxiusContext {
@@ -28,20 +24,13 @@ export function getContext(): PhyxiusContext {
 /**
  * Sets a key-value pair on the current context's data map.
  *
- * This is the primary method for storing data in the current context.
- * The data will be available to any child contexts and can be retrieved
- * with `contextGet()`.
- *
  * @param key - The key to store the value under
  * @param value - The value to store (can be any type)
  *
  * @example
  * ```typescript
- * await context.observe("user.login", async () => {
- *   contextSet("user_id", "user123");
- *   contextSet("login_method", "oauth");
- *   contextSet("timestamp", new Date().toISOString());
- * });
+ * contextSet("user_id", "user123");
+ * contextSet("login_method", "oauth");
  * ```
  */
 export function contextSet<K extends string, V = unknown>(key: K, value: V): void {
@@ -57,13 +46,9 @@ export function contextSet<K extends string, V = unknown>(key: K, value: V): voi
  *
  * @example
  * ```typescript
- * await context.observe("order.processing", async () => {
- *   contextSet("order_id", "order123");
- *
- *   // Later in the same context...
- *   const orderId = contextGet("order_id"); // "order123"
- *   const missing = contextGet("nonexistent"); // undefined
- * });
+ * contextSet("order_id", "order123");
+ * const orderId = contextGet("order_id"); // "order123"
+ * const missing = contextGet("nonexistent"); // undefined
  * ```
  */
 export function contextGet<T = unknown>(key: string): T | undefined {
@@ -74,21 +59,16 @@ export function contextGet<T = unknown>(key: string): T | undefined {
 /**
  * Pushes a value into an array stored at the given key in the context's data map.
  *
- * If the key doesn't exist yet, an empty array is created first. This is useful
- * for collecting multiple related values during context execution.
+ * If the key doesn't exist yet, an empty array is created first.
  *
  * @param key - The key for the array
  * @param value - The value to push to the array
  *
  * @example
  * ```typescript
- * await context.observe("order.processing", async () => {
- *   contextPush("events", "order_created");
- *   contextPush("events", "payment_processed");
- *   contextPush("events", "inventory_updated");
- *
- *   // Results in: ["order_created", "payment_processed", "inventory_updated"]
- * });
+ * contextPush("events", "order_created");
+ * contextPush("events", "payment_processed");
+ * // Results in: ["order_created", "payment_processed"]
  * ```
  */
 export function contextPush<T = unknown>(key: string, value: T): void {
@@ -101,26 +81,16 @@ export function contextPush<T = unknown>(key: string, value: T): void {
 /**
  * Merges a record into the existing object at the given key in the context's data map.
  *
- * If the key doesn't exist yet, an empty object is created first. This is useful
- * for building up structured metadata objects incrementally.
+ * If the key doesn't exist yet, an empty object is created first.
  *
  * @param key - The key for the object
  * @param value - The object to merge into the existing object
  *
  * @example
  * ```typescript
- * await context.observe("api.request", async () => {
- *   contextMerge("request", { method: "POST", path: "/users" });
- *   contextMerge("request", { headers: { "content-type": "application/json" } });
- *   contextMerge("request", { body: { name: "John" } });
- *
- *   // Results in: {
- *   //   method: "POST",
- *   //   path: "/users",
- *   //   headers: { "content-type": "application/json" },
- *   //   body: { name: "John" }
- *   // }
- * });
+ * contextMerge("request", { method: "POST", path: "/users" });
+ * contextMerge("request", { headers: { "content-type": "application/json" } });
+ * // Results in: { method: "POST", path: "/users", headers: {...} }
  * ```
  */
 export function contextMerge<K extends string, V = unknown>(key: K, value: Record<string, V>): void {
@@ -130,27 +100,53 @@ export function contextMerge<K extends string, V = unknown>(key: K, value: Recor
 }
 
 /**
- * Gets the ancestry chain of the current context.
- * Returns an array of context IDs from the current context up to the root.
+ * Creates a new context scope and executes a callback within it.
  *
- * @returns Array of context IDs representing the ancestry chain
+ * Creates a new context that inherits from the parent context (if any)
+ * and executes the callback within that scope.
+ *
+ * @param callback - The function to execute within the new context scope
+ * @param initialData - Optional initial data for the new context
+ * @returns The result of the callback function
  *
  * @example
  * ```typescript
- * // In a nested context structure
- * const ancestry = getContextAncestry();
- * // Returns: ["current-id", "parent-id", "grandparent-id", "root-id"]
+ * const result = await contextScope(async () => {
+ *   context.set("user_id", "user123");
+ *   return "completed";
+ * }, { initial: "data" });
  * ```
  */
-export function getContextAncestry(): string[] {
-  const context = requireCurrentContext();
-  const ancestry: string[] = [context.id];
+export async function contextScope<T>(
+  callback: () => Promise<T> | T,
+  initialData?: Record<string, unknown>,
+): Promise<T> {
+  const parentContext = getCurrentContext();
 
-  // For now, we only track immediate parent
-  // Could be extended to traverse full ancestry chain if needed
-  if (context.parentId) {
-    ancestry.push(context.parentId);
+  // Create new context with inherited data
+  const newContext: PhyxiusContext = {
+    id: generateId(),
+    data: createContextData(parentContext, initialData ?? {}),
+  };
+
+  const store = getContextStore();
+  return store.run(newContext, callback);
+}
+
+/**
+ * Creates the data map for a new context, handling inheritance from parent.
+ */
+function createContextData(
+  parentContext: PhyxiusContext | undefined,
+  initialData: Record<string, unknown>,
+): Map<string, unknown> {
+  // Start with parent data if available
+  const data = parentContext ? new Map(parentContext.data) : new Map();
+
+  // Add initial data, potentially overriding inherited values
+  for (const [key, value] of Object.entries(initialData)) {
+    data.set(key, value);
   }
 
-  return ancestry;
+  return data;
 }

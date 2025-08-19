@@ -1,14 +1,23 @@
 # Process
 
-**Units that restart on failure. Systems that heal themselves. Concurrency without chaos.**
+Units that restart on failure. Systems that heal themselves. Concurrency without chaos.
 
 Every system failure you've debugged starts with the same pattern: one component fails, takes down its neighbor, which takes down its neighbor, until the whole system is dead. Cascading failures, resource leaks, deadlocks, race conditions.
 
 Process fixes this. Isolated units, supervised execution, let it crash and restart.
 
-## The Problem
+Two implementations, one interface:
 
-```typescript
+- In-memory processes for single-node actor systems with message passing.
+- Distributed processes for multi-node systems with location transparency.
+
+---
+
+## Why shared state is broken
+
+### Cascading failures and resource leaks
+
+```js
 // This is broken. One failure kills everything.
 class UserService {
   private connections = new Map();
@@ -33,93 +42,67 @@ class UserService {
 const service = new UserService();
 ```
 
+### Race conditions in concurrent access
+
+```js
+// Multiple threads/promises accessing shared state
+class Counter {
+  private value = 0;
+
+  async increment() {
+    const current = this.value; // Race condition here
+    await someAsyncWork();
+    this.value = current + 1; // Lost updates
+  }
+}
+
+// Two concurrent increments might only increase counter by 1
+counter.increment();
+counter.increment();
+```
+
 Object-oriented programming gives you shared mutable state, which gives you race conditions, which give you bugs that only happen in production under load.
 
-## The Solution
+---
 
-```typescript
+## The Problem
+
+Traditional concurrency models share state between threads or async operations, leading to race conditions, deadlocks, and system-wide failures when one component crashes.
+
+```ts
+// No isolation - everything shares the same fate
+class OrderSystem {
+  private orders = new Map();
+  private payments = new Map();
+  private inventory = new Map();
+
+  async processOrder(order: Order) {
+    // Any failure here brings down the entire system
+    await this.validateInventory(order);
+    await this.processPayment(order);
+    await this.updateInventory(order);
+    await this.sendConfirmation(order);
+
+    // If sendConfirmation fails, what happens to inventory?
+    // What about the payment? No way to roll back cleanly.
+  }
+}
+```
+
+---
+
+## Process helps you with this
+
+### Example 1 — Isolated state with message passing
+
+```ts
 import { createRootSupervisor } from "@phyxius/process";
 import { createSystemClock } from "@phyxius/clock";
 
 const clock = createSystemClock();
 const supervisor = createRootSupervisor({ clock });
 
-// Isolated process with its own state
-const userProcess = supervisor.spawn(
-  {
-    name: "user-service",
-
-    // Initialize state (runs once on start)
-    init: () => ({
-      connections: new Map(),
-      cache: new Map(),
-    }),
-
-    // Handle messages (one at a time, no race conditions)
-    handle: async (state, message) => {
-      if (message.type === "get-user") {
-        const user = await database.getUser(message.userId);
-        state.cache.set(message.userId, user);
-        return state;
-      }
-
-      return state;
-    },
-  },
-  {},
-);
-
-// Send message - never blocks, never fails
-userProcess.send({ type: "get-user", userId: "alice" });
-```
-
-Processes are isolated units with their own state. Messages are handled one at a time. If a process crashes, it restarts with fresh state. No shared state, no race conditions, no cascading failures.
-
-## Start Simple: Basic Process
-
-```typescript
-import { createRootSupervisor } from "@phyxius/process";
-import { createSystemClock } from "@phyxius/clock";
-
-const clock = createSystemClock();
-const supervisor = createRootSupervisor({ clock });
-
-// Counter process that manages its own state
-const counter = supervisor.spawn(
-  {
-    name: "counter",
-    init: () => ({ count: 0 }),
-    handle: (state, message) => {
-      switch (message.type) {
-        case "increment":
-          return { count: state.count + 1 };
-        case "decrement":
-          return { count: state.count - 1 };
-        case "reset":
-          return { count: 0 };
-        default:
-          return state;
-      }
-    },
-  },
-  {},
-);
-
-// Send messages
-counter.send({ type: "increment" });
-counter.send({ type: "increment" });
-counter.send({ type: "decrement" });
-
-console.log(counter.status()); // "running"
-```
-
-Each process handles one message at a time. No locks, no mutexes, no race conditions. The process state is isolated and safe.
-
-## Add Responses: Request-Reply Pattern
-
-```typescript
-type CounterMessage = { type: "increment" } | { type: "get"; reply: (count: number) => void };
-
+// Counter process with isolated state
 const counter = supervisor.spawn(
   {
     name: "counter",
@@ -139,52 +122,17 @@ const counter = supervisor.spawn(
   {},
 );
 
-// Send async request with response
+// Send messages - never blocks, never races
+counter.send({ type: "increment" });
+counter.send({ type: "increment" });
+
 const count = await counter.ask((reply) => ({ type: "get", reply }));
-console.log(`Current count: ${count}`);
+console.log(count); // Always 2, never race condition
 ```
 
-The `ask` pattern provides synchronous-style request-response over async message passing. Timeouts prevent hanging forever.
+### Example 2 — Crash and restart with clean state
 
-## Add Timing: Scheduled Messages
-
-```typescript
-const heartbeat = supervisor.spawn(
-  {
-    name: "heartbeat",
-    init: () => ({ lastPing: Date.now() }),
-    handle: (state, message, tools) => {
-      switch (message.type) {
-        case "start":
-          // Schedule a ping to ourselves in 1 second
-          tools.schedule(1000, { type: "ping" });
-          return state;
-
-        case "ping":
-          const now = Date.now();
-          console.log(`Heartbeat: ${now - state.lastPing}ms since last ping`);
-
-          // Schedule next ping
-          tools.schedule(1000, { type: "ping" });
-          return { lastPing: now };
-
-        default:
-          return state;
-      }
-    },
-  },
-  {},
-);
-
-// Start the heartbeat
-heartbeat.send({ type: "start" });
-```
-
-Schedule messages to yourself for periodic behavior, timeouts, delayed operations. All timing is deterministic and testable.
-
-## Add Resilience: Crash and Restart
-
-```typescript
+```ts
 const flakyWorker = supervisor.spawn(
   {
     name: "flaky-worker",
@@ -199,116 +147,71 @@ const flakyWorker = supervisor.spawn(
         console.log(`Processed item ${state.processed + 1}`);
         return { processed: state.processed + 1 };
       }
-
       return state;
     },
   },
   {},
 );
 
-// Send work - even if it crashes, it restarts
+// Send work - even if it crashes, it restarts with fresh state
 for (let i = 0; i < 100; i++) {
   flakyWorker.send({ type: "work", item: i });
 }
 ```
 
-When a process crashes, it restarts with fresh state. Work continues. The error doesn't propagate or bring down other processes.
+### Example 3 — Request-reply with timeouts
 
-## Add Observability: Complete Telemetry
-
-```typescript
-const observable = supervisor.spawn(
+```ts
+const database = supervisor.spawn(
   {
-    name: "observable-worker",
-    init: () => ({ tasks: 0 }),
-    handle: async (state, message, tools) => {
-      tools.emit?.({
-        type: "worker:task:start",
-        taskId: message.id,
-        timestamp: tools.clock.now().wallMs,
-      });
-
-      // Simulate async work
-      await new Promise((resolve) => setTimeout(resolve, 100));
-
-      tools.emit?.({
-        type: "worker:task:complete",
-        taskId: message.id,
-        timestamp: tools.clock.now().wallMs,
-      });
-
-      return { tasks: state.tasks + 1 };
-    },
-  },
-  {},
-);
-
-// Create supervisor with telemetry
-const supervisor = createRootSupervisor({
-  clock,
-  emit: (event) => {
-    console.log("Process event:", event);
-  },
-});
-```
-
-Every operation emits structured events. Process lifecycle, message handling, failures, restarts - complete visibility into system behavior.
-
-## Add Supervision: Restart Policies
-
-```typescript
-// Create supervisor with restart policies
-const resilientWorker = supervisor.spawn(
-  {
-    name: "resilient-worker",
-    init: () => ({ failures: 0 }),
+    name: "database",
+    init: () => ({
+      users: new Map([
+        ["alice", { name: "Alice", email: "alice@example.com" }],
+        ["bob", { name: "Bob", email: "bob@example.com" }],
+      ]),
+    }),
     handle: (state, message) => {
-      if (message.type === "risky-work") {
-        // Fail 50% of the time initially, then succeed
-        if (state.failures < 3 && Math.random() < 0.5) {
-          throw new Error(`Failure ${state.failures + 1}`);
-        }
-
-        return { failures: state.failures };
+      switch (message.type) {
+        case "get-user":
+          const user = state.users.get(message.userId);
+          message.reply(user || null);
+          return state;
+        case "create-user":
+          state.users.set(message.user.id, message.user);
+          message.reply({ success: true });
+          return state;
+        default:
+          return state;
       }
-
-      return state;
-    },
-    supervision: {
-      type: "one-for-one",
-      backoff: {
-        initial: 100, // Start with 100ms
-        max: 5000, // Cap at 5 seconds
-        factor: 2, // Double each time
-        jitter: 10, // ±10% randomization
-      },
-      maxRestarts: {
-        count: 5, // Max 5 restarts
-        within: 10000, // Within 10 seconds
-      },
     },
   },
   {},
 );
 
-// Send risky work - supervisor handles failures automatically
-resilientWorker.send({ type: "risky-work" });
+// Request with automatic timeout
+try {
+  const user = await database.ask(
+    (reply) => ({ type: "get-user", userId: "alice", reply }),
+    1000, // Timeout after 1 second
+  );
+  console.log("Found user:", user);
+} catch (error) {
+  console.log("Request timed out or failed");
+}
 ```
 
-Supervision strategies control restart behavior. Exponential backoff prevents thundering herds. Restart limits prevent infinite failure loops.
+### Example 4 — Hierarchical supervision
 
-## Advanced: Process Hierarchy
-
-```typescript
-// Parent process that spawns and manages children
+```ts
 const taskManager = supervisor.spawn(
   {
     name: "task-manager",
-    init: () => ({ workers: new Map(), nextWorkerId: 0 }),
+    init: () => ({ workers: new Map(), nextId: 0 }),
     handle: (state, message, tools) => {
       switch (message.type) {
         case "spawn-worker":
-          const workerId = state.nextWorkerId++;
+          const workerId = state.nextId++;
 
           // Spawn child worker process
           const worker = tools.spawn(
@@ -327,7 +230,8 @@ const taskManager = supervisor.spawn(
           );
 
           state.workers.set(workerId, worker);
-          return { ...state, nextWorkerId: workerId + 1 };
+          message.reply(workerId);
+          return { ...state, nextId: workerId + 1 };
 
         case "distribute-task":
           // Send task to all workers
@@ -344,348 +248,68 @@ const taskManager = supervisor.spawn(
   {},
 );
 
-// Create worker pool
-taskManager.send({ type: "spawn-worker" });
-taskManager.send({ type: "spawn-worker" });
-taskManager.send({ type: "spawn-worker" });
+// Create worker pool dynamically
+await taskManager.ask((reply) => ({ type: "spawn-worker", reply }));
+await taskManager.ask((reply) => ({ type: "spawn-worker", reply }));
+await taskManager.ask((reply) => ({ type: "spawn-worker", reply }));
 
-// Distribute work
+// Distribute work across pool
 taskManager.send({ type: "distribute-task", data: "some work" });
 ```
 
-Processes can spawn child processes. Build hierarchies, worker pools, pipeline architectures. Each process manages its children.
+---
 
-## Advanced: Stateful Services
+## Process does NOT help you with this
 
-```typescript
-// Database connection pool as a process
-const dbPool = supervisor.spawn(
-  {
-    name: "db-pool",
-    init: async () => ({
-      connections: [],
-      maxConnections: 10,
-      inUse: new Set(),
-    }),
-    handle: async (state, message, tools) => {
-      switch (message.type) {
-        case "acquire":
-          // Find available connection
-          const available = state.connections.find((conn) => !state.inUse.has(conn.id));
+### Example 1 — CPU-intensive computations
 
-          if (available) {
-            state.inUse.add(available.id);
-            message.reply(available);
-            return state;
-          }
-
-          // Create new connection if under limit
-          if (state.connections.length < state.maxConnections) {
-            const newConn = { id: crypto.randomUUID(), ready: true };
-            state.connections.push(newConn);
-            state.inUse.add(newConn.id);
-            message.reply(newConn);
-            return state;
-          }
-
-          // Pool exhausted
-          message.reply(null);
-          return state;
-
-        case "release":
-          state.inUse.delete(message.connectionId);
-          return state;
-
-        default:
-          return state;
-      }
-    },
-  },
-  {},
-);
-
-// Use the pool
-const connection = await dbPool.ask((reply) => ({
-  type: "acquire",
-  reply,
-}));
-
-if (connection) {
-  // Use connection
-  console.log(`Using connection ${connection.id}`);
-
-  // Release when done
-  dbPool.send({
-    type: "release",
-    connectionId: connection.id,
-  });
-}
+```ts
+// Not Process's job - use worker threads:
+const { Worker } = require("worker_threads");
+const worker = new Worker("./cpu-intensive-task.js");
 ```
 
-Processes are perfect for stateful services. Connection pools, caches, session managers, rate limiters - any service that needs to maintain state safely.
+### Example 2 — Database transactions
 
-## Advanced: Event Sourcing Integration
-
-```typescript
-import { Journal } from "@phyxius/journal";
-
-// Process with full event sourcing
-const bankAccount = supervisor.spawn(
-  {
-    name: "bank-account",
-    init: (ctx) => ({
-      balance: 0,
-      accountId: ctx.accountId,
-      journal: new Journal({ clock }),
-    }),
-    handle: (state, message, tools) => {
-      switch (message.type) {
-        case "deposit":
-          const depositEvent = {
-            type: "deposit" as const,
-            amount: message.amount,
-            timestamp: tools.clock.now().wallMs,
-          };
-
-          // Append to event log
-          state.journal.append(depositEvent);
-
-          // Update state
-          const newBalance = state.balance + message.amount;
-
-          tools.emit?.({
-            type: "account:deposit",
-            accountId: state.accountId,
-            amount: message.amount,
-            newBalance,
-          });
-
-          message.reply?.({ success: true, balance: newBalance });
-
-          return { ...state, balance: newBalance };
-
-        case "withdraw":
-          if (state.balance < message.amount) {
-            message.reply?.({ success: false, error: "Insufficient funds" });
-            return state;
-          }
-
-          const withdrawEvent = {
-            type: "withdraw" as const,
-            amount: message.amount,
-            timestamp: tools.clock.now().wallMs,
-          };
-
-          state.journal.append(withdrawEvent);
-
-          const finalBalance = state.balance - message.amount;
-
-          message.reply?.({ success: true, balance: finalBalance });
-
-          return { ...state, balance: finalBalance };
-
-        case "get-balance":
-          message.reply(state.balance);
-          return state;
-
-        default:
-          return state;
-      }
-    },
-  },
-  { accountId: "acc-123" },
-);
-
-// Use the account
-const depositResult = await bankAccount.ask((reply) => ({
-  type: "deposit",
-  amount: 100,
-  reply,
-}));
-
-const balance = await bankAccount.ask((reply) => ({
-  type: "get-balance",
-  reply,
-}));
-
-console.log(`Deposit result:`, depositResult);
-console.log(`Balance:`, balance);
+```ts
+// Not Process's job - use database transactions:
+await db.transaction(async (trx) => {
+  await trx("orders").insert(order);
+  await trx("inventory").decrement("count", order.quantity);
+});
 ```
 
-Combine Process with Journal for event-sourced systems. Every state change is an event. Process restarts can replay events to rebuild state.
+### Example 3 — UI event handling
 
-## The Full Power: Distributed System Simulation
-
-```typescript
-// Distributed cache with gossip protocol
-const createCacheNode = (nodeId: string, peers: string[]) => {
-  return supervisor.spawn(
-    {
-      name: `cache-node-${nodeId}`,
-      init: () => ({
-        nodeId,
-        data: new Map(),
-        version: 0,
-        peers: new Map(), // peer -> ProcessRef
-        lastGossip: 0,
-      }),
-      handle: async (state, message, tools) => {
-        switch (message.type) {
-          case "connect-peer":
-            state.peers.set(message.peerId, message.peerRef);
-            return state;
-
-          case "set":
-            // Update local data
-            state.data.set(message.key, {
-              value: message.value,
-              version: ++state.version,
-              nodeId: state.nodeId,
-            });
-
-            // Gossip to peers
-            for (const peer of state.peers.values()) {
-              peer.send({
-                type: "gossip",
-                key: message.key,
-                value: message.value,
-                version: state.version,
-                nodeId: state.nodeId,
-              });
-            }
-
-            message.reply?.({ success: true });
-            return state;
-
-          case "get":
-            const entry = state.data.get(message.key);
-            message.reply(entry ? entry.value : null);
-            return state;
-
-          case "gossip":
-            const existing = state.data.get(message.key);
-
-            // Accept if we don't have it, or remote version is newer
-            if (!existing || message.version > existing.version) {
-              state.data.set(message.key, {
-                value: message.value,
-                version: message.version,
-                nodeId: message.nodeId,
-              });
-
-              tools.emit?.({
-                type: "cache:gossip:accepted",
-                nodeId: state.nodeId,
-                key: message.key,
-                fromNode: message.nodeId,
-                version: message.version,
-              });
-            }
-
-            return state;
-
-          case "periodic-gossip":
-            // Periodically gossip all data to all peers
-            const now = tools.clock.now().wallMs;
-            if (now - state.lastGossip > 5000) {
-              // Every 5 seconds
-              for (const [key, entry] of state.data) {
-                for (const peer of state.peers.values()) {
-                  peer.send({
-                    type: "gossip",
-                    key,
-                    value: entry.value,
-                    version: entry.version,
-                    nodeId: entry.nodeId,
-                  });
-                }
-              }
-
-              // Schedule next gossip
-              tools.schedule(5000, { type: "periodic-gossip" });
-              return { ...state, lastGossip: now };
-            }
-
-            return state;
-
-          default:
-            return state;
-        }
-      },
-    },
-    {},
-  );
-};
-
-// Create 3-node distributed cache
-const node1 = createCacheNode("node1", ["node2", "node3"]);
-const node2 = createCacheNode("node2", ["node1", "node3"]);
-const node3 = createCacheNode("node3", ["node1", "node2"]);
-
-// Connect the peers
-node1.send({ type: "connect-peer", peerId: "node2", peerRef: node2 });
-node1.send({ type: "connect-peer", peerId: "node3", peerRef: node3 });
-node2.send({ type: "connect-peer", peerId: "node1", peerRef: node1 });
-node2.send({ type: "connect-peer", peerId: "node3", peerRef: node3 });
-node3.send({ type: "connect-peer", peerId: "node1", peerRef: node1 });
-node3.send({ type: "connect-peer", peerId: "node2", peerRef: node2 });
-
-// Start periodic gossip
-node1.send({ type: "periodic-gossip" });
-node2.send({ type: "periodic-gossip" });
-node3.send({ type: "periodic-gossip" });
-
-// Write to different nodes
-await node1.ask((reply) => ({ type: "set", key: "user:alice", value: { name: "Alice" }, reply }));
-await node2.ask((reply) => ({ type: "set", key: "user:bob", value: { name: "Bob" }, reply }));
-await node3.ask((reply) => ({ type: "set", key: "user:charlie", value: { name: "Charlie" }, reply }));
-
-// Wait for gossip to propagate
-await new Promise((resolve) => setTimeout(resolve, 1000));
-
-// Read from any node - should have all data
-const aliceFromNode2 = await node2.ask((reply) => ({ type: "get", key: "user:alice", reply }));
-const bobFromNode3 = await node3.ask((reply) => ({ type: "get", key: "user:bob", reply }));
-const charlieFromNode1 = await node1.ask((reply) => ({ type: "get", key: "user:charlie", reply }));
-
-console.log("Distributed cache results:");
-console.log("Alice from node2:", aliceFromNode2);
-console.log("Bob from node3:", bobFromNode3);
-console.log("Charlie from node1:", charlieFromNode1);
+```ts
+// Not Process's job - use framework primitives:
+button.addEventListener("click", handleClick);
 ```
 
-This is the full power of Process. Distributed systems with gossip protocols, peer-to-peer networks, consensus algorithms, replication strategies. Each node is an isolated process. Communication is through message passing. Failures are isolated and recoverable.
+---
 
-## Interface
+## Why not just use classes and async/await?
 
-```typescript
-interface ProcessSpec<TMsg, TState, TCtx = unknown> {
-  name: string;
-  init(ctx: TCtx): Promise<TState> | TState;
-  handle(state: TState, msg: TMsg, tools: Tools<TState, TMsg, TCtx>): Promise<TState> | TState;
-  onStop?(state: TState, reason: StopReason, ctx: TCtx): Promise<void> | void;
-  maxInbox?: number;
-  mailboxPolicy?: "reject" | "drop-oldest";
-  supervision?: SupervisionStrategy;
-}
+Traditional object-oriented concurrent programming has fundamental problems:
 
-interface ProcessRef<TMsg> {
-  id: ProcessId;
-  send(msg: TMsg): boolean;
-  stop(reason?: StopReason): Promise<void>;
-  ask<TResp>(build: (reply: (r: TResp) => void) => TMsg, timeout?: number): Promise<TResp>;
-  status(): ProcessStatus;
-}
+- **Shared state**: Multiple operations can modify the same data simultaneously.
+- **Race conditions**: The order of operations becomes unpredictable under load.
+- **Cascading failures**: One component's failure brings down the entire system.
+- **Resource leaks**: Failed operations can leave resources in inconsistent states.
 
-interface Tools<TState, TMsg, TCtx> {
-  clock: Clock;
-  ctx: TCtx;
-  emit?: EmitFn;
-  spawn<TM, TS, TC>(spec: ProcessSpec<TM, TS, TC>, ctx: TC): ProcessRef<TM>;
-  ask<T>(desc: string, f: (res: (value: T) => void, rej: (e: unknown) => void) => void, timeout?: number): Promise<T>;
-  schedule(after: number, msg: TMsg): void;
-}
-```
+Processes use isolated state and message passing to eliminate these problems entirely.
+
+---
+
+## What this is not
+
+Process is not a web framework, not a database, not a thread pool. It does not replace Express, Fastify, or HTTP servers. It does not handle network protocols or persistence.
+
+Process is focused on safe concurrent programming with isolated state and supervision. It provides the actor model for building resilient systems that other libraries can integrate with.
+
+If you want HTTP APIs, use a web framework built on Process. If you want database access, use libraries that work with Process. If you want concurrency without chaos, use Process.
+
+---
 
 ## Installation
 
@@ -693,14 +317,12 @@ interface Tools<TState, TMsg, TCtx> {
 npm install @phyxius/process @phyxius/clock
 ```
 
-## What You Get
+---
 
-**Units that restart on failure.** Processes crash and restart automatically. Errors don't propagate. Systems heal themselves.
+## What you get
 
-**Systems that heal themselves.** Supervision strategies control restart behavior. Exponential backoff, restart limits, graceful degradation.
+- Units that restart on failure: isolated processes with automatic recovery.
+- Systems that heal themselves: supervision strategies control restart behavior.
+- Concurrency without chaos: message passing eliminates race conditions and shared state bugs.
 
-**Concurrency without chaos.** No shared state, no race conditions, no deadlocks. Message passing eliminates data races.
-
-**Scalability without complexity.** From single processes to distributed systems. Same patterns, same guarantees.
-
-Process solves concurrency. Everything else builds on that foundation.
+Process does not fix concurrency. It gives you the actor model and supervision trees to make concurrent systems safe and resilient. Everything else builds on that foundation.

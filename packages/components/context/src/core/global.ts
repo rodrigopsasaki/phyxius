@@ -52,38 +52,22 @@ export function getContextStore(): AsyncLocalStorage<PhyxiusContext> {
 /**
  * Sets up a global context that serves as the root for all other contexts.
  *
- * This global context provides default values (especially the clock) that child
- * contexts can inherit from. It's particularly useful for setting up application-wide
- * defaults like the system clock for production or virtual clock for testing.
+ * This global context provides default values that child contexts can inherit from.
  *
  * @param options - Configuration for the global context
  *
  * @example
  * ```typescript
- * // In main.ts
  * setGlobalContext({
- *   name: "app.global",
- *   clock: createSystemClock(),
  *   initial: { service: "api-server", version: "1.0.0" }
- * });
- *
- * // In tests
- * setGlobalContext({
- *   name: "test.global",
- *   clock: createVirtualClock()
  * });
  * ```
  */
-export function setGlobalContext(options: GlobalContextOptions): PhyxiusContext {
+export function setGlobalContext(options: GlobalContextOptions = {}): PhyxiusContext {
   const runtime = getRuntimeState();
 
   const globalContext: PhyxiusContext = {
     id: generateId(),
-    timestamp: new Date().toISOString(),
-    name: options.name,
-    ...(options.scope && { scope: options.scope }),
-    ...(options.source && { source: options.source }),
-    clock: options.clock,
     data: new Map(Object.entries(options.initial ?? {})),
   };
 
