@@ -1,5 +1,5 @@
 {
-  "name": "@phyxius/journal",
+  "name": "@phyxiusjs/journal",
   "version": "0.0.0",
   "type": "module",
   "description": "Append-only log for replay and debugging in Node.js applications",
@@ -27,7 +27,7 @@
     "size": "size-limit"
   },
   "dependencies": {
-    "@phyxius/clock": "workspace:*"
+    "@phyxiusjs/clock": "workspace:*"
   },
   "devDependencies": {
     "@size-limit/preset-small-lib": "^11.1.7",

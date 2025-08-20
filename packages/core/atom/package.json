@@ -1,5 +1,5 @@
 {
-  "name": "@phyxius/atom",
+  "name": "@phyxiusjs/atom",
   "version": "0.0.0",
   "type": "module",
   "description": "Versioned mutable references for Node.js applications",
@@ -27,7 +27,7 @@
     "size": "size-limit"
   },
   "dependencies": {
-    "@phyxius/clock": "workspace:*"
+    "@phyxiusjs/clock": "workspace:*"
   },
   "devDependencies": {
     "@size-limit/preset-small-lib": "^11.1.7",

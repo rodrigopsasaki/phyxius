@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach } from "vitest";
-import { createControlledClock } from "@phyxius/clock";
-import type { ControlledClock } from "@phyxius/clock";
+import { createControlledClock } from "@phyxiusjs/clock";
+import type { ControlledClock } from "@phyxiusjs/clock";
 import { Journal, JournalReentrancyError, JournalOverflowError } from "../src/index.js";
 import type { JournalEvent, IdGenerator } from "../src/index.js";
 

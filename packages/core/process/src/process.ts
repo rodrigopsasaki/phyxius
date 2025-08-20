@@ -9,7 +9,7 @@ import type {
   PendingAsk,
   EmitFn,
 } from "./types.js";
-import type { Clock, Millis } from "@phyxius/clock";
+import type { Clock, Millis } from "@phyxiusjs/clock";
 import { Mailbox } from "./mailbox.js";
 import {
   emitProcessStarting,

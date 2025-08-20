@@ -1,4 +1,4 @@
-import type { Instant } from "@phyxius/clock";
+import type { Instant } from "@phyxiusjs/clock";
 
 export interface AtomOptions<T> {
   /** Equality check to avoid no-op writes and power CAS. Defaults to Object.is */
@@ -53,7 +53,7 @@ export interface Atom<T> {
 
   /**
    * Read recent history. Not a full audit log.
-   * For full history/replay, bridge to @phyxius/journal.
+   * For full history/replay, bridge to @phyxiusjs/journal.
    */
   history(): readonly AtomSnapshot<T>[];
 

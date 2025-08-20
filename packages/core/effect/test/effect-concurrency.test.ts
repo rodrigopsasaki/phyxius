@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import { effect, all, race, sleep } from "../src/index.js";
-import { createControlledClock } from "@phyxius/clock";
+import { createControlledClock } from "@phyxiusjs/clock";
 
 describe("Effect Concurrency - Structured Concurrency", () => {
   let events: unknown[] = [];

@@ -1,8 +1,8 @@
 {
-  "name": "@phyxiusjs/effect",
+  "name": "@phyxiusjs/handler",
   "version": "0.0.0",
   "type": "module",
-  "description": "Structured concurrency with context for Node.js applications",
+  "description": "Reliable entrypoint abstraction for processing external work units with fault tolerance",
   "main": "./dist/index.js",
   "module": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -27,12 +27,15 @@
     "size": "size-limit"
   },
   "dependencies": {
-    "@phyxiusjs/clock": "workspace:*"
+    "@phyxiusjs/atom": "workspace:*",
+    "@phyxiusjs/clock": "workspace:*",
+    "@phyxiusjs/context": "workspace:*",
+    "@phyxiusjs/effect": "workspace:*",
+    "@phyxiusjs/journal": "workspace:*",
+    "@phyxiusjs/process": "workspace:*"
   },
   "devDependencies": {
     "@size-limit/preset-small-lib": "^11.1.7",
-    "@typescript-eslint/eslint-plugin": "^8.39.1",
-    "@typescript-eslint/parser": "^8.39.1",
     "@vitest/coverage-v8": "^2.1.8",
     "size-limit": "^11.1.7",
     "tsup": "^8.3.5",
@@ -42,7 +45,7 @@
   "size-limit": [
     {
       "path": "dist/index.js",
-      "limit": "8 KB"
+      "limit": "20 KB"
     }
   ],
   "publishConfig": {
@@ -53,14 +56,15 @@
   "repository": {
     "type": "git",
     "url": "https://github.com/rodrigopsasaki/phyxius.git",
-    "directory": "packages/effect"
+    "directory": "packages/components/handler"
   },
   "keywords": [
-    "effect",
-    "structured-concurrency",
-    "context",
-    "async",
-    "concurrency",
-    "cancellation"
+    "handler",
+    "entrypoint",
+    "reliability",
+    "fault-tolerance",
+    "supervision",
+    "adapter",
+    "phyxius"
   ]
 }

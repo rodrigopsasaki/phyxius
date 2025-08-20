@@ -1,4 +1,4 @@
-import type { Clock } from "@phyxius/clock";
+import type { Clock } from "@phyxiusjs/clock";
 import type {
   JournalEntry,
   JournalOptions,

@@ -26,3 +26,11 @@ export interface ContextRuntimeState {
   /** Version for compatibility checking */
   version?: string;
 }
+
+/**
+ * Options for configuring the global context.
+ */
+export interface GlobalContextOptions {
+  /** Initial data for the global context */
+  initial?: Record<string, unknown>;
+}

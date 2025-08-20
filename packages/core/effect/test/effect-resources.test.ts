@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import { effect, sleep, acquireUseRelease } from "../src/index.js";
-import { createControlledClock } from "@phyxius/clock";
+import { createControlledClock } from "@phyxiusjs/clock";
 
 describe("Effect Resources - RAII and Resource Management", () => {
   let events: unknown[] = [];

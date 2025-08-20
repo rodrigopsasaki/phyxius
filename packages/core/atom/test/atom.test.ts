@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import { createAtom, type Change } from "../src/index.js";
-import { createControlledClock } from "@phyxius/clock";
+import { createControlledClock } from "@phyxiusjs/clock";
 import type { Atom } from "../src/types.js";
 
 describe("Atom", () => {

@@ -1,5 +1,5 @@
 {
-  "name": "@phyxius/process",
+  "name": "@phyxiusjs/process",
   "version": "0.0.0",
   "type": "module",
   "description": "Single-threaded, message-driven process with deterministic time and supervision",
@@ -27,7 +27,7 @@
     "size": "size-limit"
   },
   "dependencies": {
-    "@phyxius/clock": "workspace:*"
+    "@phyxiusjs/clock": "workspace:*"
   },
   "devDependencies": {
     "@size-limit/preset-small-lib": "^11.1.7",

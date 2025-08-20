@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import { effect, succeed, fail, sleep } from "../src/index.js";
-import { createControlledClock } from "@phyxius/clock";
+import { createControlledClock } from "@phyxiusjs/clock";
 
 interface EffectEvent {
   type: string;

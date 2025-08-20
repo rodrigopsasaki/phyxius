@@ -1,4 +1,4 @@
-import type { Clock, Instant } from "@phyxius/clock";
+import type { Clock, Instant } from "@phyxiusjs/clock";
 
 // Core types
 export interface IdGenerator {

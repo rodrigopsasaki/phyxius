@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { createAtom } from "../src/index.js";
-import { createControlledClock } from "@phyxius/clock";
+import { createControlledClock } from "@phyxiusjs/clock";
 
 describe("Atom Concurrency Linearizability", () => {
   it("should handle interleaved async swap operations correctly", async () => {

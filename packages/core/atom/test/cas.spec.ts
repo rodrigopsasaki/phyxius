@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { createAtom } from "../src/index.js";
-import { createControlledClock } from "@phyxius/clock";
+import { createControlledClock } from "@phyxiusjs/clock";
 
 describe("Atom Compare-and-Set Semantics", () => {
   it("should fail CAS with Object.is by default (reference equality)", () => {

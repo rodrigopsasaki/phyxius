@@ -25,8 +25,8 @@ import type {
   StopReason,
   ProcessId,
 } from "./types.js";
-import type { Clock } from "@phyxius/clock";
-import { createSystemClock } from "@phyxius/clock";
+import type { Clock } from "@phyxiusjs/clock";
+import { createSystemClock } from "@phyxiusjs/clock";
 import { ProcessImpl } from "./process.js";
 import { Supervisor } from "./supervisor.js";
 import { createProcessId } from "./process-id.js";

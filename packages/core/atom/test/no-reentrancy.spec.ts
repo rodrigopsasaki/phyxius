@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { createAtom } from "../src/index.js";
-import { createControlledClock } from "@phyxius/clock";
+import { createControlledClock } from "@phyxiusjs/clock";
 
 describe("Atom Reentrancy Prevention", () => {
   it("should throw error on reentrant swap in watch callback", () => {

@@ -1,4 +1,4 @@
-import type { Clock, Millis } from "@phyxius/clock";
+import type { Clock, Millis } from "@phyxiusjs/clock";
 
 // Brands for type safety
 export interface ProcessId {

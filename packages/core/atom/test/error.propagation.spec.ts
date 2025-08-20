@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { createAtom } from "../src/index.js";
-import { createControlledClock } from "@phyxius/clock";
+import { createControlledClock } from "@phyxiusjs/clock";
 
 describe("Atom Error Propagation", () => {
   it("should leave state unchanged when swap updater throws", () => {

@@ -13,7 +13,7 @@ export type { PhyxiusContext } from "./core/types.js";
  *
  * @example
  * ```typescript
- * import { context } from "@phyxius/context";
+ * import { context } from "@phyxiusjs/context";
  *
  * // Create a context scope and use data operations
  * await context.scope(async () => {

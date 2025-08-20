@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { createAtom } from "../src/index.js";
-import { createControlledClock, ms } from "@phyxius/clock";
+import { createControlledClock, ms } from "@phyxiusjs/clock";
 
 describe("Atom History Ring Buffer", () => {
   it("should maintain ring buffer with specified size", () => {
