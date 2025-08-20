@@ -1,176 +1,289 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import { context } from "../src/index.js";
 
-describe("Context - Static Data Bag", () => {
+describe("Context - Pure AsyncLocalStorage Primitive", () => {
   beforeEach(() => {
-    // Clear any global context before each test
+    // Clear any global context state before each test
     // @ts-expect-error - accessing internal state for testing purposes
     if (globalThis.__phyxius_context_runtime__) {
-      // @ts-expect-error - accessing internal state for testing purposes
-      globalThis.__phyxius_context_runtime__.globalContext = undefined;
       // @ts-expect-error - accessing internal state for testing purposes
       globalThis.__phyxius_context_runtime__.contextStore = undefined;
     }
   });
 
-  describe("context.scope", () => {
-    it("should create context scope and execute callback", async () => {
-      const result = await context.scope(async () => {
-        const ctx = context.require();
-        expect(ctx.id).toBeDefined();
+  describe("basic scoping", () => {
+    it("should create context scope and provide access to data", async () => {
+      const result = await context.scope(
+        async () => {
+          const ctx = context.get();
+          expect(ctx.data).toBeDefined();
+          expect(typeof ctx.data).toBe("object");
 
-        context.set("test", "data");
-        expect(context.get("test")).toBe("data");
-
-        return "success";
-      });
+          return "success";
+        },
+        { initial: { service: "test" } },
+      );
 
       expect(result).toBe("success");
     });
 
-    it("should support initial data", async () => {
-      await context.scope(
+    it("should provide typed access to context data", async () => {
+      interface UserSession {
+        userId: string;
+        permissions: string[];
+      }
+
+      await context.scope<UserSession>(
         async () => {
-          const ctx = context.require();
-          expect(ctx.data.get("initial")).toBe("value");
-          expect(context.get("initial")).toBe("value");
+          const ctx = context.get<UserSession>();
+
+          expect(ctx.data.userId).toBe("user123");
+          expect(ctx.data.permissions).toEqual(["read", "write"]);
+          expect(Array.isArray(ctx.data.permissions)).toBe(true);
         },
-        { initial: "value" },
-      );
-    });
-
-    it("should inherit from parent context", async () => {
-      await context.scope(
-        async () => {
-          context.set("parent", "data");
-          context.set("runtime", "added");
-
-          await context.scope(async () => {
-            expect(context.get("parent")).toBe("data");
-            expect(context.get("runtime")).toBe("added");
-
-            // Child context can override parent values
-            context.set("runtime", "overridden");
-            expect(context.get("runtime")).toBe("overridden");
-          });
-
-          // Parent context is unchanged
-          expect(context.get("runtime")).toBe("added");
-        },
-        { initial: "parent" },
-      );
-    });
-
-    it("should override inherited values with initial data", async () => {
-      await context.scope(async () => {
-        context.set("shared", "parent");
-        context.set("unique", "parent");
-
-        await context.scope(
-          async () => {
-            expect(context.get("shared")).toBe("override");
-            expect(context.get("unique")).toBe("parent");
+        {
+          initial: {
+            userId: "user123",
+            permissions: ["read", "write"],
           },
-          { shared: "override" },
-        );
+        },
+      );
+    });
+
+    it("should handle empty context", async () => {
+      await context.scope(async () => {
+        const ctx = context.get();
+        expect(ctx.data).toEqual({});
       });
     });
   });
 
-  describe("data operations", () => {
-    it("should set and get values", async () => {
-      await context.scope(async () => {
-        context.set("user_id", "user123");
-        context.set("count", 42);
-        context.set("active", true);
-
-        expect(context.get("user_id")).toBe("user123");
-        expect(context.get("count")).toBe(42);
-        expect(context.get("active")).toBe(true);
-        expect(context.get("nonexistent")).toBeUndefined();
-      });
+  describe("inheritance", () => {
+    it("should inherit from parent context by default", async () => {
+      await context.scope(
+        async () => {
+          await context.scope(
+            async () => {
+              const ctx = context.get();
+              expect(ctx.data).toEqual({ parent: "data", child: "value" });
+            },
+            { initial: { child: "value" } },
+          );
+        },
+        { initial: { parent: "data" } },
+      );
     });
 
-    it("should push values to arrays", async () => {
-      await context.scope(async () => {
-        context.push("events", "login");
-        context.push("events", "purchase");
-        context.push("events", "logout");
+    it("should merge parent data with initial data", async () => {
+      interface SessionData {
+        userId: string;
+        sessionId: string;
+        permissions: string[];
+      }
 
-        const events = context.get<string[]>("events");
-        expect(events).toEqual(["login", "purchase", "logout"]);
-      });
+      await context.scope<SessionData>(
+        async () => {
+          await context.scope<SessionData>(
+            async () => {
+              const ctx = context.get<SessionData>();
+
+              expect(ctx.data.userId).toBe("user123");
+              expect(ctx.data.sessionId).toBe("child-session");
+              expect(ctx.data.permissions).toEqual(["admin"]);
+            },
+            {
+              initial: {
+                sessionId: "child-session",
+                permissions: ["admin"],
+              },
+            },
+          );
+        },
+        {
+          initial: {
+            userId: "user123",
+            sessionId: "parent-session",
+            permissions: ["read"],
+          },
+        },
+      );
     });
 
-    it("should merge objects", async () => {
-      await context.scope(async () => {
-        context.merge("metadata", { version: "1.0.0", env: "prod" });
-        context.merge("metadata", { region: "us-east-1", debug: true });
-
-        const metadata = context.get<Record<string, unknown>>("metadata");
-        expect(metadata).toEqual({
-          version: "1.0.0",
-          env: "prod",
-          region: "us-east-1",
-          debug: true,
-        });
-      });
+    it("should disable inheritance when inherit: false", async () => {
+      await context.scope(
+        async () => {
+          await context.scope(
+            async () => {
+              const ctx = context.get();
+              expect(ctx.data).toEqual({ child: "only" });
+            },
+            {
+              initial: { child: "only" },
+              inherit: false,
+            },
+          );
+        },
+        { initial: { parent: "data" } },
+      );
     });
 
-    it("should handle mixed operations", async () => {
-      await context.scope(async () => {
-        // Set initial values
-        context.set("user_id", "user123");
-        context.merge("profile", { name: "Alice", role: "admin" });
+    it("should inherit parent data even without initial data", async () => {
+      await context.scope(
+        async () => {
+          await context.scope(async () => {
+            const ctx = context.get();
+            expect(ctx.data).toEqual({ parent: "data" });
+          });
+        },
+        { initial: { parent: "data" } },
+      );
+    });
+  });
 
-        // Add events
-        context.push("actions", "login");
-        context.push("actions", "view_dashboard");
+  describe("isolation", () => {
+    it("should isolate concurrent contexts", async () => {
+      interface WorkerContext {
+        workerId: string;
+        task: string;
+      }
 
-        // Merge more profile data
-        context.merge("profile", { last_login: "2024-01-01" });
+      const results = await Promise.all([
+        context.scope<WorkerContext>(
+          async () => {
+            await new Promise((resolve) => setTimeout(resolve, 10));
+            const ctx = context.get<WorkerContext>();
+            return ctx.data.workerId;
+          },
+          { initial: { workerId: "worker-A", task: "process" } },
+        ),
 
-        // Verify all data
-        expect(context.get("user_id")).toBe("user123");
-        expect(context.get<string[]>("actions")).toEqual(["login", "view_dashboard"]);
-        expect(context.get<Record<string, unknown>>("profile")).toEqual({
-          name: "Alice",
-          role: "admin",
-          last_login: "2024-01-01",
-        });
-      });
+        context.scope<WorkerContext>(
+          async () => {
+            await new Promise((resolve) => setTimeout(resolve, 10));
+            const ctx = context.get<WorkerContext>();
+            return ctx.data.workerId;
+          },
+          { initial: { workerId: "worker-B", task: "process" } },
+        ),
+      ]);
+
+      expect(results).toEqual(["worker-A", "worker-B"]);
+    });
+
+    it("should maintain context across async operations", async () => {
+      interface AsyncContext {
+        operationId: string;
+        step: number;
+      }
+
+      await context.scope<AsyncContext>(
+        async () => {
+          const ctx1 = context.get<AsyncContext>();
+          expect(ctx1.data.operationId).toBe("op-123");
+          expect(ctx1.data.step).toBe(1);
+
+          await new Promise((resolve) => setTimeout(resolve, 1));
+
+          const ctx2 = context.get<AsyncContext>();
+          expect(ctx2.data.operationId).toBe("op-123");
+          expect(ctx2.data.step).toBe(1);
+        },
+        { initial: { operationId: "op-123", step: 1 } },
+      );
     });
   });
 
   describe("error handling", () => {
     it("should throw when accessing context outside of scope", () => {
-      expect(() => context.require()).toThrow("No active context available");
-      expect(() => context.set("key", "value")).toThrow("No active context available");
-      expect(() => context.get("key")).toThrow("No active context available");
+      expect(() => context.get()).toThrow("No active context available");
     });
 
     it("should return undefined when no context is active", () => {
       const ctx = context.current();
       expect(ctx).toBeUndefined();
     });
+
+    it("should propagate errors from callback", async () => {
+      await expect(async () => {
+        await context.scope(async () => {
+          throw new Error("Test error");
+        });
+      }).rejects.toThrow("Test error");
+    });
   });
 
-  describe("context isolation", () => {
-    it("should isolate concurrent contexts", async () => {
-      const results = await Promise.all([
-        context.scope(async () => {
-          context.set("worker", "A");
-          await new Promise((resolve) => setTimeout(resolve, 10));
-          return context.get("worker");
-        }),
-        context.scope(async () => {
-          context.set("worker", "B");
-          await new Promise((resolve) => setTimeout(resolve, 10));
-          return context.get("worker");
-        }),
-      ]);
+  describe("complex typing scenarios", () => {
+    it("should support nested object types", async () => {
+      interface ComplexContext {
+        user: {
+          id: string;
+          profile: {
+            name: string;
+            preferences: {
+              theme: "light" | "dark";
+              notifications: boolean;
+            };
+          };
+        };
+        session: {
+          id: string;
+          expires: number;
+        };
+      }
 
-      expect(results).toEqual(["A", "B"]);
+      await context.scope<ComplexContext>(
+        async () => {
+          const ctx = context.get<ComplexContext>();
+
+          expect(ctx.data.user.id).toBe("user123");
+          expect(ctx.data.user.profile.name).toBe("Alice");
+          expect(ctx.data.user.profile.preferences.theme).toBe("dark");
+          expect(ctx.data.session.id).toBe("session456");
+        },
+        {
+          initial: {
+            user: {
+              id: "user123",
+              profile: {
+                name: "Alice",
+                preferences: {
+                  theme: "dark",
+                  notifications: true,
+                },
+              },
+            },
+            session: {
+              id: "session456",
+              expires: Date.now() + 3600000,
+            },
+          },
+        },
+      );
+    });
+
+    it("should support union types", async () => {
+      type Status = "loading" | "success" | "error";
+
+      interface StatusContext {
+        status: Status;
+        data?: unknown;
+        error?: string;
+      }
+
+      await context.scope<StatusContext>(
+        async () => {
+          const ctx = context.get<StatusContext>();
+          expect(ctx.data.status).toBe("success");
+          expect(ctx.data.data).toBe("result");
+          expect(ctx.data.error).toBeUndefined();
+        },
+        {
+          initial: {
+            status: "success" as Status,
+            data: "result",
+          },
+        },
+      );
     });
   });
 });

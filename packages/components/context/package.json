@@ -2,7 +2,7 @@
   "name": "@phyxiusjs/context",
   "version": "0.0.0",
   "type": "module",
-  "description": "Scoped execution contexts with clock integration for phyxius applications",
+  "description": "Pure AsyncLocalStorage primitive for typed thread-local data",
   "main": "./dist/index.js",
   "module": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -25,9 +25,6 @@
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",
     "size": "size-limit"
-  },
-  "dependencies": {
-    "@phyxiusjs/clock": "workspace:*"
   },
   "devDependencies": {
     "@size-limit/preset-small-lib": "^11.1.7",
@@ -55,9 +52,9 @@
   },
   "keywords": [
     "context",
-    "scoped-execution",
-    "clock",
-    "time",
+    "async-local-storage",
+    "typed-context",
+    "thread-local",
     "async-context",
     "phyxius"
   ]

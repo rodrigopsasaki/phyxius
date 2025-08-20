@@ -1,108 +1,92 @@
 # Phyxius
 
-**Primitives for building systems that have a production mindset.**
+**Foundational primitives for Node.js systems.**
 
-## Why This Exists
+## What This Is
 
-After years of building Node.js systems, I got tired of the same production issues: race conditions that only happen under load, tests that pass locally but fail in CI, timing-dependent bugs that disappear when you try to debug them, resource leaks that slowly kill your servers.
+Phyxius provides small, focused primitives that handle common concurrency patterns in Node.js. Each primitive does one thing and can be used independently or combined with others.
 
-The problem isn't Node.js. The problem is that async programming is fundamentally broken at the primitive level. Promises don't clean up. `setTimeout` isn't testable. Shared state races against itself. Failures cascade through systems.
+## Current Primitives
 
-I built Phyxius because I wanted primitives that make it very hard to write code that breaks in production.
+### **Clock** - Controllable Time
 
-## The Five Primitives
+Two time sources: wall time and monotonic time. Controllable in tests, consistent in production.
 
-### **Clock** - Time That Works
+### **Atom** - Atomic State Updates
 
-Two time tracks: wall time (can jump due to NTP) and monotonic time (perfect for intervals). Controllable in tests, observable in production.
+Versioned state with atomic updates. Prevents race conditions on shared data.
 
-### **Atom** - State That Can't Race
+### **Journal** - Append-Only Events
 
-Atomic updates with versioning and change tracking. Multiple writers never corrupt state. Perfect for conflict-free replication.
+Event log with ordering guarantees. Preserves history for replay and debugging.
 
-### **Journal** - Events That Never Disappear
+### **Effect** - Structured Concurrency
 
-Append-only log with guaranteed ordering. Every event preserved forever. Debug any issue by replaying history.
+Resource management with automatic cleanup. Operations can be cancelled cleanly.
 
-### **Effect** - Async That Cleans Up
+### **Process** - Supervised Units
 
-Structured concurrency with automatic resource management. Cancel operations cleanly. No leaks, no zombies.
+Isolated processes with restart strategies. Failures are contained and handled.
 
-### **Process** - Units That Restart on Failure
+### **Context** - Thread-Local Storage
 
-Isolated processes with supervision. Let it crash, let it restart. Failures don't cascade.
-
-## Quick Start
-
-```typescript
-import { createSystemClock } from "@phyxius/clock";
-import { createAtom } from "@phyxius/atom";
-import { Journal } from "@phyxius/journal";
-
-const clock = createSystemClock();
-
-// Atomic state - no race conditions
-const users = createAtom(new Map(), clock);
-users.swap((map) => new Map(map).set("alice", { online: true }));
-
-// Event history - complete audit trail
-const events = new Journal({ clock });
-events.append({ type: "user.login", userId: "alice" });
-
-// Deterministic time - testable delays
-await clock.sleep(1000); // Real time in production, instant in tests
-```
-
-## What You Get
-
-**In Production:**
-
-- Resource leaks become impossible
-- Race conditions are eliminated at the primitive level
-- Timing bugs disappear with deterministic time
-- Failures are isolated and self-healing
-- Complete audit trail of everything that happens
-
-**In Development:**
-
-- Tests run instantly with controlled time
-- Complex async scenarios become trivial to set up
-- Debugging with time travel and complete history
-- No more "works on my machine" timing issues
-
-## Examples
-
-Want to see what's possible? Check out complete, production-ready patterns:
-
-- **[Event-Sourced SaaS](examples/event-sourced-saas.md)** - Multi-tenant platform with billing, audit trails, and time travel debugging
-- **[Distributed Cache](examples/distributed-cache.md)** - Fault-tolerant caching with gossip protocol and automatic failover
-- **[Real-Time Collaboration](examples/real-time-collaboration.md)** - Multi-user editing with conflict-free merge and operational transforms
-- **[HTTP Server](examples/express-server.md)** - Express server rebuilt with supervision, graceful shutdown, and circuit breakers
-
-## Learn More
-
-Each primitive stands alone but they're designed to work together:
-
-- **[Clock](packages/clock/)** - Deterministic time for reliable systems
-- **[Atom](packages/atom/)** - Atomic state for race-free updates
-- **[Journal](packages/journal/)** - Event sourcing for complete history
-- **[Effect](packages/effect/)** - Structured concurrency for resource safety
-- **[Process](packages/process/)** - Actor model for fault tolerance
+Typed AsyncLocalStorage for data that flows through async operations.
 
 ## Installation
 
+Install individual primitives:
+
 ```bash
-npm install @phyxius/clock @phyxius/atom @phyxius/journal @phyxius/effect @phyxius/process
+npm install @phyxiusjs/clock
+npm install @phyxiusjs/atom
+npm install @phyxiusjs/journal
+npm install @phyxiusjs/effect
+npm install @phyxiusjs/process
+npm install @phyxiusjs/context
 ```
 
-## Philosophy
+## Usage
 
-Production systems fail at the boundaries - between sync and async, between one service and another, between what you expect and what actually happens.
+Each primitive works independently:
 
-These primitives give you solid boundaries you can reason about. They're not clever. They're not revolutionary. They just work.
+```typescript
+import { createSystemClock } from "@phyxiusjs/clock";
+import { createAtom } from "@phyxiusjs/atom";
+import { context } from "@phyxiusjs/context";
 
-Every time.
+// Controllable time
+const clock = createSystemClock();
+await clock.sleep(1000); // Real time in production, controllable in tests
+
+// Atomic state
+const users = createAtom(new Map(), clock);
+users.swap((map) => new Map(map).set("alice", { online: true }));
+
+// Thread-local data
+await context.scope(
+  async () => {
+    const ctx = context.get();
+    // Data available throughout async call tree
+  },
+  { initial: { requestId: "req-123" } },
+);
+```
+
+## Design Principles
+
+- **Small scope**: Each primitive does one thing
+- **Independent**: Primitives work alone or together
+- **Testable**: Deterministic behavior in tests
+- **Production-ready**: Handle edge cases and failures
+
+## Package Structure
+
+- **Core primitives**: Clock, Atom, Journal, Effect, Process
+- **Components**: Context, Handler (work in progress)
+- **Framework**: Integration utilities (planned)
+
+Each package includes comprehensive tests and documentation.
 
 ---
 
-_Built because Node.js deserves primitives that don't break in production._
+_Node.js primitives that work reliably._

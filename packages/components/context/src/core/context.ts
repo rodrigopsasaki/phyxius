@@ -1,152 +1,79 @@
-import { requireCurrentContext, getContextStore, getCurrentContext } from "./global.js";
-import type { PhyxiusContext } from "./types.js";
-import { generateId } from "../utils/generateId.js";
+import { getContextStore, getCurrentContext } from "./global.js";
+import type { PhyxiusContext, ContextScopeOptions } from "./types.js";
 
 /**
  * Retrieves the current active context.
  *
- * This function returns the context that is currently active in the
- * async execution scope.
- *
  * @returns The current active context
  * @throws {Error} If called outside of a context scope
- *
- * @example
- * ```typescript
- * const ctx = getContext();
- * console.log("Context ID:", ctx.id);
- * ```
  */
-export function getContext(): PhyxiusContext {
-  return requireCurrentContext();
-}
-
-/**
- * Sets a key-value pair on the current context's data map.
- *
- * @param key - The key to store the value under
- * @param value - The value to store (can be any type)
- *
- * @example
- * ```typescript
- * contextSet("user_id", "user123");
- * contextSet("login_method", "oauth");
- * ```
- */
-export function contextSet<K extends string, V = unknown>(key: K, value: V): void {
-  const context = requireCurrentContext();
-  context.data.set(key, value);
-}
-
-/**
- * Retrieves a value from the current context's data map.
- *
- * @param key - The key to retrieve
- * @returns The stored value or undefined if not found
- *
- * @example
- * ```typescript
- * contextSet("order_id", "order123");
- * const orderId = contextGet("order_id"); // "order123"
- * const missing = contextGet("nonexistent"); // undefined
- * ```
- */
-export function contextGet<T = unknown>(key: string): T | undefined {
-  const context = requireCurrentContext();
-  return context.data.get(key) as T | undefined;
-}
-
-/**
- * Pushes a value into an array stored at the given key in the context's data map.
- *
- * If the key doesn't exist yet, an empty array is created first.
- *
- * @param key - The key for the array
- * @param value - The value to push to the array
- *
- * @example
- * ```typescript
- * contextPush("events", "order_created");
- * contextPush("events", "payment_processed");
- * // Results in: ["order_created", "payment_processed"]
- * ```
- */
-export function contextPush<T = unknown>(key: string, value: T): void {
-  const context = requireCurrentContext();
-  const list = (context.data.get(key) as T[] | undefined) ?? [];
-  list.push(value);
-  context.data.set(key, list);
-}
-
-/**
- * Merges a record into the existing object at the given key in the context's data map.
- *
- * If the key doesn't exist yet, an empty object is created first.
- *
- * @param key - The key for the object
- * @param value - The object to merge into the existing object
- *
- * @example
- * ```typescript
- * contextMerge("request", { method: "POST", path: "/users" });
- * contextMerge("request", { headers: { "content-type": "application/json" } });
- * // Results in: { method: "POST", path: "/users", headers: {...} }
- * ```
- */
-export function contextMerge<K extends string, V = unknown>(key: K, value: Record<string, V>): void {
-  const context = requireCurrentContext();
-  const existing = (context.data.get(key) as Record<string, V> | undefined) ?? {};
-  context.data.set(key, { ...existing, ...value });
+export function getContext<T = Record<string, unknown>>(): PhyxiusContext<T> {
+  const context = getCurrentContext<T>();
+  if (!context) {
+    throw new Error("No active context available");
+  }
+  return context;
 }
 
 /**
  * Creates a new context scope and executes a callback within it.
  *
- * Creates a new context that inherits from the parent context (if any)
- * and executes the callback within that scope.
+ * Creates a new context with typed data that can optionally inherit from
+ * the parent context (if any) and executes the callback within that scope.
  *
  * @param callback - The function to execute within the new context scope
- * @param initialData - Optional initial data for the new context
+ * @param options - Options for creating the new context
  * @returns The result of the callback function
  *
  * @example
  * ```typescript
+ * // Untyped context (default)
  * const result = await contextScope(async () => {
- *   context.set("user_id", "user123");
+ *   const ctx = getContext();
+ *   console.log(ctx.data); // Record<string, unknown>
  *   return "completed";
- * }, { initial: "data" });
+ * }, { initial: { service: "api" } });
+ *
+ * // Typed context
+ * interface UserSession {
+ *   userId: string;
+ *   permissions: string[];
+ * }
+ *
+ * await contextScope<UserSession>(async () => {
+ *   const ctx = getContext<UserSession>();
+ *   console.log(ctx.data.userId); // string (typed!)
+ * }, { initial: { userId: "user123", permissions: ["read"] } });
  * ```
  */
-export async function contextScope<T>(
-  callback: () => Promise<T> | T,
-  initialData?: Record<string, unknown>,
-): Promise<T> {
-  const parentContext = getCurrentContext();
+export async function contextScope<T = Record<string, unknown>, R = unknown>(
+  callback: () => Promise<R> | R,
+  options?: ContextScopeOptions<T>,
+): Promise<R> {
+  const parentContext = getCurrentContext<T>();
+  const inherit = options?.inherit ?? true;
 
-  // Create new context with inherited data
-  const newContext: PhyxiusContext = {
-    id: generateId(),
-    data: createContextData(parentContext, initialData ?? {}),
-  };
-
-  const store = getContextStore();
-  return store.run(newContext, callback);
-}
-
-/**
- * Creates the data map for a new context, handling inheritance from parent.
- */
-function createContextData(
-  parentContext: PhyxiusContext | undefined,
-  initialData: Record<string, unknown>,
-): Map<string, unknown> {
-  // Start with parent data if available
-  const data = parentContext ? new Map(parentContext.data) : new Map();
-
-  // Add initial data, potentially overriding inherited values
-  for (const [key, value] of Object.entries(initialData)) {
-    data.set(key, value);
+  // Create context data
+  let data: T;
+  if (inherit && parentContext && options?.initial) {
+    // Merge parent data with initial data
+    data = { ...parentContext.data, ...options.initial } as T;
+  } else if (inherit && parentContext) {
+    // Inherit parent data
+    data = { ...parentContext.data } as T;
+  } else if (options?.initial) {
+    // Use only initial data
+    data = options.initial;
+  } else {
+    // Empty context
+    data = {} as T;
   }
 
-  return data;
+  // Create new context
+  const newContext: PhyxiusContext<T> = {
+    data,
+  };
+
+  const store = getContextStore<T>();
+  return store.run(newContext, callback);
 }

@@ -1,290 +1,275 @@
-# Context
+# @phyxiusjs/context
 
-Static data that flows through your code. Values without parameter threading. Ambient access that just works.
+> Pure AsyncLocalStorage primitive for typed thread-local data
 
-Every bug you've traced that starts with "where did this value come from?" comes back to the same problem: values get lost, parameters explode, and context disappears across async boundaries.
-
-Context fixes this. Static data bag, automatic propagation, zero parameter threading.
-
-Two implementations, one interface:
-
-- AsyncLocalStorage context for Node.js applications with automatic async propagation.
-- Global context fallback for environments without AsyncLocalStorage support.
-
----
-
-## Why parameter threading is broken
-
-### Deep function parameter pollution
-
-```js
-// This is broken. Every function becomes a parameter tunnel.
-async function handleRequest(req, res) {
-  const userId = req.headers["user-id"];
-  const traceId = req.headers["x-trace-id"];
-  const requestId = generateId();
-
-  await processOrder(req.body, userId, traceId, requestId);
-}
-
-async function processOrder(order, userId, traceId, requestId) {
-  await validateOrder(order, userId, traceId, requestId);
-  await chargePayment(order, userId, traceId, requestId);
-  await updateInventory(order, userId, traceId, requestId);
-}
-
-// Every function signature polluted with context parameters
-async function validateOrder(order, userId, traceId, requestId) {
-  console.log(`[${traceId}] [${requestId}] Validating order for ${userId}`);
-}
-```
-
-### Lost values in async operations
-
-```js
-// Global state gets mixed up across concurrent operations
-let currentUserId = null;
-let currentTraceId = null;
-
-async function handleRequest(req, res) {
-  currentUserId = req.headers["user-id"];
-  currentTraceId = req.headers["x-trace-id"];
-
-  // These run concurrently - context gets scrambled
-  await Promise.all([processOrder(req.body), logActivity("request_received"), updateMetrics()]);
-}
-
-async function processOrder(order) {
-  // Which user? Which request? Global state is unreliable.
-  console.log(`Processing order for ${currentUserId}`);
-}
-```
-
-Manual parameter passing becomes impossible at scale. Global variables create race conditions. You need automatic value propagation without the ceremony.
-
----
-
-## The Problem
-
-Applications need contextual information to flow through complex async call chains without manually threading parameters through every function signature.
-
-```ts
-// Parameter explosion makes functions unusable
-class OrderProcessor {
-  async process(
-    order: Order,
-    userId: string,
-    traceId: string,
-    requestId: string,
-    sessionId: string,
-    permissions: string[],
-    metadata: Record<string, unknown>,
-  ) {
-    // Every method needs all these parameters
-    await this.validate(order, userId, traceId, requestId, sessionId, permissions, metadata);
-    await this.charge(order, userId, traceId, requestId, sessionId, permissions, metadata);
-    await this.fulfill(order, userId, traceId, requestId, sessionId, permissions, metadata);
-  }
-}
-```
-
----
-
-## Context helps you with this
-
-### Example 1 — Automatic value propagation
-
-```ts
-import { context } from "@phyxius/context";
-
-// Values flow automatically through async operations
-async function handleRequest(req: Request) {
-  await context.scope(async () => {
-    context.set("user_id", req.headers["user-id"]);
-    context.set("trace_id", req.headers["x-trace-id"]);
-    context.set("request_id", generateId());
-
-    await processOrder(req.body);
-  });
-}
-
-async function processOrder(order: any) {
-  // Values are automatically available, no parameters needed
-  const userId = context.get("user_id");
-  const traceId = context.get("trace_id");
-  const requestId = context.get("request_id");
-
-  console.log(`[${traceId}] [${requestId}] Processing order for ${userId}`);
-
-  await validateOrder(order);
-  await chargePayment(order);
-}
-
-async function validateOrder(order: any) {
-  // Context automatically flows through all function calls
-  const userId = context.get("user_id");
-  const traceId = context.get("trace_id");
-
-  console.log(`[${traceId}] Validating order for ${userId}`);
-}
-```
-
-### Example 2 — Nested contexts with inheritance
-
-```ts
-async function handleBatchJob() {
-  await context.scope(async () => {
-    context.set("job_id", "batch_001");
-    context.set("start_time", Date.now());
-
-    for (let i = 0; i < 100; i++) {
-      // Each item gets its own context that inherits job info
-      await context.scope(async () => {
-        context.set("item_id", i);
-        context.set("attempt", 1);
-
-        const jobId = context.get("job_id"); // Available from parent
-        const itemId = context.get("item_id"); // From current context
-
-        console.log(`Job ${jobId} processing item ${itemId}`);
-        await processItem();
-      });
-    }
-  });
-}
-```
-
-### Example 3 — Building structured metadata incrementally
-
-```ts
-async function handleApiRequest(req: Request) {
-  await context.scope(async () => {
-    // Start with basic request info
-    context.merge("request", {
-      method: req.method,
-      path: req.path,
-      ip: req.ip,
-    });
-
-    // Add authentication details
-    if (req.user) {
-      context.merge("request", {
-        user_id: req.user.id,
-        role: req.user.role,
-      });
-    }
-
-    // Collect events as they happen
-    context.push("events", "request_started");
-
-    await processRequest(req);
-
-    context.push("events", "request_completed");
-
-    // Full context available at the end
-    const requestInfo = context.get("request");
-    const events = context.get("events");
-    console.log("Request completed:", { requestInfo, events });
-  });
-}
-```
-
-### Example 4 — Concurrent operations with isolated contexts
-
-```ts
-async function processBatch(items: any[]) {
-  // Each item gets its own isolated context
-  const results = await Promise.all(
-    items.map((item) =>
-      context.scope(async () => {
-        context.set("item_id", item.id);
-        context.set("worker", `worker_${Math.random()}`);
-
-        // Work in complete isolation
-        await processItem(item);
-
-        return {
-          id: context.get("item_id"),
-          worker: context.get("worker"),
-          result: "completed",
-        };
-      }),
-    ),
-  );
-
-  return results;
-}
-```
-
----
-
-## Context does NOT help you with this
-
-### Example 1 — Complex business logic
-
-```ts
-// Not Context's job - use domain services:
-class OrderService {
-  async validateOrder(order: Order): Promise<ValidationResult> {
-    // Business logic goes here
-    return this.validator.validate(order);
-  }
-}
-```
-
-### Example 2 — State management
-
-```ts
-// Not Context's job - use state libraries:
-const store = createStore(orderReducer);
-store.dispatch(createOrder(order));
-```
-
-### Example 3 — Database connections
-
-```ts
-// Not Context's job - use connection pools:
-const db = createPool({ connectionString: "..." });
-await db.query("SELECT * FROM orders");
-```
-
----
-
-## Why not just use global variables?
-
-Global variables seem simple but create serious problems in concurrent applications:
-
-- **Race conditions**: Multiple async operations modify the same globals simultaneously.
-- **Lost context**: Values get overwritten before async operations complete.
-- **No isolation**: Concurrent requests interfere with each other.
-- **No scoping**: Values persist longer than they should.
-
-Context uses AsyncLocalStorage to provide isolated value propagation that works correctly with async operations.
-
----
-
-## What this is not
-
-Context is not a dependency injection system, not a state manager, not a database. It does not replace service containers, Redux, or data access layers. It does not handle serialization, persistence, or network propagation.
-
-Context is focused on local value propagation within a single process. It provides a simple data bag that flows through your async execution without manual parameter passing.
-
-If you want dependency injection, use a DI container. If you want distributed tracing, use OpenTelemetry. If you want ambient values that flow through your code, use Context.
-
----
+Context is a minimal, zero-dependency primitive that provides thread-local storage with full TypeScript support. It has zero knowledge of domain concerns like correlation IDs, timestamps, or observability - it simply manages typed data that flows through async operations automatically.
 
 ## Installation
 
 ```bash
-npm install @phyxius/context
+npm install @phyxiusjs/context
 ```
 
----
+## Features
 
-## What you get
+- **Pure Primitive**: Zero domain knowledge, just AsyncLocalStorage mechanics
+- **Full TypeScript Support**: Generic typing for compile-time safety
+- **Inheritance**: Child contexts can inherit and override parent data
+- **Isolation**: Concurrent contexts are completely isolated
+- **Zero Dependencies**: Minimal footprint, works everywhere
+- **Martin Odersky Approved**: Support for complex, nested type hierarchies
 
-- Static data that flows through your code: values automatically propagate through async operations.
-- Values without parameter threading: no more polluted function signatures.
-- Ambient access that just works: get values where you need them without ceremony.
+## Quick Start
 
-Context does not fix async programming. It gives you automatic value propagation to eliminate parameter threading and make contextual data available where you need it. Everything else builds on that foundation.
+### Basic Usage
+
+```typescript
+import { context } from "@phyxiusjs/context";
+
+// Simple untyped context
+await context.scope(
+  async () => {
+    const ctx = context.get();
+    console.log(ctx.data); // Record<string, unknown>
+  },
+  { initial: { service: "api", version: "1.0" } },
+);
+```
+
+### Typed Context
+
+```typescript
+interface UserSession {
+  userId: string;
+  permissions: string[];
+  preferences: {
+    theme: "light" | "dark";
+    notifications: boolean;
+  };
+}
+
+await context.scope<UserSession>(
+  async () => {
+    const ctx = context.get<UserSession>();
+
+    // Full type safety!
+    console.log(ctx.data.userId); // string
+    console.log(ctx.data.permissions); // string[]
+    console.log(ctx.data.preferences.theme); // "light" | "dark"
+  },
+  {
+    initial: {
+      userId: "user123",
+      permissions: ["read", "write"],
+      preferences: {
+        theme: "dark",
+        notifications: true,
+      },
+    },
+  },
+);
+```
+
+## API Reference
+
+### `context.scope<T>(callback, options?)`
+
+Creates a new context scope and executes a callback within it.
+
+**Parameters:**
+
+- `callback: () => Promise<any> | any` - Function to execute within the context
+- `options?: ContextScopeOptions<T>` - Configuration options
+
+**Options:**
+
+- `initial?: T` - Initial data for the context
+- `inherit?: boolean` - Whether to inherit from parent context (default: `true`)
+
+**Returns:** The result of the callback function
+
+### `context.get<T>()`
+
+Gets the current active context, throwing if none exists.
+
+**Returns:** `PhyxiusContext<T>` - The current context
+**Throws:** Error if no active context is available
+
+### `context.current<T>()`
+
+Gets the current active context or undefined if none exists.
+
+**Returns:** `PhyxiusContext<T> | undefined` - The current context or undefined
+
+## Examples
+
+### Inheritance
+
+```typescript
+interface AppContext {
+  service: string;
+  version: string;
+  requestId?: string;
+}
+
+// Parent context
+await context.scope<AppContext>(
+  async () => {
+    // Child context inherits and extends
+    await context.scope<AppContext>(
+      async () => {
+        const ctx = context.get<AppContext>();
+        console.log(ctx.data);
+        // { service: "api", version: "1.0", requestId: "req-123" }
+      },
+      {
+        initial: { requestId: "req-123" },
+      },
+    );
+  },
+  {
+    initial: { service: "api", version: "1.0" },
+  },
+);
+```
+
+### No Inheritance
+
+```typescript
+await context.scope(
+  async () => {
+    await context.scope(
+      async () => {
+        const ctx = context.get();
+        console.log(ctx.data); // { child: "data" }
+      },
+      {
+        initial: { child: "data" },
+        inherit: false,
+      },
+    );
+  },
+  {
+    initial: { parent: "data" },
+  },
+);
+```
+
+### Complex Types
+
+```typescript
+interface DatabaseContext {
+  connection: {
+    host: string;
+    port: number;
+    credentials: {
+      username: string;
+      encrypted: boolean;
+    };
+  };
+  transaction?: {
+    id: string;
+    isolation: "read-committed" | "serializable";
+  };
+}
+
+await context.scope<DatabaseContext>(
+  async () => {
+    const ctx = context.get<DatabaseContext>();
+
+    // All typed and safe
+    const host = ctx.data.connection.host; // string
+    const isolation = ctx.data.transaction?.isolation; // "read-committed" | "serializable" | undefined
+    const encrypted = ctx.data.connection.credentials.encrypted; // boolean
+  },
+  {
+    initial: {
+      connection: {
+        host: "localhost",
+        port: 5432,
+        credentials: {
+          username: "app",
+          encrypted: true,
+        },
+      },
+    },
+  },
+);
+```
+
+### Concurrent Isolation
+
+```typescript
+interface WorkerContext {
+  workerId: string;
+  task: string;
+}
+
+// These run concurrently but are completely isolated
+const results = await Promise.all([
+  context.scope<WorkerContext>(
+    async () => {
+      const ctx = context.get<WorkerContext>();
+      return ctx.data.workerId; // "worker-A"
+    },
+    { initial: { workerId: "worker-A", task: "process" } },
+  ),
+
+  context.scope<WorkerContext>(
+    async () => {
+      const ctx = context.get<WorkerContext>();
+      return ctx.data.workerId; // "worker-B"
+    },
+    { initial: { workerId: "worker-B", task: "process" } },
+  ),
+]);
+```
+
+## Why Context?
+
+Context is designed to be a **pure primitive** - it has no opinions about what you store or how you use it. This makes it perfect for:
+
+- **Building other primitives** that need thread-local storage
+- **Framework integration** without vendor lock-in
+- **Library development** where you need context but don't want to impose structure
+- **Type-safe applications** that need compile-time guarantees
+
+### Not Just for Phyxius
+
+While Context is part of the Phyxius ecosystem, it's designed to work standalone. You can use it in any Node.js application that needs thread-local storage with TypeScript support.
+
+## Integration with Other Libraries
+
+Context works great as a foundation for other libraries:
+
+```typescript
+// Observability library can layer on top
+export function observe<T>(name: string, fn: () => Promise<T>): Promise<T> {
+  return context.scope(async () => {
+    const ctx = context.get();
+    // Add observability data to existing context
+    ctx.data.observing = name;
+    ctx.data.startTime = Date.now();
+
+    const result = await fn();
+
+    ctx.data.duration = Date.now() - ctx.data.startTime;
+    // Export observability data
+
+    return result;
+  });
+}
+
+// Correlation library can layer on top
+export function withCorrelation<T>(id: string, fn: () => Promise<T>): Promise<T> {
+  return context.scope(async () => {
+    const ctx = context.get();
+    ctx.data.correlationId = id;
+    return fn();
+  });
+}
+```
+
+## License
+
+MIT © [Rodrigo Sasaki](https://github.com/rodrigopsasaki)

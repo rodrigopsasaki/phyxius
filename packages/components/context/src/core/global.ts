@@ -1,11 +1,9 @@
 import { AsyncLocalStorage } from "node:async_hooks";
-import type { PhyxiusContext, ContextRuntimeState, GlobalContextOptions } from "./types.js";
-import { generateId } from "../utils/generateId.js";
+import type { PhyxiusContext, ContextRuntimeState } from "./types.js";
 
 /**
  * Global key for context runtime state.
- * Using a string key ensures the same access across all versions of the context package,
- * allowing different versions to share the same global context state.
+ * Using a string key ensures the same access across all versions of the context package.
  */
 const CONTEXT_RUNTIME_KEY = "__phyxius_context_runtime__";
 
@@ -24,10 +22,9 @@ if (!globalThis[CONTEXT_RUNTIME_KEY]) {
 
 /**
  * Gets the global context runtime state.
- * Creates it if it doesn't exist.
  */
-function getRuntimeState(): ContextRuntimeState {
-  return globalThis[CONTEXT_RUNTIME_KEY];
+function getRuntimeState<T = Record<string, unknown>>(): ContextRuntimeState<T> {
+  return globalThis[CONTEXT_RUNTIME_KEY] as ContextRuntimeState<T>;
 }
 
 /**
@@ -39,74 +36,23 @@ function getRuntimeState(): ContextRuntimeState {
  *
  * @returns The AsyncLocalStorage instance for contexts
  */
-export function getContextStore(): AsyncLocalStorage<PhyxiusContext> {
-  const runtime = getRuntimeState();
+export function getContextStore<T = Record<string, unknown>>(): AsyncLocalStorage<PhyxiusContext<T>> {
+  const runtime = getRuntimeState<T>();
 
   if (!runtime.contextStore) {
-    runtime.contextStore = new AsyncLocalStorage<PhyxiusContext>();
+    runtime.contextStore = new AsyncLocalStorage<PhyxiusContext<T>>();
   }
 
   return runtime.contextStore;
 }
 
 /**
- * Sets up a global context that serves as the root for all other contexts.
- *
- * This global context provides default values that child contexts can inherit from.
- *
- * @param options - Configuration for the global context
- *
- * @example
- * ```typescript
- * setGlobalContext({
- *   initial: { service: "api-server", version: "1.0.0" }
- * });
- * ```
- */
-export function setGlobalContext(options: GlobalContextOptions = {}): PhyxiusContext {
-  const runtime = getRuntimeState();
-
-  const globalContext: PhyxiusContext = {
-    id: generateId(),
-    data: new Map(Object.entries(options.initial ?? {})),
-  };
-
-  runtime.globalContext = globalContext;
-  return globalContext;
-}
-
-/**
- * Gets the current global context.
- * Returns undefined if no global context has been set.
- *
- * @returns The global context or undefined
- */
-export function getGlobalContext(): PhyxiusContext | undefined {
-  const runtime = getRuntimeState();
-  return runtime.globalContext;
-}
-
-/**
- * Gets the current active context from AsyncLocalStorage or falls back to global context.
+ * Gets the current active context from AsyncLocalStorage.
  * Returns undefined if no context is available.
  *
  * @returns The current context or undefined
  */
-export function getCurrentContext(): PhyxiusContext | undefined {
-  const store = getContextStore();
-  return store.getStore() || getGlobalContext();
-}
-
-/**
- * Gets the current active context, throwing an error if none exists.
- *
- * @returns The current context
- * @throws {Error} If no active context is available
- */
-export function requireCurrentContext(): PhyxiusContext {
-  const context = getCurrentContext();
-  if (!context) {
-    throw new Error("No active context available");
-  }
-  return context;
+export function getCurrentContext<T = Record<string, unknown>>(): PhyxiusContext<T> | undefined {
+  const store = getContextStore<T>();
+  return store.getStore();
 }
