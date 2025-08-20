@@ -1,16 +1,7 @@
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect } from "vitest";
 import { context } from "../src/index.js";
 
 describe("Context - Pure AsyncLocalStorage Primitive", () => {
-  beforeEach(() => {
-    // Clear any global context state before each test
-    // @ts-expect-error - accessing internal state for testing purposes
-    if (globalThis.__phyxius_context_runtime__) {
-      // @ts-expect-error - accessing internal state for testing purposes
-      globalThis.__phyxius_context_runtime__.contextStore = undefined;
-    }
-  });
-
   describe("basic scoping", () => {
     it("should create context scope and provide access to data", async () => {
       const result = await context.scope(

@@ -1,0 +1,63 @@
+{
+  "name": "@phyxiusjs/observe",
+  "version": "0.0.0",
+  "type": "module",
+  "description": "Observability utilities for manipulating context data",
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "test": "vitest run",
+    "test:watch": "vitest watch",
+    "test:coverage": "vitest run --coverage",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint .",
+    "size": "size-limit"
+  },
+  "dependencies": {
+    "@phyxiusjs/context": "workspace:*"
+  },
+  "devDependencies": {
+    "@size-limit/preset-small-lib": "^11.1.7",
+    "@vitest/coverage-v8": "^2.1.8",
+    "size-limit": "^11.1.7",
+    "tsup": "^8.3.5",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  },
+  "size-limit": [
+    {
+      "path": "dist/index.js",
+      "limit": "5 KB"
+    }
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "license": "MIT",
+  "author": "Rodrigo Sasaki",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/rodrigopsasaki/phyxius.git",
+    "directory": "packages/components/observe"
+  },
+  "keywords": [
+    "observability",
+    "context",
+    "namespace",
+    "utilities",
+    "phyxius"
+  ]
+}
