@@ -1,0 +1,60 @@
+{
+  "name": "@phyxiusjs/validate",
+  "version": "0.0.0",
+  "type": "module",
+  "description": "Type-safe validation interfaces for handler input validation",
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "test": "vitest run",
+    "test:watch": "vitest watch",
+    "test:coverage": "vitest run --coverage",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint .",
+    "size": "size-limit"
+  },
+  "devDependencies": {
+    "@size-limit/preset-small-lib": "^11.1.7",
+    "@vitest/coverage-v8": "^2.1.8",
+    "size-limit": "^11.1.7",
+    "tsup": "^8.3.5",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  },
+  "size-limit": [
+    {
+      "path": "dist/index.js",
+      "limit": "3 KB"
+    }
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "license": "MIT",
+  "author": "Rodrigo Sasaki",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/rodrigopsasaki/phyxius.git",
+    "directory": "packages/components/validate"
+  },
+  "keywords": [
+    "validation",
+    "type-safe",
+    "zod",
+    "runtime-validation",
+    "phyxius"
+  ]
+}
