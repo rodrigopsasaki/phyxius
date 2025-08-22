@@ -1,4 +1,5 @@
 packages:
   - "packages/core/*"
   - "packages/components/*"
+  - "packages/utils/*"
   - "examples/*"
