@@ -210,6 +210,9 @@ export {
   wrapAsync,
 } from "./async-result.js";
 
+// Array utilities
+export { head, tail, isNonEmpty, isEmpty } from "./array.js";
+
 /**
  * Re-export common patterns for convenience
  */

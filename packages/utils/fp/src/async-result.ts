@@ -4,6 +4,7 @@
  */
 
 import type { Result, Err } from "./result.js";
+import type { Clock, Millis } from "@phyxiusjs/clock";
 import { ok, err, isOk, isErr } from "./result.js";
 
 /** Async Result type alias */
@@ -179,21 +180,22 @@ export async function parallelAsync<T, E>(
   }
 }
 
-/** Retry an AsyncResult-returning function with exponential backoff */
+/** Retry an AsyncResult-returning function with exponential backoff using Clock */
 export async function retryAsync<T, E>(
   fn: () => AsyncResult<T, E>,
+  clock: Clock,
   options: {
     maxAttempts?: number;
-    baseDelayMs?: number;
-    maxDelayMs?: number;
+    baseDelayMs?: Millis;
+    maxDelayMs?: Millis;
     backoffFactor?: number;
     shouldRetry?: (error: E, attempt: number) => boolean;
   } = {},
 ): AsyncResult<T, E> {
   const {
     maxAttempts = 3,
-    baseDelayMs = 100,
-    maxDelayMs = 10000,
+    baseDelayMs = 100 as Millis,
+    maxDelayMs = 10000 as Millis,
     backoffFactor = 2,
     shouldRetry = () => true,
   } = options;
@@ -210,8 +212,8 @@ export async function retryAsync<T, E>(
     lastError = result.error;
 
     if (attempt < maxAttempts && shouldRetry(lastError, attempt)) {
-      const delay = Math.min(baseDelayMs * Math.pow(backoffFactor, attempt - 1), maxDelayMs);
-      await new Promise((resolve) => setTimeout(resolve, delay));
+      const delay = Math.min(baseDelayMs * Math.pow(backoffFactor, attempt - 1), maxDelayMs) as Millis;
+      await clock.timeout(delay);
     } else {
       break;
     }
@@ -220,12 +222,14 @@ export async function retryAsync<T, E>(
   return err(lastError!);
 }
 
-/** Timeout an AsyncResult */
-export function timeoutAsync<T, E>(asyncResult: AsyncResult<T, E>, ms: number, timeoutError: E): AsyncResult<T, E> {
-  return Promise.race([
-    asyncResult,
-    new Promise<Result<T, E>>((resolve) => setTimeout(() => resolve(err(timeoutError)), ms)),
-  ]);
+/** Timeout an AsyncResult using Clock */
+export function timeoutAsync<T, E>(
+  asyncResult: AsyncResult<T, E>,
+  ms: Millis,
+  timeoutError: E,
+  clock: Clock,
+): AsyncResult<T, E> {
+  return Promise.race([asyncResult, clock.timeout(ms).then(() => err(timeoutError))]);
 }
 
 /** Convert AsyncResult to Promise (escape hatch - use sparingly) */

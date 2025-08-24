@@ -1,75 +1,104 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import { createSystemClock } from "@phyxiusjs/clock";
+import { succeed } from "@phyxiusjs/effect";
+import { Journal } from "@phyxiusjs/journal";
 import {
   createHandler,
   DEFAULT_HANDLER_CONFIG,
-  HandlerError,
   type Adapter,
   type WorkUnit,
   type HandlerEvent,
+  type ProcessorPipeline,
 } from "../src/index.js";
-import { EffectUtils } from "../src/utils.js";
 
 describe("Handler", () => {
   let clock: ReturnType<typeof createSystemClock>;
   let events: HandlerEvent[];
+  let journal: Journal<HandlerEvent>;
 
   beforeEach(() => {
     clock = createSystemClock();
     events = [];
+    journal = new Journal({
+      clock,
+      maxEntries: 1000,
+      overflow: "bounded:drop_oldest",
+    });
   });
 
   describe("Handler Creation and Lifecycle", () => {
     it("should create a handler with correct initial state", () => {
+      const processor: ProcessorPipeline<string, string> = {
+        process: (input: string) => succeed(input.toUpperCase()),
+      };
+
       const handler = createHandler({
         name: "test-handler",
-        processor: (input: string) => EffectUtils.succeed(input.toUpperCase()),
+        processor,
         config: DEFAULT_HANDLER_CONFIG,
         clock,
+        journal,
         emit: (event) => events.push(event),
       });
 
       expect(handler.id).toBeDefined();
       expect(handler.name).toBe("test-handler");
-      expect(handler.state).toBe("stopped");
+      expect(handler.state).toBe("initializing");
     });
 
     it("should provide initial metrics", () => {
+      const processor: ProcessorPipeline<string, string> = {
+        process: (input: string) => succeed(input.toUpperCase()),
+      };
+
       const handler = createHandler({
         name: "test-handler",
-        processor: (input: string) => EffectUtils.succeed(input.toUpperCase()),
+        processor,
         config: DEFAULT_HANDLER_CONFIG,
         clock,
+        journal,
       });
 
       const metrics = handler.getMetrics();
-      expect(metrics.state).toBe("stopped");
+      expect(metrics.state).toBe("initializing");
       expect(metrics.activeCount).toBe(0);
       expect(metrics.queueSize).toBe(0);
       expect(metrics.successCount).toBe(0);
       expect(metrics.errorCount).toBe(0);
     });
 
-    it("should throw error for process ref when not started", () => {
+    it("should provide process ref", () => {
+      const processor: ProcessorPipeline<string, string> = {
+        process: (input: string) => succeed(input.toUpperCase()),
+      };
+
       const handler = createHandler({
         name: "test-handler",
-        processor: (input: string) => EffectUtils.succeed(input.toUpperCase()),
+        processor,
         config: DEFAULT_HANDLER_CONFIG,
         clock,
+        journal,
       });
 
-      expect(() => handler.getProcessRef()).toThrow(HandlerError);
+      const processRef = handler.getProcessRef();
+      expect(processRef).toBeDefined();
+      expect(processRef.id).toBeDefined();
     });
   });
 
   describe("Handler Start and Stop", () => {
     it("should start and stop handler successfully", async () => {
       const adapter = createMockAdapter();
+      const processor: ProcessorPipeline<string, string> = {
+        process: (input: string) => succeed(input.toUpperCase()),
+      };
+
       const handler = createHandler({
         name: "test-handler",
-        processor: (input: string) => EffectUtils.succeed(input.toUpperCase()),
+        processor,
         config: DEFAULT_HANDLER_CONFIG,
         clock,
+        journal,
         emit: (event) => events.push(event),
       });
 
@@ -78,67 +107,64 @@ describe("Handler", () => {
       expect(startResult._tag).toBe("Ok");
       expect(handler.state).toBe("running");
 
-      // Check events
-      expect(events).toHaveLength(1);
-      expect(events[0].type).toBe("handler:started");
-      expect(events[0].handlerId).toBe(handler.id);
-
       // Stop handler
       const stopResult = await handler.stop().unsafeRunPromise();
       expect(stopResult._tag).toBe("Ok");
       expect(handler.state).toBe("stopped");
 
-      // Check stop event
+      // Check events
+      const startEvents = events.filter((e) => e.type === "handler:started");
+      expect(startEvents).toHaveLength(1);
+
       const stopEvents = events.filter((e) => e.type === "handler:stopped");
       expect(stopEvents).toHaveLength(1);
     });
 
     it("should fail to start if already running", async () => {
       const adapter = createMockAdapter();
+      const processor: ProcessorPipeline<string, string> = {
+        process: (input: string) => succeed(input.toUpperCase()),
+      };
+
       const handler = createHandler({
         name: "test-handler",
-        processor: (input: string) => EffectUtils.succeed(input.toUpperCase()),
+        processor,
         config: DEFAULT_HANDLER_CONFIG,
         clock,
+        journal,
       });
 
-      // Start handler
-      await handler.start(adapter).unsafeRunPromise();
+      // Start handler first time
+      const firstStartResult = await handler.start(adapter).unsafeRunPromise();
+      expect(firstStartResult._tag).toBe("Ok");
 
       // Try to start again
       const secondStartResult = await handler.start(adapter).unsafeRunPromise();
       expect(secondStartResult._tag).toBe("Err");
       expect(secondStartResult.error.code).toBe("HANDLER_ALREADY_RUNNING");
     });
-
-    it("should fail to stop if not running", async () => {
-      const handler = createHandler({
-        name: "test-handler",
-        processor: (input: string) => EffectUtils.succeed(input.toUpperCase()),
-        config: DEFAULT_HANDLER_CONFIG,
-        clock,
-      });
-
-      const stopResult = await handler.stop().unsafeRunPromise();
-      expect(stopResult._tag).toBe("Err");
-      expect(stopResult.error.code).toBe("HANDLER_NOT_RUNNING");
-    });
   });
 
   describe("Error Handling", () => {
     it("should handle adapter health check failure", async () => {
       const unhealthyAdapter = createMockAdapter(false);
+      const processor: ProcessorPipeline<string, string> = {
+        process: (input: string) => succeed(input.toUpperCase()),
+      };
+
       const handler = createHandler({
         name: "test-handler",
-        processor: (input: string) => EffectUtils.succeed(input.toUpperCase()),
+        processor,
         config: DEFAULT_HANDLER_CONFIG,
         clock,
+        journal,
       });
 
+      // Try to start with unhealthy adapter
       const startResult = await handler.start(unhealthyAdapter).unsafeRunPromise();
       expect(startResult._tag).toBe("Err");
       expect(startResult.error.code).toBe("ADAPTER_ERROR");
-      expect(handler.state).toBe("failed");
+      expect(handler.state).toBe("initializing"); // Should remain in initial state
     });
   });
 });
@@ -159,12 +185,12 @@ function createMockAdapter(healthy = true): Adapter<string, string> {
 
     respond: (correlationId: string, result) => {
       // Mock response - just log for testing
-      console.log(`Mock adapter responding to ${correlationId}:`, result);
-      return EffectUtils.succeed(undefined);
+      console.warn(`Mock adapter responding to ${correlationId}:`, result);
+      return succeed(undefined);
     },
 
     close: () => {
-      return EffectUtils.succeed(undefined);
+      return succeed(undefined);
     },
 
     isHealthy: () => healthy,

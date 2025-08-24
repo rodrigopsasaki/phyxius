@@ -1,7 +1,10 @@
-import type { Effect, Result } from "@phyxiusjs/effect";
+import type { Effect, RetryPolicy } from "@phyxiusjs/effect";
 import type { PhyxiusContext } from "@phyxiusjs/context";
-import type { ProcessRef } from "@phyxiusjs/process";
-import type { Clock, Instant } from "@phyxiusjs/clock";
+import type { ProcessRef, ProcessSpec } from "@phyxiusjs/process";
+import type { Clock, Instant, Millis } from "@phyxiusjs/clock";
+import type { Journal } from "@phyxiusjs/journal";
+import type { Result, Option } from "@phyxius/fp";
+import type { Validator } from "@phyxiusjs/validate";
 
 /**
  * A unit of work received from an external system.
@@ -25,14 +28,28 @@ export interface WorkUnit<TInput> {
  * Result of processing a work unit.
  * Contains either success value or error information.
  */
-export type WorkResult<TOutput> = Result<HandlerError, TOutput>;
+export type WorkResult<TOutput> = Result<TOutput, HandlerError>;
 
 /**
  * Function that processes a work unit with access to scoped context.
- * Must be pure - any side effects should be managed through the Handler.
+ * Returns an Effect for composable async operations.
  */
 export interface ProcessorFn<TInput, TOutput> {
   (input: TInput, ctx: PhyxiusContext): Effect<HandlerError, TOutput>;
+}
+
+/**
+ * Composable processor pipeline that validates, processes, and transforms work.
+ */
+export interface ProcessorPipeline<TInput, TOutput> {
+  /** Input validation */
+  readonly validate?: Validator<TInput>;
+  /** Main processing function */
+  readonly process: ProcessorFn<TInput, TOutput>;
+  /** Output validation */
+  readonly validateOutput?: Validator<TOutput>;
+  /** Retry policy for failures */
+  readonly retry?: RetryPolicy;
 }
 
 /**
@@ -75,7 +92,7 @@ export interface HandlerConfig {
   readonly maxConcurrency: number;
 
   /** Maximum time to wait for a work unit to complete */
-  readonly timeoutMs: number;
+  readonly timeoutMs: Millis;
 
   /** Circuit breaker configuration */
   readonly circuitBreaker: CircuitBreakerConfig;
@@ -84,7 +101,10 @@ export interface HandlerConfig {
   readonly backpressure: BackpressureConfig;
 
   /** Graceful shutdown timeout */
-  readonly shutdownTimeoutMs: number;
+  readonly shutdownTimeoutMs: Millis;
+
+  /** Metrics collection interval */
+  readonly metricsIntervalMs: Millis;
 }
 
 /**
@@ -94,11 +114,25 @@ export interface CircuitBreakerConfig {
   /** Number of failures before opening the circuit */
   readonly failureThreshold: number;
 
-  /** Time window for counting failures (ms) */
-  readonly windowMs: number;
+  /** Time window for counting failures */
+  readonly windowMs: Millis;
 
-  /** How long to wait before attempting to close the circuit (ms) */
-  readonly cooldownMs: number;
+  /** How long to wait before attempting to close the circuit */
+  readonly cooldownMs: Millis;
+
+  /** Minimum requests before circuit can trip */
+  readonly minimumRequests: number;
+}
+
+/**
+ * Circuit breaker states tracked in an Atom.
+ */
+export interface CircuitBreakerState {
+  readonly status: "closed" | "open" | "half-open";
+  readonly failureCount: number;
+  readonly successCount: number;
+  readonly lastFailureTime: Option<Instant>;
+  readonly windowStartTime: Instant;
 }
 
 /**
@@ -118,7 +152,21 @@ export interface BackpressureConfig {
 export type HandlerState = "initializing" | "running" | "stopping" | "stopped" | "circuit-open" | "failed";
 
 /**
- * Metrics about Handler performance.
+ * Internal handler state managed by Atom.
+ */
+export interface HandlerInternalState {
+  readonly status: HandlerState;
+  readonly activeWorkCount: number;
+  readonly queuedWorkCount: number;
+  readonly totalProcessed: number;
+  readonly totalSucceeded: number;
+  readonly totalFailed: number;
+  readonly lastActivityTime: Instant;
+  readonly startTime: Option<Instant>;
+}
+
+/**
+ * Comprehensive metrics about Handler performance.
  */
 export interface HandlerMetrics {
   /** Current state */
@@ -141,6 +189,25 @@ export interface HandlerMetrics {
 
   /** Average processing time (ms) */
   readonly avgProcessingTimeMs: number;
+
+  /** Circuit breaker status */
+  readonly circuitBreakerStatus: "closed" | "open" | "half-open";
+
+  /** Throughput (requests per second) */
+  readonly throughputPerSecond: number;
+
+  /** 95th percentile processing time */
+  readonly p95ProcessingTimeMs: number;
+
+  /** Memory usage stats */
+  readonly memoryUsage: {
+    readonly heapUsed: number;
+    readonly heapTotal: number;
+    readonly external: number;
+  };
+
+  /** Uptime since last start */
+  readonly uptimeMs: number;
 }
 
 /**
@@ -207,6 +274,35 @@ export type HandlerEvent =
       queueSize: number;
       strategy: string;
       at: Instant;
+    }
+  | {
+      type: "queue:enqueued";
+      queueSize: number;
+      totalEnqueued: number;
+      at: Instant;
+    }
+  | {
+      type: "queue:dequeued";
+      queueSize: number;
+      totalDequeued: number;
+      waitTimeMs: number;
+      at: Instant;
+    }
+  | {
+      type: "queue:cleared";
+      clearedCount: number;
+      at: Instant;
+    }
+  | {
+      type: "metrics:request_recorded";
+      processingTimeMs: number;
+      success: boolean;
+      totalProcessed: number;
+      at: Instant;
+    }
+  | {
+      type: "metrics:reset";
+      at: Instant;
     };
 
 /**
@@ -223,8 +319,8 @@ export interface HandlerOptions<TInput, TOutput> {
   /** Human-readable name for this handler */
   readonly name: string;
 
-  /** Function that processes work units */
-  readonly processor: ProcessorFn<TInput, TOutput>;
+  /** Processing pipeline with validation and retry */
+  readonly processor: ProcessorPipeline<TInput, TOutput>;
 
   /** Configuration for behavior */
   readonly config: HandlerConfig;
@@ -232,11 +328,17 @@ export interface HandlerOptions<TInput, TOutput> {
   /** Clock implementation for time operations */
   readonly clock: Clock;
 
-  /** Function for emitting events */
+  /** Journal for event sourcing */
+  readonly journal: Journal<HandlerEvent>;
+
+  /** Function for emitting events (optional, will use journal if not provided) */
   readonly emit?: EmitFn;
 
   /** Context to use as the root for all work units */
   readonly rootContext?: PhyxiusContext;
+
+  /** Process specification for supervision */
+  readonly processSpec?: Partial<ProcessSpec<HandlerMessage, HandlerInternalState, HandlerOptions<TInput, TOutput>>>;
 }
 
 /**
@@ -338,15 +440,27 @@ export type AdapterErrorCode =
  */
 export const DEFAULT_HANDLER_CONFIG: HandlerConfig = {
   maxConcurrency: 10,
-  timeoutMs: 30_000,
+  timeoutMs: 30_000 as Millis,
   circuitBreaker: {
     failureThreshold: 10,
-    windowMs: 60_000,
-    cooldownMs: 30_000,
+    windowMs: 60_000 as Millis,
+    cooldownMs: 30_000 as Millis,
+    minimumRequests: 5,
   },
   backpressure: {
     maxQueueSize: 100,
     overflowStrategy: "reject",
   },
-  shutdownTimeoutMs: 10_000,
+  shutdownTimeoutMs: 10_000 as Millis,
+  metricsIntervalMs: 5_000 as Millis,
+} as const;
+
+/**
+ * Default retry policy for processor functions.
+ */
+export const DEFAULT_RETRY_POLICY: RetryPolicy = {
+  maxAttempts: 3,
+  baseDelayMs: 1000,
+  maxDelayMs: 10000,
+  backoffFactor: 2,
 } as const;

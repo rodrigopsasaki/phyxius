@@ -68,6 +68,9 @@ importers:
 
   packages/components/handler:
     dependencies:
+      '@phyxius/fp':
+        specifier: workspace:*
+        version: link:../../utils/fp
       '@phyxiusjs/atom':
         specifier: workspace:*
         version: link:../../core/atom
@@ -86,6 +89,9 @@ importers:
       '@phyxiusjs/process':
         specifier: workspace:*
         version: link:../../core/process
+      '@phyxiusjs/validate':
+        specifier: workspace:*
+        version: link:../validate
     devDependencies:
       '@size-limit/preset-small-lib':
         specifier: ^11.1.7
@@ -280,6 +286,10 @@ importers:
         version: 2.1.9(@types/node@22.17.1)
 
   packages/utils/fp:
+    dependencies:
+      '@phyxiusjs/clock':
+        specifier: workspace:*
+        version: link:../../core/clock
     devDependencies:
       '@types/node':
         specifier: ^22.10.2

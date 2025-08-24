@@ -40,6 +40,9 @@
   ],
   "author": "",
   "license": "MIT",
+  "dependencies": {
+    "@phyxiusjs/clock": "workspace:*"
+  },
   "devDependencies": {
     "@types/node": "^22.10.2",
     "@vitest/coverage-v8": "^2.1.8",

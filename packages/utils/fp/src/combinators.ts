@@ -3,6 +3,8 @@
  * These are the building blocks for point-free programming.
  */
 
+import type { Clock, Millis } from "@phyxiusjs/clock";
+
 /** Curry a 2-argument function */
 export function curry2<A, B, R>(fn: (a: A, b: B) => R): (a: A) => (b: B) => R {
   return (a: A) => (b: B) => fn(a, b);
@@ -90,31 +92,51 @@ export function memoizeWith<A, R>(fn: (a: A) => R, keyFn: (a: A) => string): (a:
   };
 }
 
-/** Debounce a function */
-export function debounce<A extends unknown[]>(fn: (...args: A) => void, delayMs: number): (...args: A) => void {
-  let timeoutId: NodeJS.Timeout | undefined;
+/** Debounce a function using Clock abstraction */
+export function debounce<A extends unknown[]>(
+  fn: (...args: A) => void,
+  delayMs: Millis,
+  clock: Clock,
+): (...args: A) => void {
+  let cancelPending = false;
+
   return (...args: A) => {
-    if (timeoutId) clearTimeout(timeoutId);
-    timeoutId = setTimeout(() => fn(...args), delayMs);
+    cancelPending = true;
+    clock.timeout(delayMs).then(() => {
+      if (!cancelPending) {
+        fn(...args);
+      }
+    });
+    cancelPending = false;
   };
 }
 
-/** Throttle a function */
-export function throttle<A extends unknown[]>(fn: (...args: A) => void, delayMs: number): (...args: A) => void {
+/** Throttle a function using Clock abstraction */
+export function throttle<A extends unknown[]>(
+  fn: (...args: A) => void,
+  delayMs: Millis,
+  clock: Clock,
+): (...args: A) => void {
   let lastCall = 0;
-  let timeoutId: NodeJS.Timeout | undefined;
+  let cancelPending = false;
+
   return (...args: A) => {
-    const now = Date.now();
+    const now = clock.now().monoMs;
     const timeSinceLastCall = now - lastCall;
+
     if (timeSinceLastCall >= delayMs) {
       lastCall = now;
       fn(...args);
     } else {
-      if (timeoutId) clearTimeout(timeoutId);
-      timeoutId = setTimeout(() => {
-        lastCall = Date.now();
-        fn(...args);
-      }, delayMs - timeSinceLastCall);
+      cancelPending = true;
+      const remainingDelay = (delayMs - timeSinceLastCall) as Millis;
+      clock.timeout(remainingDelay).then(() => {
+        if (!cancelPending) {
+          lastCall = clock.now().monoMs;
+          fn(...args);
+        }
+      });
+      cancelPending = false;
     }
   };
 }
