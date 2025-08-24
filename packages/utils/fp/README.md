@@ -1,441 +1,439 @@
-# @phyxius/fp
+# @phyxiusjs/fp
 
-**Functional programming primitives for exception-free, composable code**
+Functional programming primitives that make failure explicit and success composable.
 
-A comprehensive collection of functional programming utilities designed for building reliable, composable systems without exceptions. Part of the Phyxius ecosystem.
+Utilities for handling errors as values instead of exceptions. Most functions in this library return values rather than throwing.
 
-## Core Principles
+## Core Philosophy
 
-- **No exceptions**: Everything returns `Result` or `Option` types
-- **Explicit error handling**: Errors are values, not side effects
-- **Composable**: All utilities work together seamlessly
-- **Type-safe**: Full TypeScript support with no `any` types
-- **Predictable**: Pure functions with no hidden state
+- **Errors are values**: No exceptions. Ever. Use `Result<T, E>` instead.
+- **Nullability is explicit**: No `null`/`undefined` surprises. Use `Option<T>`.
+- **Time is controllable**: Debounce/throttle with Clock, not setTimeout.
+- **Composition over configuration**: Small functions that combine naturally.
+- **What, not how**: Declarative APIs that express intent.
 
 ## Installation
 
 ```bash
-npm install @phyxius/fp
+npm install @phyxiusjs/fp @phyxiusjs/clock
 ```
 
-## Quick Start
+Note: Clock is required for time-based operations (debounce, throttle, retry).
+
+## The Two Types That Matter
+
+### Result<T, E> - When Things Can Fail
 
 ```typescript
-import { pipe, ok, err, some, none, map, flatMap } from "@phyxius/fp";
+import { ok, err, map, flatMap, match } from "@phyxiusjs/fp";
 
-// Result-based error handling
-const divide = (a: number, b: number) => (b === 0 ? err("Division by zero") : ok(a / b));
+// Instead of throwing exceptions
+function divide(a: number, b: number): Result<number, string> {
+  return b === 0 ? err("Division by zero") : ok(a / b);
+}
 
-const result = pipe(
+// Chain operations that might fail
+const calculation = pipe(
   divide(10, 2),
-  map((x) => x * 3),
-  flatMap((x) => divide(x, 5)),
-);
-// Result: Ok(3)
+  flatMap((x) => divide(x, 2.5)),
+  map((x) => Math.round(x)),
+); // Ok(2)
 
-// Option-based nullable handling
-const getUser = (id: string) => (users.find((u) => u.id === id) ? some(user) : none());
+// Handle both cases explicitly
+const message = match(calculation, {
+  ok: (value) => `Answer: ${value}`,
+  err: (error) => `Failed: ${error}`,
+});
+```
 
+### Option<T> - When Things Might Not Exist
+
+```typescript
+import { some, none, map, filter, unwrapOr } from "@phyxiusjs/fp";
+
+// Instead of null/undefined
+function findUser(id: string): Option<User> {
+  const user = database.get(id);
+  return user ? some(user) : none();
+}
+
+// Transform if present
 const userName = pipe(
-  getUser("123"),
-  map((user) => user.name),
-  unwrapOr("Unknown"),
+  findUser("123"),
+  map((u) => u.name),
+  map((n) => n.toUpperCase()),
+  unwrapOr("ANONYMOUS"),
+);
+
+// Filter with predicate
+const activeUser = pipe(
+  findUser("123"),
+  filter((u) => u.isActive),
 );
 ```
 
-## Core Types
-
-### Result<T, E>
-
-Represents either success (`Ok<T>`) or failure (`Err<E>`). Use instead of throwing exceptions.
+## Pattern Matching - Control Flow Without If-Else Hell
 
 ```typescript
-import { ok, err, map, flatMap, match } from "@phyxius/fp";
+import { match, matchTag } from "@phyxiusjs/fp";
 
-// Basic usage
-const success = ok(42);
-const failure = err("Something went wrong");
+// Flexible value matching
+const describe = (value: unknown) =>
+  match(value)
+    .when(0, () => "zero")
+    .when(1, () => "one")
+    .whenPredicate(
+      (x) => x > 100,
+      () => "big",
+    )
+    .whenGuard(
+      (x): x is string => typeof x === "string",
+      (s) => `string: ${s}`,
+    )
+    .otherwise(() => "something else");
 
-// Transform success values
-const doubled = map(success, (x) => x * 2); // Ok(84)
+// Discriminated union matching
+type Event =
+  | { _tag: "click"; x: number; y: number }
+  | { _tag: "keypress"; key: string }
+  | { _tag: "scroll"; delta: number };
 
-// Chain operations
-const chained = flatMap(success, (x) => (x > 0 ? ok(Math.sqrt(x)) : err("Negative number")));
-
-// Pattern matching
-const message = match(result, {
-  ok: (value) => `Success: ${value}`,
-  err: (error) => `Error: ${error}`,
-});
+const handleEvent = (event: Event) =>
+  matchTag(event, {
+    click: ({ x, y }) => `Clicked at ${x},${y}`,
+    keypress: ({ key }) => `Pressed ${key}`,
+    scroll: ({ delta }) => `Scrolled ${delta}px`,
+  });
 ```
 
-#### Result Operations
-
-| Function              | Description              | Example                            |
-| --------------------- | ------------------------ | ---------------------------------- |
-| `ok(value)`           | Create successful result | `ok(42)`                           |
-| `err(error)`          | Create failed result     | `err("oops")`                      |
-| `map(result, fn)`     | Transform success value  | `map(ok(5), x => x * 2)`           |
-| `flatMap(result, fn)` | Chain operations         | `flatMap(ok(5), x => ok(x + 1))`   |
-| `orElse(result, fn)`  | Provide fallback         | `orElse(err("fail"), () => ok(0))` |
-| `all(results)`        | Combine multiple results | `all([ok(1), ok(2), ok(3)])`       |
-
-### Option<T>
-
-Represents values that may or may not exist. Use instead of `null`/`undefined`.
+## Composition - Build Complex From Simple
 
 ```typescript
-import { some, none, map, flatMap, unwrapOr } from "@phyxius/fp";
+import { pipe, flow, compose } from "@phyxiusjs/fp";
 
-// Basic usage
-const value = some(42);
-const empty = none();
-
-// Transform existing values
-const doubled = map(value, (x) => x * 2); // Some(84)
-
-// Chain operations
-const chained = flatMap(value, (x) => (x > 0 ? some(Math.sqrt(x)) : none()));
-
-// Extract with default
-const result = unwrapOr(empty, 0); // 0
-```
-
-#### Option Operations
-
-| Function                    | Description                | Example                       |
-| --------------------------- | -------------------------- | ----------------------------- |
-| `some(value)`               | Create option with value   | `some(42)`                    |
-| `none()`                    | Create empty option        | `none()`                      |
-| `fromNullable(value)`       | Convert nullable to option | `fromNullable(user?.name)`    |
-| `map(option, fn)`           | Transform value if exists  | `map(some(5), x => x * 2)`    |
-| `filter(option, predicate)` | Keep if predicate passes   | `filter(some(5), x => x > 0)` |
-
-## Pattern Matching
-
-Powerful pattern matching for control flow:
-
-```typescript
-import { match, matchTag, matchNumber } from "@phyxius/fp";
-
-// Flexible matching
-const result = match(value)
-  .when(42, () => "the answer")
-  .whenPredicate(
-    (x) => x > 100,
-    () => "big number",
-  )
-  .whenGuard(
-    (x): x is string => typeof x === "string",
-    (s) => `string: ${s}`,
-  )
-  .otherwise(() => "something else");
-
-// Discriminated unions
-type Shape = { _tag: "circle"; radius: number } | { _tag: "rectangle"; width: number; height: number };
-
-const area = matchTag(shape, {
-  circle: ({ radius }) => Math.PI * radius ** 2,
-  rectangle: ({ width, height }) => width * height,
-});
-
-// Number ranges
-const category = matchNumber(age)
-  .whenRange(0, 17, () => "minor")
-  .whenRange(18, 64, () => "adult")
-  .whenGt(64, () => "senior")
-  .otherwise(() => "unknown");
-```
-
-## Function Composition
-
-Build data transformation pipelines:
-
-```typescript
-import { pipe, flow, compose } from "@phyxius/fp";
-
-// Pipe data through functions (left-to-right)
+// pipe: Thread data through functions (left-to-right)
 const result = pipe(
-  "  hello world  ",
+  "  hello WORLD  ",
   (s) => s.trim(),
-  (s) => s.toUpperCase(),
+  (s) => s.toLowerCase(),
   (s) => s.split(" "),
-  (words) => words.join("-"),
-); // "HELLO-WORLD"
+  (words) => words.map((w) => w[0].toUpperCase() + w.slice(1)),
+  (words) => words.join(" "),
+); // "Hello World"
 
-// Create reusable function pipelines
-const processText = flow(
+// flow: Create reusable pipelines
+const slugify = flow(
   (s: string) => s.trim(),
   (s) => s.toLowerCase(),
+  (s) => s.replace(/[^\w\s-]/g, ""),
   (s) => s.replace(/\s+/g, "-"),
 );
 
-const slug = processText("  My Blog Post  "); // "my-blog-post"
+slugify("Hello, World!"); // "hello-world"
 
-// Mathematical composition (right-to-left)
-const transform = compose(
-  (x: number) => x.toString(),
-  (x) => x * 2,
-  (x) => x + 1,
+// compose: Mathematical composition (right-to-left)
+const processNumber = compose(
+  (n: number) => `Value: ${n}`,
+  (n) => Math.round(n),
+  (n) => n * 2.5,
 );
 
-transform(5); // "12" (5 + 1 = 6, 6 * 2 = 12, "12")
+processNumber(10); // "Value: 25"
 ```
 
-## Validation
-
-Build robust validation pipelines:
+## Array Operations - Functional Style
 
 ```typescript
-import { validator, combine, string, number, object, ValidationResult } from "@phyxius/fp";
+import { head, tail, partition } from "@phyxiusjs/fp";
 
-// Basic validators
-const nameValidator = combine(string.required, string.minLength(2), string.maxLength(50));
+const numbers = [1, 2, 3, 4, 5];
 
-const ageValidator = combine(number.min(0), number.max(120), number.integer);
+// Safe array access
+const first = head(numbers); // Some(1)
+const rest = tail(numbers); // Some([2, 3, 4, 5])
 
-// Object validation
-const userValidator = object.shape({
-  name: nameValidator,
-  email: string.email,
-  age: ageValidator,
-});
+const empty = head([]); // None()
 
-const result = userValidator({
-  name: "John",
-  email: "john@example.com",
-  age: 25,
-}); // Ok({ name: "John", email: "john@example.com", age: 25 })
-
-// Custom validators
-const evenNumber = validator((n: number) => n % 2 === 0, "Must be even");
+// Partition by predicate
+const [evens, odds] = partition(numbers, (n) => n % 2 === 0);
+// evens: [2, 4]
+// odds: [1, 3, 5]
 ```
 
-## Async Operations
-
-Handle async operations safely:
+## Time-Based Operations - With Clock Control
 
 ```typescript
-import { mapAsync, flatMapAsync, allAsync, retryAsync, fromPromise, toPromise } from "@phyxius/fp";
+import { debounce, throttle } from "@phyxiusjs/fp";
+import { createSystemClock } from "@phyxiusjs/clock";
 
-// Convert promises to async results
-const fetchUser = async (id: string) => fromPromise(fetch(`/users/${id}`).then((r) => r.json()));
+const clock = createSystemClock();
 
-// Transform async results
-const processUser = (result: AsyncResult<User>) =>
-  mapAsync(result, (user) => ({
-    ...user,
-    name: user.name.toUpperCase(),
-  }));
+// Debounce: Execute after delay with no new calls
+const saveDocument = debounce(
+  (doc: Document) => {
+    console.log("Saving:", doc.id);
+  },
+  1000, // ms
+  clock,
+);
 
-// Chain async operations
-const getUserPosts = (userId: string) => flatMapAsync(fetchUser(userId), (user) => fetchPosts(user.id));
+// Call many times, executes once after 1 second
+saveDocument(doc);
+saveDocument(doc);
+saveDocument(doc); // Only this one executes
 
-// Collect multiple async results
-const users = await allAsync([fetchUser("1"), fetchUser("2"), fetchUser("3")]);
+// Throttle: Execute at most once per interval
+const updatePosition = throttle(
+  (x: number, y: number) => {
+    console.log(`Position: ${x}, ${y}`);
+  },
+  100, // ms
+  clock,
+);
 
-// Retry with backoff
-const reliableFetch = retryAsync(() => fetchUser("123"), {
-  maxAttempts: 3,
-  baseDelayMs: 100,
-  backoffFactor: 2,
-});
+// Call many times, executes every 100ms
+for (let i = 0; i < 1000; i++) {
+  updatePosition(i, i * 2);
+}
 ```
 
-## Functional Combinators
+## Real-World Examples
 
-Advanced function manipulation:
-
-```typescript
-import { curry2, partial, flip, memoize, debounce, once, lazy } from "@phyxius/fp";
-
-// Currying
-const add = curry2((a: number, b: number) => a + b);
-const add5 = add(5);
-add5(3); // 8
-
-// Partial application
-const multiply = (a: number, b: number, c: number) => a * b * c;
-const double = partial(multiply, 2);
-double(3, 4); // 24
-
-// Memoization
-const expensive = memoize((n: number) => {
-  // Complex calculation
-  return fibonacci(n);
-});
-
-// Debouncing
-const search = debounce((query: string) => {
-  // API call
-}, 300);
-
-// One-time execution
-const initialize = once(() => {
-  // Setup code
-});
-```
-
-## Integration Examples
-
-### With Express.js
+### API Error Handling
 
 ```typescript
-import { pipe, fromPromise, match } from "@phyxius/fp";
-import express from "express";
+import { fromPromise, map, flatMap, match } from "@phyxiusjs/fp";
 
-const app = express();
+async function fetchUserWithPosts(userId: string) {
+  const userResult = await fromPromise(fetch(`/api/users/${userId}`).then((r) => r.json()));
 
-app.get("/users/:id", async (req, res) => {
-  const result = await pipe(fromPromise(getUserById(req.params.id)), (result) =>
-    match(result, {
-      ok: (user) => res.json(user),
-      err: (error) => res.status(404).json({ error }),
-    }),
+  return pipe(
+    userResult,
+    flatMap((user) =>
+      fromPromise(fetch(`/api/users/${userId}/posts`).then((r) => r.json())).then((postsResult) =>
+        map(postsResult, (posts) => ({ ...user, posts })),
+      ),
+    ),
   );
+}
+
+// Usage
+const result = await fetchUserWithPosts("123");
+
+match(result, {
+  ok: (userWithPosts) => {
+    console.log(`${userWithPosts.name} has ${userWithPosts.posts.length} posts`);
+  },
+  err: (error) => {
+    console.error("Failed to fetch user data:", error);
+  },
 });
 ```
 
-### With React
+### Form Validation
 
 ```typescript
-import { pipe, some, none, match } from "@phyxius/fp";
-import { useState } from "react";
+import { ok, err, all, map } from "@phyxiusjs/fp";
 
-function UserProfile({ userId }: { userId: string }) {
-  const [user, setUser] = useState(none());
+const validateEmail = (email: string): Result<string, string> =>
+  email.includes("@") ? ok(email) : err("Invalid email");
+
+const validateAge = (age: number): Result<number, string> =>
+  age >= 18 && age <= 120 ? ok(age) : err("Age must be between 18 and 120");
+
+const validateName = (name: string): Result<string, string> => (name.length >= 2 ? ok(name) : err("Name too short"));
+
+// Combine validations
+function validateUser(data: any): Result<User, string[]> {
+  const validations = all([validateEmail(data.email), validateAge(data.age), validateName(data.name)]);
+
+  return map(validations, ([email, age, name]) => ({
+    email,
+    age,
+    name,
+  }));
+}
+```
+
+### React Hook with Option
+
+```typescript
+import { useState, useEffect } from "react";
+import { some, none, match, type Option } from "@phyxiusjs/fp";
+
+function useAsyncData<T>(
+  fetcher: () => Promise<T>
+): {
+  data: Option<T>;
+  loading: boolean;
+  error: Option<Error>;
+} {
+  const [data, setData] = useState<Option<T>>(none());
+  const [error, setError] = useState<Option<Error>>(none());
+  const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    fetchUser(userId).then(result =>
-      match(result, {
-        ok: user => setUser(some(user)),
-        err: () => setUser(none())
+    fetcher()
+      .then(result => {
+        setData(some(result));
+        setError(none());
       })
-    );
-  }, [userId]);
+      .catch(err => {
+        setData(none());
+        setError(some(err));
+      })
+      .finally(() => setLoading(false));
+  }, []);
 
-  return match(user, {
-    some: user => <div>Hello, {user.name}!</div>,
-    none: () => <div>Loading...</div>
+  return { data, loading, error };
+}
+
+// Usage in component
+function UserProfile({ userId }: { userId: string }) {
+  const { data, loading, error } = useAsyncData(
+    () => fetchUser(userId)
+  );
+
+  if (loading) return <div>Loading...</div>;
+
+  return match(error, {
+    some: err => <div>Error: {err.message}</div>,
+    none: () =>
+      match(data, {
+        some: user => <div>Welcome, {user.name}!</div>,
+        none: () => <div>No user found</div>
+      })
   });
 }
 ```
 
-## Comparison with Other Libraries
+## API Reference
 
-| Feature          | @phyxius/fp | fp-ts    | Ramda   | Lodash  |
-| ---------------- | ----------- | -------- | ------- | ------- |
-| Result type      | ✅          | ✅       | ❌      | ❌      |
-| Option type      | ✅          | ✅       | ❌      | ❌      |
-| Pattern matching | ✅          | Limited  | ❌      | ❌      |
-| Async Result     | ✅          | ✅       | ❌      | ❌      |
-| Validation       | ✅          | External | ❌      | ❌      |
-| Bundle size      | Small       | Large    | Medium  | Large   |
-| Learning curve   | Gentle      | Steep    | Gentle  | Gentle  |
-| TypeScript focus | ✅          | ✅       | Partial | Partial |
+### Result<T, E>
 
-## Design Decisions
+| Function                    | Type                                               | Description              |
+| --------------------------- | -------------------------------------------------- | ------------------------ |
+| `ok(value)`                 | `T → Result<T, E>`                                 | Create successful result |
+| `err(error)`                | `E → Result<T, E>`                                 | Create failed result     |
+| `isOk(result)`              | `Result<T, E> → boolean`                           | Check if successful      |
+| `isErr(result)`             | `Result<T, E> → boolean`                           | Check if failed          |
+| `map(result, fn)`           | `Result<T, E> → (T → U) → Result<U, E>`            | Transform success value  |
+| `flatMap(result, fn)`       | `Result<T, E> → (T → Result<U, E>) → Result<U, E>` | Chain operations         |
+| `mapErr(result, fn)`        | `Result<T, E> → (E → F) → Result<T, F>`            | Transform error value    |
+| `orElse(result, fn)`        | `Result<T, E> → (E → Result<T, F>) → Result<T, F>` | Provide fallback         |
+| `unwrap(result)`            | `Result<T, E> → T \| E`                            | Extract value (unsafe)   |
+| `unwrapOr(result, default)` | `Result<T, E> → T → T`                             | Extract with default     |
+| `all(results)`              | `Result<T, E>[] → Result<T[], E>`                  | Combine results          |
+| `any(results)`              | `Result<T, E>[] → Result<T, E[]>`                  | First success            |
+| `match(result, handlers)`   | `Result<T, E> → { ok, err } → U`                   | Pattern match            |
 
-### Why Not Exceptions?
+### Option<T>
 
-Exceptions are invisible in function signatures and can be thrown from any operation. Result types make error handling explicit and composable.
+| Function                    | Type                                      | Description              |
+| --------------------------- | ----------------------------------------- | ------------------------ |
+| `some(value)`               | `T → Option<T>`                           | Create option with value |
+| `none()`                    | `() → Option<T>`                          | Create empty option      |
+| `isSome(option)`            | `Option<T> → boolean`                     | Check if has value       |
+| `isNone(option)`            | `Option<T> → boolean`                     | Check if empty           |
+| `fromNullable(value)`       | `T \| null \| undefined → Option<T>`      | Convert nullable         |
+| `map(option, fn)`           | `Option<T> → (T → U) → Option<U>`         | Transform if present     |
+| `flatMap(option, fn)`       | `Option<T> → (T → Option<U>) → Option<U>` | Chain operations         |
+| `filter(option, pred)`      | `Option<T> → (T → boolean) → Option<T>`   | Keep if predicate passes |
+| `unwrap(option)`            | `Option<T> → T \| undefined`              | Extract value (unsafe)   |
+| `unwrapOr(option, default)` | `Option<T> → T → T`                       | Extract with default     |
+| `match(option, handlers)`   | `Option<T> → { some, none } → U`          | Pattern match            |
+| `head(array)`               | `T[] → Option<T>`                         | First element safely     |
+| `tail(array)`               | `T[] → Option<T[]>`                       | Rest of array safely     |
+
+### Composition
+
+| Function              | Type                       | Description                    |
+| --------------------- | -------------------------- | ------------------------------ |
+| `pipe(value, ...fns)` | `T → ...Function[] → U`    | Thread value through functions |
+| `flow(...fns)`        | `...Function[] → Function` | Create function pipeline       |
+| `compose(...fns)`     | `...Function[] → Function` | Right-to-left composition      |
+| `tap(fn)`             | `(T → void) → T → T`       | Side effect in pipeline        |
+
+### Combinators
+
+| Function                  | Type                             | Description              |
+| ------------------------- | -------------------------------- | ------------------------ |
+| `identity(x)`             | `T → T`                          | Return input unchanged   |
+| `constant(x)`             | `T → () → T`                     | Always return same value |
+| `flip(fn)`                | `(A → B → C) → (B → A → C)`      | Flip first two arguments |
+| `curry2(fn)`              | `(A, B) → C) → A → B → C`        | Curry 2-arg function     |
+| `curry3(fn)`              | `(A, B, C) → D) → A → B → C → D` | Curry 3-arg function     |
+| `partial(fn, ...args)`    | `Function → ...any[] → Function` | Partially apply function |
+| `memoize(fn)`             | `Function → Function`            | Cache function results   |
+| `once(fn)`                | `Function → Function`            | Execute only once        |
+| `debounce(fn, ms, clock)` | `Function → Function`            | Delay execution          |
+| `throttle(fn, ms, clock)` | `Function → Function`            | Limit execution rate     |
+
+## Why @phyxiusjs/fp?
+
+### vs Exceptions
 
 ```typescript
-// Hidden exception - what can fail?
-function divide(a: number, b: number): number;
-
-// Explicit error handling - clear what can fail
-function divide(a: number, b: number): Result<number, string>;
-```
-
-### Why Phyxius Style?
-
-- **Opinionated**: Clear patterns for common use cases
-- **Composable**: All utilities work together naturally
-- **Practical**: Focused on real-world applications
-- **Beginner-friendly**: Gentle learning curve
-
-## Best Practices
-
-### 1. Prefer Result over throwing
-
-```typescript
-// ❌ Don't throw
-function parseNumber(str: string): number {
-  const num = parseInt(str);
-  if (isNaN(num)) throw new Error("Invalid number");
-  return num;
+// ❌ Exceptions hide failure modes
+async function fetchUser(id: string): Promise<User> {
+  const response = await fetch(`/api/users/${id}`); // Can throw
+  if (!response.ok) throw new Error("Not found"); // Hidden throw
+  return response.json(); // Can throw
 }
 
-// ✅ Return Result
-function parseNumber(str: string): Result<number, string> {
-  const num = parseInt(str);
-  return isNaN(num) ? err("Invalid number") : ok(num);
+// ✅ Result makes failure explicit
+async function fetchUser(id: string): Promise<Result<User, string>> {
+  const response = await fromPromise(fetch(`/api/users/${id}`));
+  return flatMap(response, (r) => (r.ok ? fromPromise(r.json()) : err("Not found")));
 }
 ```
 
-### 2. Chain operations with pipe
+### vs null/undefined
 
 ```typescript
-// ❌ Nested operations
-const result = transform3(transform2(transform1(data)));
-
-// ✅ Linear pipeline
-const result = pipe(data, transform1, transform2, transform3);
-```
-
-### 3. Use pattern matching for control flow
-
-```typescript
-// ❌ Imperative checks
-if (result._tag === "Ok") {
-  return result.value.toString();
-} else {
-  return "Error: " + result.error;
+// ❌ Nullable values are error-prone
+function getConfig(key: string): string | null {
+  return config[key] || null; // Is "" intended to be null?
 }
 
-// ✅ Pattern matching
-return match(result, {
-  ok: (value) => value.toString(),
-  err: (error) => `Error: ${error}`,
+// ✅ Option is explicit
+function getConfig(key: string): Option<string> {
+  return key in config ? some(config[key]) : none();
+}
+```
+
+### vs Promises
+
+```typescript
+// ❌ Promises mix success and failure
+promise.then(handleSuccess).catch(handleError); // Which operations can fail?
+
+// ✅ Result separates concerns
+const result = await fromPromise(promise);
+match(result, {
+  ok: handleSuccess,
+  err: handleError,
 });
 ```
 
-### 4. Accumulate validation errors
+## Philosophy
 
-```typescript
-// ❌ Stop on first error
-if (!isValidName(name)) return err("Invalid name");
-if (!isValidEmail(email)) return err("Invalid email");
-return ok({ name, email });
+This library embodies the Phyxius philosophy:
 
-// ✅ Collect all errors
-const validator = object.shape({
-  name: string.required,
-  email: string.email,
-});
-return validator({ name, email });
-```
+- **Slow is fast because we only do it once**: Get the types right, and many bugs become impossible
+- **Make failure explicit**: Function signatures show what can go wrong
+- **Composition over configuration**: Small pieces that fit together
+- **Time is a value**: Use Clock for deterministic, testable time operations
 
-## Contributing
+## Part of the Phyxius Ecosystem
 
-1. Fork the repository
-2. Create a feature branch
-3. Add tests for your changes
-4. Ensure all tests pass
-5. Submit a pull request
+Works seamlessly with:
 
-## License
+- `@phyxiusjs/clock` - Deterministic time operations
+- `@phyxiusjs/atom` - Race-free state management
+- `@phyxiusjs/effect` - Structured concurrency
+- `@phyxiusjs/handler` - Reliable external boundaries
 
-MIT - see LICENSE file for details.
+---
 
-## Part of Phyxius
-
-This package is part of the [Phyxius](https://github.com/user/phyxius) ecosystem of foundational primitives for Node.js systems.
-
-Related packages:
-
-- `@phyxius/clock` - Controllable time primitives
-- `@phyxius/atom` - Atomic state management
-- `@phyxius/effect` - Structured concurrency
-- `@phyxius/process` - Supervised execution units
+Make the happy path obvious and the sad path explicit.

@@ -74,8 +74,8 @@ class OrderService {
 ### Example 1 — Perfect event ordering with structured data
 
 ```ts
-import { Journal } from "@phyxius/journal";
-import { createSystemClock } from "@phyxius/clock";
+import { Journal } from "@phyxiusjs/journal";
+import { createSystemClock } from "@phyxiusjs/clock";
 
 const clock = createSystemClock();
 const events = new Journal({ clock });
@@ -219,7 +219,7 @@ If you want application logging, use a logging library. If you want metrics, use
 ## Installation
 
 ```bash
-npm install @phyxius/journal @phyxius/clock
+npm install @phyxiusjs/journal @phyxiusjs/clock
 ```
 
 ---

@@ -68,9 +68,6 @@ importers:
 
   packages/components/handler:
     dependencies:
-      '@phyxius/fp':
-        specifier: workspace:*
-        version: link:../../utils/fp
       '@phyxiusjs/atom':
         specifier: workspace:*
         version: link:../../core/atom
@@ -83,6 +80,9 @@ importers:
       '@phyxiusjs/effect':
         specifier: workspace:*
         version: link:../../core/effect
+      '@phyxiusjs/fp':
+        specifier: workspace:*
+        version: link:../../utils/fp
       '@phyxiusjs/journal':
         specifier: workspace:*
         version: link:../../core/journal

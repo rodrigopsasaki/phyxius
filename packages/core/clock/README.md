@@ -179,7 +179,7 @@ If you want to know what time it is in Tokyo next Friday, use a date library. If
 ## Installation
 
 ```bash
-npm install @phyxius/clock
+npm install @phyxiusjs/clock
 ```
 
 ---

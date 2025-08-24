@@ -2,7 +2,7 @@ import type { Atom } from "@phyxiusjs/atom";
 import { createAtom } from "@phyxiusjs/atom";
 import type { Clock, Instant, Millis } from "@phyxiusjs/clock";
 import type { Journal } from "@phyxiusjs/journal";
-import { some, none, isSome } from "@phyxius/fp";
+import { some, none, isSome } from "@phyxiusjs/fp";
 import type { HandlerMetrics, HandlerInternalState, HandlerState, HandlerEvent, CircuitBreakerState } from "./types.js";
 
 /**

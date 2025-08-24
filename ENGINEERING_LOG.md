@@ -14,7 +14,7 @@
 
 ## Completed Work
 
-### 1. FP Utils Package (`@phyxius/fp`)
+### 1. FP Utils Package (`@phyxiusjs/fp`)
 
 **Status:** ✅ COMPLETED - All requirements met
 
@@ -112,7 +112,7 @@
   - `generateHandlerId()` now takes `Clock` parameter and uses `clock.now().monoMs`
   - Updated all callers in `handler.ts` and `adapters/http.ts` to pass Clock
 - **Defined RetryPolicy interface** locally in `types.ts` since it wasn't available from FP package
-- **Removed invalid imports** of `RetryPolicy` from `@phyxius/fp`
+- **Removed invalid imports** of `RetryPolicy` from `@phyxiusjs/fp`
 
 **Remaining Issues (72+ TypeScript errors):**
 
@@ -129,7 +129,7 @@
 
 **Packages Fully Compliant:** 4/5 packages
 
-- ✅ FP Utils (`@phyxius/fp`)
+- ✅ FP Utils (`@phyxiusjs/fp`)
 - ✅ Effect (`@phyxiusjs/effect`)
 - ✅ Clock (`@phyxiusjs/clock`)
 - ✅ Observe (`@phyxiusjs/observe`)

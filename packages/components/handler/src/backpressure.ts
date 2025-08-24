@@ -2,8 +2,8 @@ import type { Atom } from "@phyxiusjs/atom";
 import { createAtom } from "@phyxiusjs/atom";
 import type { Clock, Instant } from "@phyxiusjs/clock";
 import type { Journal } from "@phyxiusjs/journal";
-import type { Result, Option } from "@phyxius/fp";
-import { ok, err, some, none, head, tail, unwrapOption, isSome } from "@phyxius/fp";
+import type { Result, Option } from "@phyxiusjs/fp";
+import { ok, err, some, none, head, tail, unwrapOption, isSome } from "@phyxiusjs/fp";
 import type { BackpressureConfig, HandlerError, HandlerEvent } from "./types.js";
 
 /**

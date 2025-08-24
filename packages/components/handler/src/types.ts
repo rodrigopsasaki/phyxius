@@ -3,7 +3,7 @@ import type { PhyxiusContext } from "@phyxiusjs/context";
 import type { ProcessRef, ProcessSpec } from "@phyxiusjs/process";
 import type { Clock, Instant, Millis } from "@phyxiusjs/clock";
 import type { Journal } from "@phyxiusjs/journal";
-import type { Result, Option } from "@phyxius/fp";
+import type { Result, Option } from "@phyxiusjs/fp";
 import type { Validator } from "@phyxiusjs/validate";
 
 /**

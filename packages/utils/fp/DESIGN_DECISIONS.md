@@ -1,8 +1,8 @@
-# @phyxius/fp Design Decisions & Implementation Notes
+# @phyxiusjs/fp Design Decisions & Implementation Notes
 
 ## Overview
 
-`@phyxius/fp` is a comprehensive functional programming library designed specifically for the Phyxius ecosystem. It provides exception-free, composable utilities that align with Phyxius's core philosophy of making concurrency and error handling explicit.
+`@phyxiusjs/fp` is a comprehensive functional programming library designed specifically for the Phyxius ecosystem. It provides exception-free, composable utilities that align with Phyxius's core philosophy of making concurrency and error handling explicit.
 
 ## Design Principles Applied
 
@@ -222,7 +222,7 @@ handle(input: TInput): Result<TOutput, Error>
 
 ## Summary
 
-`@phyxius/fp` represents a carefully designed functional programming library that prioritizes:
+`@phyxiusjs/fp` represents a carefully designed functional programming library that prioritizes:
 
 1. **Developer Experience**: Clear APIs, excellent TypeScript support
 2. **Reliability**: No exceptions, explicit error handling

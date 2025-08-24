@@ -96,8 +96,8 @@ class OrderSystem {
 ### Example 1 — Isolated state with message passing
 
 ```ts
-import { createRootSupervisor } from "@phyxius/process";
-import { createSystemClock } from "@phyxius/clock";
+import { createRootSupervisor } from "@phyxiusjs/process";
+import { createSystemClock } from "@phyxiusjs/clock";
 
 const clock = createSystemClock();
 const supervisor = createRootSupervisor({ clock });
@@ -314,7 +314,7 @@ If you want HTTP APIs, use a web framework built on Process. If you want databas
 ## Installation
 
 ```bash
-npm install @phyxius/process @phyxius/clock
+npm install @phyxiusjs/process @phyxiusjs/clock
 ```
 
 ---

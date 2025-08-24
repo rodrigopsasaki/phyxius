@@ -84,8 +84,8 @@ class UserService {
 ### Example 1 — Atomic updates without race conditions
 
 ```ts
-import { createAtom } from "@phyxius/atom";
-import { createSystemClock } from "@phyxius/clock";
+import { createAtom } from "@phyxiusjs/atom";
+import { createSystemClock } from "@phyxiusjs/clock";
 
 const clock = createSystemClock();
 const counter = createAtom(0, clock);
@@ -222,7 +222,7 @@ If you want distributed state, use a CRDT library. If you want UI reactivity, us
 ## Installation
 
 ```bash
-npm install @phyxius/atom @phyxius/clock
+npm install @phyxiusjs/atom @phyxiusjs/clock
 ```
 
 ---

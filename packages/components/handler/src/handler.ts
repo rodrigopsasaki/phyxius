@@ -6,7 +6,7 @@ import type { Clock } from "@phyxiusjs/clock";
 import type { ProcessRef } from "@phyxiusjs/process";
 import { createProcess } from "@phyxiusjs/process";
 import type { PhyxiusContext } from "@phyxiusjs/context";
-import { ok, err, isOk, isErr, some, none, isSome, isNone, unwrapOption, type Option } from "@phyxius/fp";
+import { ok, err, isOk, isErr, some, none, isSome, isNone, unwrapOption, type Option } from "@phyxiusjs/fp";
 
 import type {
   Handler,

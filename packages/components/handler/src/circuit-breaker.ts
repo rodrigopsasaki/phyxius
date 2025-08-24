@@ -2,8 +2,8 @@ import type { Atom } from "@phyxiusjs/atom";
 import { createAtom } from "@phyxiusjs/atom";
 import type { Clock, Instant } from "@phyxiusjs/clock";
 import type { Effect } from "@phyxiusjs/effect";
-import type { Result } from "@phyxius/fp";
-import { ok, err, some, none, isErr, isSome, unwrapOption } from "@phyxius/fp";
+import type { Result } from "@phyxiusjs/fp";
+import { ok, err, some, none, isErr, isSome, unwrapOption } from "@phyxiusjs/fp";
 import { effect } from "@phyxiusjs/effect";
 import type { CircuitBreakerConfig, CircuitBreakerState, HandlerError } from "./types.js";
 

@@ -1,7 +1,7 @@
 import type { Effect } from "@phyxiusjs/effect";
 import { effect, fromPromise, fail } from "@phyxiusjs/effect";
 import type { Clock, Millis } from "@phyxiusjs/clock";
-import { ok, err, type Result } from "@phyxius/fp";
+import { ok, err, type Result } from "@phyxiusjs/fp";
 import { HandlerError } from "./types.js";
 
 /**

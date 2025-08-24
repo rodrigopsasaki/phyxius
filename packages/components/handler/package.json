@@ -34,7 +34,7 @@
     "@phyxiusjs/journal": "workspace:*",
     "@phyxiusjs/process": "workspace:*",
     "@phyxiusjs/validate": "workspace:*",
-    "@phyxius/fp": "workspace:*"
+    "@phyxiusjs/fp": "workspace:*"
   },
   "devDependencies": {
     "@size-limit/preset-small-lib": "^11.1.7",

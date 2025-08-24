@@ -85,8 +85,8 @@ try {
 ### Example 1 — Automatic resource cleanup
 
 ```ts
-import { acquireUseRelease, effect } from "@phyxius/effect";
-import { createSystemClock } from "@phyxius/clock";
+import { acquireUseRelease, effect } from "@phyxiusjs/effect";
+import { createSystemClock } from "@phyxiusjs/clock";
 
 const clock = createSystemClock();
 
@@ -121,7 +121,7 @@ const result = await withDatabase.unsafeRunPromise({ clock });
 ### Example 2 — Race with automatic cleanup of losers
 
 ```ts
-import { race, effect, sleep } from "@phyxius/effect";
+import { race, effect, sleep } from "@phyxiusjs/effect";
 
 const fastAPI = effect(async () => {
   const response = await fetch("https://fast-api.com");
@@ -255,7 +255,7 @@ If you want HTTP clients, use libraries built on Effect. If you want UI reactivi
 ## Installation
 
 ```bash
-npm install @phyxius/effect @phyxius/clock
+npm install @phyxiusjs/effect @phyxiusjs/clock
 ```
 
 ---
