@@ -8,17 +8,14 @@ Utilities for handling errors as values instead of exceptions. Most functions in
 
 - **Errors are values**: No exceptions. Ever. Use `Result<T, E>` instead.
 - **Nullability is explicit**: No `null`/`undefined` surprises. Use `Option<T>`.
-- **Time is controllable**: Debounce/throttle with Clock, not setTimeout.
 - **Composition over configuration**: Small functions that combine naturally.
 - **What, not how**: Declarative APIs that express intent.
 
 ## Installation
 
 ```bash
-npm install @phyxiusjs/fp @phyxiusjs/clock
+npm install @phyxiusjs/fp
 ```
-
-Note: Clock is required for time-based operations (debounce, throttle, retry).
 
 ## The Two Types That Matter
 
@@ -158,43 +155,6 @@ const empty = head([]); // None()
 const [evens, odds] = partition(numbers, (n) => n % 2 === 0);
 // evens: [2, 4]
 // odds: [1, 3, 5]
-```
-
-## Time-Based Operations - With Clock Control
-
-```typescript
-import { debounce, throttle } from "@phyxiusjs/fp";
-import { createSystemClock } from "@phyxiusjs/clock";
-
-const clock = createSystemClock();
-
-// Debounce: Execute after delay with no new calls
-const saveDocument = debounce(
-  (doc: Document) => {
-    console.log("Saving:", doc.id);
-  },
-  1000, // ms
-  clock,
-);
-
-// Call many times, executes once after 1 second
-saveDocument(doc);
-saveDocument(doc);
-saveDocument(doc); // Only this one executes
-
-// Throttle: Execute at most once per interval
-const updatePosition = throttle(
-  (x: number, y: number) => {
-    console.log(`Position: ${x}, ${y}`);
-  },
-  100, // ms
-  clock,
-);
-
-// Call many times, executes every 100ms
-for (let i = 0; i < 1000; i++) {
-  updatePosition(i, i * 2);
-}
 ```
 
 ## Real-World Examples
@@ -356,18 +316,16 @@ function UserProfile({ userId }: { userId: string }) {
 
 ### Combinators
 
-| Function                  | Type                             | Description              |
-| ------------------------- | -------------------------------- | ------------------------ |
-| `identity(x)`             | `T → T`                          | Return input unchanged   |
-| `constant(x)`             | `T → () → T`                     | Always return same value |
-| `flip(fn)`                | `(A → B → C) → (B → A → C)`      | Flip first two arguments |
-| `curry2(fn)`              | `(A, B) → C) → A → B → C`        | Curry 2-arg function     |
-| `curry3(fn)`              | `(A, B, C) → D) → A → B → C → D` | Curry 3-arg function     |
-| `partial(fn, ...args)`    | `Function → ...any[] → Function` | Partially apply function |
-| `memoize(fn)`             | `Function → Function`            | Cache function results   |
-| `once(fn)`                | `Function → Function`            | Execute only once        |
-| `debounce(fn, ms, clock)` | `Function → Function`            | Delay execution          |
-| `throttle(fn, ms, clock)` | `Function → Function`            | Limit execution rate     |
+| Function               | Type                             | Description              |
+| ---------------------- | -------------------------------- | ------------------------ |
+| `identity(x)`          | `T → T`                          | Return input unchanged   |
+| `constant(x)`          | `T → () → T`                     | Always return same value |
+| `flip(fn)`             | `(A → B → C) → (B → A → C)`      | Flip first two arguments |
+| `curry2(fn)`           | `(A, B) → C) → A → B → C`        | Curry 2-arg function     |
+| `curry3(fn)`           | `(A, B, C) → D) → A → B → C → D` | Curry 3-arg function     |
+| `partial(fn, ...args)` | `Function → ...any[] → Function` | Partially apply function |
+| `memoize(fn)`          | `Function → Function`            | Cache function results   |
+| `once(fn)`             | `Function → Function`            | Execute only once        |
 
 ## Why @phyxiusjs/fp?
 
@@ -423,7 +381,6 @@ This library embodies the Phyxius philosophy:
 - **Slow is fast because we only do it once**: Get the types right, and many bugs become impossible
 - **Make failure explicit**: Function signatures show what can go wrong
 - **Composition over configuration**: Small pieces that fit together
-- **Time is a value**: Use Clock for deterministic, testable time operations
 
 ## Part of the Phyxius Ecosystem
 
@@ -433,6 +390,7 @@ Works seamlessly with:
 - `@phyxiusjs/atom` - Race-free state management
 - `@phyxiusjs/effect` - Structured concurrency
 - `@phyxiusjs/handler` - Reliable external boundaries
+- `@phyxiusjs/temporal` - Function execution timing control
 
 ---
 

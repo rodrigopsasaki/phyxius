@@ -143,8 +143,6 @@ export {
   flip,
   memoize,
   memoizeWith,
-  debounce,
-  throttle,
   once,
   lazy,
   // Iteration

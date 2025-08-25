@@ -40,6 +40,10 @@ Functional primitives that make failure explicit. No exceptions, just values.
 
 Process external work with explicit reliability decisions. Timeouts, retries, backpressure - you choose.
 
+### Temporal
+
+Control function execution timing. Debounce, throttle with deterministic Clock.
+
 ## Installation
 
 ```bash
@@ -51,6 +55,7 @@ npm install @phyxiusjs/process
 npm install @phyxiusjs/context
 npm install @phyxiusjs/fp
 npm install @phyxiusjs/handler
+npm install @phyxiusjs/temporal
 ```
 
 ## Quick Example
