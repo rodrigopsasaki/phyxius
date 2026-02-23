@@ -16,6 +16,6 @@ export function createHandler<TReq = unknown, TRes = unknown>(
   return {
     name,
     handle: handlerFn,
-    config: config || undefined,
+    ...(config !== undefined && { config }),
   };
 }

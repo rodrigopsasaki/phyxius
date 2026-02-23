@@ -56,7 +56,7 @@ export function createContractRouter<TContract extends Contract>(contract: TCont
     },
     match: router.match.bind(router),
     getAllowedMethods: router.getAllowedMethods.bind(router),
-  };
+  } as ContractRouter<TContract>;
 }
 
 export type ImplementContract<TContract extends Contract> = {
@@ -121,5 +121,5 @@ export function defineContract<
     }
   >,
 >(routes: T): ContractFromRoutes<T> {
-  return routes as ContractFromRoutes<T>;
+  return routes as unknown as ContractFromRoutes<T>;
 }

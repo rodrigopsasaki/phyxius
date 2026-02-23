@@ -71,10 +71,7 @@ class RouteBuilderImpl<TReq = unknown, TRes = unknown> implements RouteBuilder<T
           return err(error instanceof Error ? error : new Error(String(error)));
         }
       },
-      handler.config && {
-        timeout: handler.config.timeout,
-        circuitBreaker: handler.config.circuitBreaker,
-      },
+      handler.config,
     );
   }
 }
