@@ -1,8 +1,8 @@
 {
-  "name": "@phyxiusjs/router",
+  "name": "@phyxiusjs/http",
   "version": "0.0.0",
   "type": "module",
-  "description": "Type-safe HTTP router with automatic route specificity ordering and contract-first design",
+  "description": "HTTP adapter — translates IncomingMessage/ServerResponse to Handler inputs and results",
   "main": "./dist/index.js",
   "module": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -23,29 +23,23 @@
     "test:watch": "vitest watch",
     "test:coverage": "vitest run --coverage",
     "typecheck": "tsc --noEmit",
-    "lint": "eslint .",
-    "size": "size-limit"
+    "lint": "eslint ."
   },
   "dependencies": {
     "@phyxiusjs/handler": "workspace:*",
-    "@phyxiusjs/clock": "workspace:*",
-    "@phyxiusjs/journal": "workspace:*",
     "@phyxiusjs/fp": "workspace:*"
   },
   "devDependencies": {
-    "@size-limit/preset-small-lib": "^11.1.7",
+    "@phyxiusjs/clock": "workspace:*",
+    "@phyxiusjs/journal": "workspace:*",
+    "@phyxiusjs/runtime": "workspace:*",
+    "@phyxiusjs/service": "workspace:*",
     "@vitest/coverage-v8": "^2.1.8",
-    "size-limit": "^11.1.7",
     "tsup": "^8.3.5",
     "typescript": "^5.7.2",
-    "vitest": "^2.1.8"
+    "vitest": "^2.1.8",
+    "zod": "^3.24.4"
   },
-  "size-limit": [
-    {
-      "path": "dist/index.js",
-      "limit": "25 KB"
-    }
-  ],
   "publishConfig": {
     "access": "public"
   },
@@ -54,16 +48,13 @@
   "repository": {
     "type": "git",
     "url": "https://github.com/rodrigopsasaki/phyxius.git",
-    "directory": "packages/components/router"
+    "directory": "packages/adapters/http"
   },
   "keywords": [
-    "router",
     "http",
-    "routing",
-    "type-safe",
-    "contract-first",
-    "middleware",
-    "handlers",
+    "adapter",
+    "router",
+    "handler",
     "phyxius"
   ]
 }

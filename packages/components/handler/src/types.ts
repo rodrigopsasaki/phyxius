@@ -1,396 +1,152 @@
-import type { Effect, RetryPolicy } from "@phyxiusjs/effect";
-import type { PhyxiusContext } from "@phyxiusjs/context";
-import type { ProcessRef, ProcessSpec } from "@phyxiusjs/process";
-import type { Clock, Instant, Millis } from "@phyxiusjs/clock";
+import type { Clock, Instant } from "@phyxiusjs/clock";
 import type { Journal } from "@phyxiusjs/journal";
-import type { Result, Option } from "@phyxiusjs/fp";
-import type { Validator } from "@phyxiusjs/validate";
+import type { Runtime } from "@phyxiusjs/runtime";
+import type { FunctionLayer, ServiceFunction } from "@phyxiusjs/service";
+import type { Result } from "@phyxiusjs/fp";
 
 /**
- * A unit of work received from an external system.
- * Each work unit has a unique correlation ID for tracing.
+ * Defines a Handler — the universal work unit configuration.
+ * A definition is pure data; nothing is running yet.
+ * Call `createHandler()` to materialize it into a running process.
  */
-export interface WorkUnit<TInput> {
-  /** Unique identifier for tracing this work unit through the system */
-  readonly correlationId: string;
-
-  /** The actual input data to be processed */
-  readonly input: TInput;
-
-  /** When this work unit was received */
-  readonly receivedAt: Instant;
-
-  /** Optional metadata about the source */
-  readonly metadata?: Record<string, unknown>;
-}
-
-/**
- * Result of processing a work unit.
- * Contains either success value or error information.
- */
-export type WorkResult<TOutput> = Result<TOutput, HandlerError>;
-
-/**
- * Function that processes a work unit with access to scoped context.
- * Returns an Effect for composable async operations.
- */
-export interface ProcessorFn<TInput, TOutput> {
-  (input: TInput, ctx: PhyxiusContext): Effect<HandlerError, TOutput>;
-}
-
-/**
- * Composable processor pipeline that validates, processes, and transforms work.
- */
-export interface ProcessorPipeline<TInput, TOutput> {
-  /** Input validation */
-  readonly validate?: Validator<TInput>;
-  /** Main processing function */
-  readonly process: ProcessorFn<TInput, TOutput>;
-  /** Output validation */
-  readonly validateOutput?: Validator<TOutput>;
-  /** Retry policy for failures */
-  readonly retry?: RetryPolicy;
-}
-
-/**
- * Adapter interface for connecting different transport mechanisms.
- * Handles the specifics of receiving work and sending responses.
- */
-export interface Adapter<TInput, TOutput> {
-  /** Human-readable name for this adapter */
+export interface HandlerDefinition<TInput, TOutput> {
+  /** Human-readable name for observability */
   readonly name: string;
-
-  /**
-   * Start receiving work units from the external system.
-   * Returns an async iterable that yields work units.
-   */
-  receive(): AsyncIterable<WorkUnit<TInput>>;
-
-  /**
-   * Send a response back to the external system.
-   * Must handle both success and error cases appropriately.
-   */
-  respond(correlationId: string, result: WorkResult<TOutput>): Effect<AdapterError, void>;
-
-  /**
-   * Close the adapter and clean up resources.
-   * Should gracefully handle any pending work.
-   */
-  close(): Effect<AdapterError, void>;
-
-  /**
-   * Check if the adapter is healthy and ready to receive work.
-   */
-  isHealthy(): boolean;
+  /** The service function this handler will execute */
+  readonly fn: ServiceFunction<FunctionLayer, TInput, TOutput>;
+  /** Concurrency and backpressure configuration — all fields required */
+  readonly concurrency: {
+    /** Maximum number of simultaneous executions */
+    readonly max: number;
+    /** What to do when the queue is full */
+    readonly backpressure: "reject" | "drop-oldest";
+    /** Maximum number of items that can wait in the queue */
+    readonly queueSize: number;
+  };
 }
 
 /**
- * Configuration for the Handler behavior.
+ * Dependencies required to materialize a HandlerDefinition into a running Handler.
  */
 export interface HandlerConfig {
-  /** Maximum number of concurrent work units being processed */
-  readonly maxConcurrency: number;
-
-  /** Maximum time to wait for a work unit to complete */
-  readonly timeoutMs: Millis;
-
-  /** Circuit breaker configuration */
-  readonly circuitBreaker: CircuitBreakerConfig;
-
-  /** Backpressure configuration */
-  readonly backpressure: BackpressureConfig;
-
-  /** Graceful shutdown timeout */
-  readonly shutdownTimeoutMs: Millis;
-
-  /** Metrics collection interval */
-  readonly metricsIntervalMs: Millis;
+  /** Clock for time operations */
+  readonly clock: Clock;
+  /** Journal to append one entry per completed work unit */
+  readonly journal: Journal<HandlerJournalEvent>;
+  /** Runtime for executing the service function (owns timeout, retry, circuit breaker) */
+  readonly runtime: Runtime;
 }
 
 /**
- * Circuit breaker configuration for fault tolerance.
+ * Optional metadata attached to each submit call.
+ * Propagated to the Journal event for tracing.
  */
-export interface CircuitBreakerConfig {
-  /** Number of failures before opening the circuit */
-  readonly failureThreshold: number;
-
-  /** Time window for counting failures */
-  readonly windowMs: Millis;
-
-  /** How long to wait before attempting to close the circuit */
-  readonly cooldownMs: Millis;
-
-  /** Minimum requests before circuit can trip */
-  readonly minimumRequests: number;
+export interface WorkMeta {
+  /** Caller-supplied correlation ID for distributed tracing */
+  readonly correlationId?: string;
+  /** Transport source — "http", "queue", "cron", etc. */
+  readonly source?: string;
+  /** Arbitrary adapter context */
+  readonly context?: Record<string, unknown>;
 }
 
 /**
- * Circuit breaker states tracked in an Atom.
+ * Lifecycle state of a Handler.
  */
-export interface CircuitBreakerState {
-  readonly status: "closed" | "open" | "half-open";
-  readonly failureCount: number;
-  readonly successCount: number;
-  readonly lastFailureTime: Option<Instant>;
-  readonly windowStartTime: Instant;
-}
+export type HandlerState = "idle" | "running" | "stopping" | "stopped";
 
 /**
- * Backpressure configuration for flow control.
- */
-export interface BackpressureConfig {
-  /** Maximum queue size before rejecting new work */
-  readonly maxQueueSize: number;
-
-  /** Strategy when queue is full */
-  readonly overflowStrategy: "reject" | "drop-oldest" | "drop-newest";
-}
-
-/**
- * Current state of the Handler.
- */
-export type HandlerState = "initializing" | "running" | "stopping" | "stopped" | "circuit-open" | "failed";
-
-/**
- * Internal handler state managed by Atom.
+ * Internal state tracked in the Atom.
  */
 export interface HandlerInternalState {
   readonly status: HandlerState;
-  readonly activeWorkCount: number;
-  readonly queuedWorkCount: number;
+  readonly activeCount: number;
+  readonly queuedCount: number;
+  /** Messages submitted to the Process mailbox but not yet picked up by handle(). */
+  readonly pendingCount: number;
   readonly totalProcessed: number;
   readonly totalSucceeded: number;
   readonly totalFailed: number;
-  readonly lastActivityTime: Instant;
-  readonly startTime: Option<Instant>;
 }
 
 /**
- * Comprehensive metrics about Handler performance.
+ * Observable metrics exposed via `getMetrics()`.
  */
 export interface HandlerMetrics {
-  /** Current state */
   readonly state: HandlerState;
-
-  /** Number of work units currently being processed */
   readonly activeCount: number;
-
-  /** Number of work units in the queue */
-  readonly queueSize: number;
-
-  /** Total work units processed successfully */
-  readonly successCount: number;
-
-  /** Total work units that failed */
-  readonly errorCount: number;
-
-  /** Current error rate (errors per second) */
-  readonly errorRate: number;
-
-  /** Average processing time (ms) */
-  readonly avgProcessingTimeMs: number;
-
-  /** Circuit breaker status */
-  readonly circuitBreakerStatus: "closed" | "open" | "half-open";
-
-  /** Throughput (requests per second) */
-  readonly throughputPerSecond: number;
-
-  /** 95th percentile processing time */
-  readonly p95ProcessingTimeMs: number;
-
-  /** Memory usage stats */
-  readonly memoryUsage: {
-    readonly heapUsed: number;
-    readonly heapTotal: number;
-    readonly external: number;
-  };
-
-  /** Uptime since last start */
-  readonly uptimeMs: number;
+  readonly queuedCount: number;
+  readonly totalProcessed: number;
+  readonly totalSucceeded: number;
+  readonly totalFailed: number;
 }
 
 /**
- * Events emitted by the Handler for observability.
- */
-export type HandlerEvent =
-  | {
-      type: "handler:started";
-      handlerId: string;
-      adapterName: string;
-      config: HandlerConfig;
-      at: Instant;
-    }
-  | {
-      type: "handler:stopped";
-      handlerId: string;
-      reason: "graceful" | "timeout" | "error";
-      at: Instant;
-    }
-  | {
-      type: "work:received";
-      handlerId: string;
-      correlationId: string;
-      queueSize: number;
-      at: Instant;
-    }
-  | {
-      type: "work:started";
-      handlerId: string;
-      correlationId: string;
-      activeCount: number;
-      at: Instant;
-    }
-  | {
-      type: "work:completed";
-      handlerId: string;
-      correlationId: string;
-      durationMs: number;
-      success: boolean;
-      at: Instant;
-    }
-  | {
-      type: "work:timeout";
-      handlerId: string;
-      correlationId: string;
-      timeoutMs: number;
-      at: Instant;
-    }
-  | {
-      type: "circuit:opened";
-      handlerId: string;
-      errorCount: number;
-      windowMs: number;
-      at: Instant;
-    }
-  | {
-      type: "circuit:closed";
-      handlerId: string;
-      at: Instant;
-    }
-  | {
-      type: "backpressure:triggered";
-      handlerId: string;
-      queueSize: number;
-      strategy: string;
-      at: Instant;
-    }
-  | {
-      type: "queue:enqueued";
-      queueSize: number;
-      totalEnqueued: number;
-      at: Instant;
-    }
-  | {
-      type: "queue:dequeued";
-      queueSize: number;
-      totalDequeued: number;
-      waitTimeMs: number;
-      at: Instant;
-    }
-  | {
-      type: "queue:cleared";
-      clearedCount: number;
-      at: Instant;
-    }
-  | {
-      type: "metrics:request_recorded";
-      processingTimeMs: number;
-      success: boolean;
-      totalProcessed: number;
-      at: Instant;
-    }
-  | {
-      type: "metrics:reset";
-      at: Instant;
-    };
-
-/**
- * Function for emitting Handler events.
- */
-export interface EmitFn {
-  (event: HandlerEvent): void;
-}
-
-/**
- * Options for creating a Handler.
- */
-export interface HandlerOptions<TInput, TOutput> {
-  /** Human-readable name for this handler */
-  readonly name: string;
-
-  /** Processing pipeline with validation and retry */
-  readonly processor: ProcessorPipeline<TInput, TOutput>;
-
-  /** Configuration for behavior */
-  readonly config: HandlerConfig;
-
-  /** Clock implementation for time operations */
-  readonly clock: Clock;
-
-  /** Journal for event sourcing */
-  readonly journal: Journal<HandlerEvent>;
-
-  /** Function for emitting events (optional, will use journal if not provided) */
-  readonly emit?: EmitFn;
-
-  /** Context to use as the root for all work units */
-  readonly rootContext?: PhyxiusContext;
-
-  /** Process specification for supervision */
-  readonly processSpec?: Partial<ProcessSpec<HandlerMessage, HandlerInternalState, HandlerOptions<TInput, TOutput>>>;
-}
-
-/**
- * Main Handler interface for processing external work units.
+ * The materialized Handler — a supervised Process that manages a queue of incoming work
+ * and delegates each work unit to a ServiceFunction via Runtime.
  */
 export interface Handler<TInput, TOutput> {
-  /** Unique identifier for this handler */
-  readonly id: string;
-
-  /** Human-readable name */
-  readonly name: string;
-
-  /** Current state */
-  readonly state: HandlerState;
-
   /**
-   * Start the handler with the given adapter.
-   * The handler will begin receiving and processing work units.
+   * Start the handler's supervised process.
+   * Transitions from "idle" → "running".
    */
-  start(adapter: Adapter<TInput, TOutput>): Effect<HandlerError, void>;
+  start(): Promise<void>;
 
   /**
    * Stop the handler gracefully.
-   * Will finish processing current work units before stopping.
+   * Drains active work before stopping. Rejects queued work that hasn't started.
    */
-  stop(): Effect<HandlerError, void>;
+  stop(): Promise<void>;
 
   /**
-   * Get current metrics about the handler's performance.
+   * Submit a work unit. Returns immediately if backpressure is triggered.
+   * Called by adapters (HTTP, queue, cron, etc.).
+   */
+  submit(input: TInput, meta?: WorkMeta): Promise<Result<TOutput, HandlerError>>;
+
+  /**
+   * Return a snapshot of current operational metrics.
    */
   getMetrics(): HandlerMetrics;
 
   /**
-   * Get the underlying process reference for supervision.
+   * Return the current lifecycle state.
    */
-  getProcessRef(): ProcessRef<HandlerMessage>;
+  getState(): HandlerState;
 }
 
 /**
- * Internal message types for Handler process communication.
+ * One Journal entry appended after every work unit completes (success or failure).
+ * Mandatory — never opt-in.
  */
-export type HandlerMessage =
-  | { type: "start"; adapter: Adapter<unknown, unknown> }
-  | { type: "stop" }
-  | { type: "work-received"; workUnit: WorkUnit<unknown> }
-  | { type: "work-completed"; correlationId: string; result: WorkResult<unknown> }
-  | { type: "adapter-closed" }
-  | { type: "check-circuit" }
-  | { type: "metrics-request"; reply: (metrics: HandlerMetrics) => void };
+export interface HandlerJournalEvent {
+  /** ID generated per execution (matches correlationId if not overridden) */
+  readonly executionId: string;
+  /** Name of the ServiceFunction that was executed */
+  readonly functionName: string;
+  /** Transport source — "http", "queue", "cron", "unknown" */
+  readonly source: string;
+  /** Caller-supplied correlation ID for distributed tracing */
+  readonly correlationId: string;
+  /** Wall duration from submit to completion in milliseconds */
+  readonly durationMs: number;
+  /** Number of attempts made by the runtime (includes retries) */
+  readonly attempts: number;
+  /** Whether the execution ultimately succeeded or failed */
+  readonly outcome: "success" | "failure";
+  /** Structured data written to ctx.observe during execution */
+  readonly observedData: Readonly<Record<string, unknown>>;
+  /** Error details (only present on failure) */
+  readonly error?: {
+    readonly code: string;
+    readonly message: string;
+  };
+  /** When the Journal entry was written */
+  readonly at: Instant;
+}
 
 /**
- * Error types for Handler operations.
+ * Error type for Handler-level failures.
  */
 export class HandlerError extends Error {
   constructor(
@@ -404,63 +160,26 @@ export class HandlerError extends Error {
 }
 
 export type HandlerErrorCode =
+  | "BACKPRESSURE_REJECT"
   | "HANDLER_NOT_RUNNING"
   | "HANDLER_ALREADY_RUNNING"
-  | "ADAPTER_ERROR"
-  | "PROCESSOR_ERROR"
-  | "TIMEOUT"
-  | "CIRCUIT_OPEN"
-  | "BACKPRESSURE"
-  | "SHUTDOWN_TIMEOUT";
+  | "SHUTDOWN_TIMEOUT"
+  | "EXECUTION_FAILED";
 
 /**
- * Error types for Adapter operations.
+ * Internal process message types.
+ * Not exported — internal coordination only.
  */
-export class AdapterError extends Error {
-  constructor(
-    message: string,
-    public readonly code: AdapterErrorCode,
-    public readonly cause?: unknown,
-  ) {
-    super(message);
-    this.name = "AdapterError";
-  }
+export interface SubmitMsg<TInput, TOutput> {
+  readonly type: "submit";
+  readonly correlationId: string;
+  readonly input: TInput;
+  readonly meta: WorkMeta;
+  readonly resolve: (result: Result<TOutput, HandlerError>) => void;
 }
 
-export type AdapterErrorCode =
-  | "CONNECTION_FAILED"
-  | "SEND_FAILED"
-  | "RECEIVE_FAILED"
-  | "CLOSE_FAILED"
-  | "INVALID_INPUT"
-  | "TRANSPORT_ERROR";
+export interface WorkDoneMsg {
+  readonly type: "work-done";
+}
 
-/**
- * Default configuration values.
- */
-export const DEFAULT_HANDLER_CONFIG: HandlerConfig = {
-  maxConcurrency: 10,
-  timeoutMs: 30_000 as Millis,
-  circuitBreaker: {
-    failureThreshold: 10,
-    windowMs: 60_000 as Millis,
-    cooldownMs: 30_000 as Millis,
-    minimumRequests: 5,
-  },
-  backpressure: {
-    maxQueueSize: 100,
-    overflowStrategy: "reject",
-  },
-  shutdownTimeoutMs: 10_000 as Millis,
-  metricsIntervalMs: 5_000 as Millis,
-} as const;
-
-/**
- * Default retry policy for processor functions.
- */
-export const DEFAULT_RETRY_POLICY: RetryPolicy = {
-  maxAttempts: 3,
-  baseDelayMs: 1000,
-  maxDelayMs: 10000,
-  backoffFactor: 2,
-} as const;
+export type HandlerMsg<TInput, TOutput> = SubmitMsg<TInput, TOutput> | WorkDoneMsg;

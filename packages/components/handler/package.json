@@ -2,7 +2,7 @@
   "name": "@phyxiusjs/handler",
   "version": "0.0.0",
   "type": "module",
-  "description": "Reliable entrypoint abstraction for processing external work units with fault tolerance",
+  "description": "Universal work unit — a supervised Process with concurrency, backpressure, and automatic observability",
   "main": "./dist/index.js",
   "module": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -23,33 +23,26 @@
     "test:watch": "vitest watch",
     "test:coverage": "vitest run --coverage",
     "typecheck": "tsc --noEmit",
-    "lint": "eslint .",
-    "size": "size-limit"
+    "lint": "eslint ."
   },
   "dependencies": {
     "@phyxiusjs/atom": "workspace:*",
     "@phyxiusjs/clock": "workspace:*",
-    "@phyxiusjs/context": "workspace:*",
-    "@phyxiusjs/effect": "workspace:*",
     "@phyxiusjs/journal": "workspace:*",
     "@phyxiusjs/process": "workspace:*",
-    "@phyxiusjs/validate": "workspace:*",
+    "@phyxiusjs/runtime": "workspace:*",
+    "@phyxiusjs/service": "workspace:*",
     "@phyxiusjs/fp": "workspace:*"
   },
   "devDependencies": {
-    "@size-limit/preset-small-lib": "^11.1.7",
+    "@phyxiusjs/service": "workspace:*",
+    "@phyxiusjs/runtime": "workspace:*",
     "@vitest/coverage-v8": "^2.1.8",
-    "size-limit": "^11.1.7",
     "tsup": "^8.3.5",
     "typescript": "^5.7.2",
-    "vitest": "^2.1.8"
+    "vitest": "^2.1.8",
+    "zod": "^3.24.4"
   },
-  "size-limit": [
-    {
-      "path": "dist/index.js",
-      "limit": "20 KB"
-    }
-  ],
   "publishConfig": {
     "access": "public"
   },
@@ -62,11 +55,10 @@
   },
   "keywords": [
     "handler",
-    "entrypoint",
-    "reliability",
-    "fault-tolerance",
+    "process",
+    "concurrency",
+    "backpressure",
     "supervision",
-    "adapter",
     "phyxius"
   ]
 }
