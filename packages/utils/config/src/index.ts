@@ -10,6 +10,7 @@ export { createConfig } from "./config";
 
 // Types
 export type {
+  Validator,
   ConfigInstance,
   ConfigOptions,
   ConfigSource,

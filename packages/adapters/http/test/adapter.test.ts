@@ -3,43 +3,21 @@ import { createServer, request } from "node:http";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { createSystemClock } from "@phyxiusjs/clock";
 import { Journal } from "@phyxiusjs/journal";
-import { createRuntime } from "@phyxiusjs/runtime";
-import { defineFunction, ServiceError, NO_RETRY, NO_CIRCUIT_BREAKER } from "@phyxiusjs/service";
-import { ok, err } from "@phyxiusjs/fp";
-import { z } from "zod";
-import { createHandler, defineHandler, type HandlerJournalEvent } from "@phyxiusjs/handler";
+import { createHandler, defineHandler, type HandlerEvent } from "@phyxiusjs/handler";
 import { createHttpAdapter } from "../src/index.js";
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
-function makeEchoFunction() {
-  return defineFunction({
-    name: "http.echo",
-    layer: "data",
-    input: z.object({ message: z.string() }),
-    output: z.object({ echo: z.string() }),
-    policy: {
-      timeout: 5_000 as import("@phyxiusjs/clock").Millis,
-      retry: NO_RETRY,
-      circuitBreaker: NO_CIRCUIT_BREAKER,
-    },
-    handler: async (_ctx, input) => ok({ echo: input.message }),
-  });
+function echoProcessor(input: { message: string }): Promise<{ echo: string }> {
+  return Promise.resolve({ echo: input.message });
 }
 
-function makeFailingFunction() {
-  return defineFunction({
-    name: "http.fail",
-    layer: "data",
-    input: z.object({ message: z.string() }),
-    output: z.object({ result: z.string() }),
-    policy: {
-      timeout: 5_000 as import("@phyxiusjs/clock").Millis,
-      retry: NO_RETRY,
-      circuitBreaker: NO_CIRCUIT_BREAKER,
-    },
-    handler: async (_ctx, _input) => err(ServiceError.internal("Deliberate test failure")),
-  });
+function failingProcessor(_input: { message: string }): Promise<{ result: string }> {
+  return Promise.reject(new Error("Deliberate test failure"));
+}
+
+function slowProcessor(input: { x: number }): Promise<{ x: number }> {
+  return new Promise((resolve) => setTimeout(() => resolve({ x: input.x }), 300));
 }
 
 async function makeRequest(
@@ -61,7 +39,7 @@ async function makeRequest(
         return;
       }
 
-      const {port} = address;
+      const { port } = address;
       const bodyStr = body !== undefined ? JSON.stringify(body) : undefined;
 
       const reqHeaders: Record<string, string> = {
@@ -120,25 +98,22 @@ async function makeRequest(
 
 describe("HTTP Adapter", () => {
   let clock: ReturnType<typeof createSystemClock>;
-  let journal: Journal<HandlerJournalEvent>;
-  let runtime: ReturnType<typeof createRuntime>;
+  let journal: Journal<HandlerEvent>;
 
   beforeEach(() => {
     clock = createSystemClock();
     journal = new Journal({ clock });
-    runtime = createRuntime({ clock });
   });
 
   describe("route matching", () => {
     it("routes to the correct handler based on method and path", async () => {
-      const fn = makeEchoFunction();
       const handler = createHandler(
         defineHandler({
           name: "echo",
-          fn,
+          processor: echoProcessor,
           concurrency: { max: 5, backpressure: "reject", queueSize: 10 },
         }),
-        { clock, journal, runtime },
+        { clock, journal },
       );
 
       await handler.start();
@@ -168,10 +143,10 @@ describe("HTTP Adapter", () => {
       const handler = createHandler(
         defineHandler({
           name: "echo",
-          fn: makeEchoFunction(),
+          processor: echoProcessor,
           concurrency: { max: 5, backpressure: "reject", queueSize: 10 },
         }),
-        { clock, journal, runtime },
+        { clock, journal },
       );
 
       await handler.start();
@@ -197,10 +172,10 @@ describe("HTTP Adapter", () => {
       const handler = createHandler(
         defineHandler({
           name: "echo",
-          fn: makeEchoFunction(),
+          processor: echoProcessor,
           concurrency: { max: 5, backpressure: "reject", queueSize: 10 },
         }),
-        { clock, journal, runtime },
+        { clock, journal },
       );
 
       await handler.start();
@@ -223,24 +198,22 @@ describe("HTTP Adapter", () => {
     });
 
     it("static route wins over parameterized when path matches both", async () => {
-      const echoFn = makeEchoFunction();
-
       const staticHandler = createHandler(
         defineHandler({
           name: "static",
-          fn: echoFn,
+          processor: echoProcessor,
           concurrency: { max: 5, backpressure: "reject", queueSize: 10 },
         }),
-        { clock, journal, runtime },
+        { clock, journal },
       );
 
       const paramHandler = createHandler(
         defineHandler({
           name: "param",
-          fn: echoFn,
+          processor: echoProcessor,
           concurrency: { max: 5, backpressure: "reject", queueSize: 10 },
         }),
-        { clock, journal, runtime },
+        { clock, journal },
       );
 
       await staticHandler.start();
@@ -248,12 +221,11 @@ describe("HTTP Adapter", () => {
 
       const adapter = createHttpAdapter({
         routes: [
-          // Intentionally listed param first — adapter should sort by specificity
           {
             method: "GET",
             path: "/users/:id",
             handler: paramHandler,
-            transform: (params) => ({ message: `user:${params.id}` }),
+            transform: (params) => ({ message: `user:${params["id"]}` }),
           },
           {
             method: "GET",
@@ -266,7 +238,6 @@ describe("HTTP Adapter", () => {
 
       const response = await makeRequest(adapter, "GET", "/users/me");
       expect(response.status).toBe(200);
-      // Static handler returns "static-me", param would return "user:me"
       expect((response.body as { echo: string }).echo).toBe("static-me");
 
       await staticHandler.stop();
@@ -274,14 +245,13 @@ describe("HTTP Adapter", () => {
     });
 
     it("extracts path params and passes them to transform", async () => {
-      const fn = makeEchoFunction();
       const handler = createHandler(
         defineHandler({
           name: "param-echo",
-          fn,
+          processor: echoProcessor,
           concurrency: { max: 5, backpressure: "reject", queueSize: 10 },
         }),
-        { clock, journal, runtime },
+        { clock, journal },
       );
 
       await handler.start();
@@ -292,7 +262,7 @@ describe("HTTP Adapter", () => {
             method: "GET",
             path: "/greet/:name",
             handler,
-            transform: (params) => ({ message: `Hello, ${params.name}!` }),
+            transform: (params) => ({ message: `Hello, ${params["name"]}!` }),
           },
         ],
       });
@@ -310,10 +280,10 @@ describe("HTTP Adapter", () => {
       const handler = createHandler(
         defineHandler({
           name: "failing",
-          fn: makeFailingFunction(),
+          processor: failingProcessor,
           concurrency: { max: 5, backpressure: "reject", queueSize: 10 },
         }),
-        { clock, journal, runtime },
+        { clock, journal },
       );
 
       await handler.start();
@@ -339,30 +309,13 @@ describe("HTTP Adapter", () => {
     });
 
     it("returns 503 via custom on503 handler when backpressure triggers", async () => {
-      // Use a very slow function with tight concurrency to force backpressure
-      const slowFn = defineFunction({
-        name: "slow",
-        layer: "data",
-        input: z.object({ x: z.number() }),
-        output: z.object({ x: z.number() }),
-        policy: {
-          timeout: 10_000 as import("@phyxiusjs/clock").Millis,
-          retry: NO_RETRY,
-          circuitBreaker: NO_CIRCUIT_BREAKER,
-        },
-        handler: async (_ctx, input) => {
-          await new Promise((r) => setTimeout(r, 300));
-          return ok({ x: input.x });
-        },
-      });
-
       const handler = createHandler(
         defineHandler({
           name: "slow",
-          fn: slowFn,
+          processor: slowProcessor,
           concurrency: { max: 1, backpressure: "reject", queueSize: 0 },
         }),
-        { clock, journal, runtime },
+        { clock, journal },
       );
 
       await handler.start();
@@ -383,16 +336,12 @@ describe("HTTP Adapter", () => {
         }),
       });
 
-      // Fire first request (fills the 1 slot)
       const first = makeRequest(adapter, "GET", "/slow");
-      // Give it a tick to start executing
       await new Promise((r) => setTimeout(r, 20));
-      // Fire second request while first is in-flight — queue is 0 so it should get 503
       const second = makeRequest(adapter, "GET", "/slow");
 
       const [r1, r2] = await Promise.all([first, second]);
 
-      // One should succeed, the other should be 503
       const statuses = [r1.status, r2.status].sort();
       expect(statuses).toContain(200);
       expect(statuses).toContain(503);
@@ -404,10 +353,10 @@ describe("HTTP Adapter", () => {
       const handler = createHandler(
         defineHandler({
           name: "corr",
-          fn: makeEchoFunction(),
+          processor: echoProcessor,
           concurrency: { max: 5, backpressure: "reject", queueSize: 10 },
         }),
-        { clock, journal, runtime },
+        { clock, journal },
       );
 
       await handler.start();
@@ -441,14 +390,13 @@ describe("HTTP Adapter", () => {
 
   describe("integration smoke test", () => {
     it("HTTP request → Handler → Journal entry with correct source and correlationId", async () => {
-      const fn = makeEchoFunction();
       const handler = createHandler(
         defineHandler({
           name: "http.echo",
-          fn,
+          processor: echoProcessor,
           concurrency: { max: 5, backpressure: "reject", queueSize: 10 },
         }),
-        { clock, journal, runtime },
+        { clock, journal },
       );
 
       await handler.start();
@@ -484,8 +432,12 @@ describe("HTTP Adapter", () => {
       expect(event.source).toBe("http");
       expect(event.correlationId).toBe("smoke-test-id");
       expect(event.outcome).toBe("success");
-      expect(event.functionName).toBe("http.echo");
+      expect(event.handlerName).toBe("http.echo");
       expect(event.durationMs).toBeGreaterThanOrEqual(0);
+
+      // Verify HTTP metadata flows through to observed data
+      expect(event.observed["method"]).toBe("POST");
+      expect(event.observed["path"]).toBe("/smoke");
 
       await handler.stop();
     });

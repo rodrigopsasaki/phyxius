@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { writeFileSync, unlinkSync, mkdirSync, rmSync } from "fs";
+import { writeFileSync, mkdirSync, rmSync } from "fs";
 import { join } from "path";
 import { loadFile } from "../src/parsers/file";
 

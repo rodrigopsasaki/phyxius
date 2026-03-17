@@ -4,10 +4,10 @@ export type {
   WorkMeta,
   HandlerState,
   HandlerMetrics,
-  HandlerInternalState,
-  HandlerJournalEvent,
+  HandlerEvent,
   Handler,
   HandlerErrorCode,
+  CircuitState,
 } from "./types.js";
 
 export { HandlerError } from "./types.js";

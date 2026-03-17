@@ -1,13 +1,11 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { writeFileSync, rmSync, mkdirSync, existsSync } from "fs";
+import { writeFileSync, rmSync, mkdirSync } from "fs";
 import { join } from "path";
-import { createSystemClock } from "@phyxiusjs/clock";
 import { createLoader, mergeConfigs, getValueAtPath } from "../src/loaders";
 import type { ConfigSource } from "../src/types";
 
 describe("loaders", () => {
   const testDir = "/tmp/config-loaders-test";
-  const clock = createSystemClock();
   
   beforeEach(() => {
     try {
@@ -34,7 +32,7 @@ describe("loaders", () => {
   
   describe("createLoader", () => {
     it("should create a loader with load and watch methods", () => {
-      const loader = createLoader(clock);
+      const loader = createLoader();
       
       expect(loader).toHaveProperty("load");
       expect(loader).toHaveProperty("watch");
@@ -44,7 +42,7 @@ describe("loaders", () => {
     
     describe("env source loading", () => {
       it("should load from environment variables", () => {
-        const loader = createLoader(clock);
+        const loader = createLoader();
         const source: ConfigSource = {
           type: "env",
           convention: "dbt"
@@ -68,7 +66,7 @@ describe("loaders", () => {
         vi.stubEnv("APP_SERVER__HOST", "api.example.com");
         vi.stubEnv("OTHER_VALUE", "ignored");
         
-        const loader = createLoader(clock);
+        const loader = createLoader();
         const source: ConfigSource = {
           type: "env",
           prefix: "APP_",
@@ -92,7 +90,7 @@ describe("loaders", () => {
         vi.stubEnv("SERVER_PORT", "3000");
         vi.stubEnv("SERVER_HOST", "localhost");
         
-        const loader = createLoader(clock);
+        const loader = createLoader();
         const source: ConfigSource = {
           type: "env",
           convention: "flat"
@@ -121,7 +119,7 @@ describe("loaders", () => {
         };
         writeFileSync(configPath, JSON.stringify(configData));
         
-        const loader = createLoader(clock);
+        const loader = createLoader();
         const source: ConfigSource = {
           type: "file",
           path: configPath,
@@ -147,7 +145,7 @@ database:
 `;
         writeFileSync(configPath, yamlContent);
         
-        const loader = createLoader(clock);
+        const loader = createLoader();
         const source: ConfigSource = {
           type: "file",
           path: configPath,
@@ -174,7 +172,7 @@ DATABASE__URL=mysql://localhost/db
 `;
         writeFileSync(envPath, envContent);
         
-        const loader = createLoader(clock);
+        const loader = createLoader();
         const source: ConfigSource = {
           type: "file",
           path: envPath,
@@ -196,7 +194,7 @@ DATABASE__URL=mysql://localhost/db
         const configPath = join(testDir, "auto.json");
         writeFileSync(configPath, '{"port": 5000}');
         
-        const loader = createLoader(clock);
+        const loader = createLoader();
         const source: ConfigSource = {
           type: "file",
           path: configPath
@@ -211,7 +209,7 @@ DATABASE__URL=mysql://localhost/db
       });
       
       it("should return error for missing file", () => {
-        const loader = createLoader(clock);
+        const loader = createLoader();
         const source: ConfigSource = {
           type: "file",
           path: "/non/existent/file.json"
@@ -228,7 +226,7 @@ DATABASE__URL=mysql://localhost/db
     
     describe("object source loading", () => {
       it("should load from object data", () => {
-        const loader = createLoader(clock);
+        const loader = createLoader();
         const configData = {
           server: { port: 3000, host: "localhost" },
           features: { auth: true, logging: false }
@@ -247,7 +245,7 @@ DATABASE__URL=mysql://localhost/db
       });
       
       it("should handle null object data", () => {
-        const loader = createLoader(clock);
+        const loader = createLoader();
         const source: ConfigSource = {
           type: "object",
           data: null
@@ -264,7 +262,7 @@ DATABASE__URL=mysql://localhost/db
     
     describe("defaults source loading", () => {
       it("should return empty object for defaults", () => {
-        const loader = createLoader(clock);
+        const loader = createLoader();
         const source: ConfigSource = {
           type: "defaults"
         };
@@ -283,7 +281,7 @@ DATABASE__URL=mysql://localhost/db
         const configPath = join(testDir, "watch.json");
         writeFileSync(configPath, '{"initial": true}');
         
-        const loader = createLoader(clock);
+        const loader = createLoader();
         const source: ConfigSource = {
           type: "file",
           path: configPath
@@ -302,7 +300,7 @@ DATABASE__URL=mysql://localhost/db
         const configPath = join(testDir, "watch-change.json");
         writeFileSync(configPath, '{"initial": true}');
         
-        const loader = createLoader(clock);
+        const loader = createLoader();
         const source: ConfigSource = {
           type: "file",
           path: configPath
@@ -313,10 +311,10 @@ DATABASE__URL=mysql://localhost/db
         
         // Modify the file
         writeFileSync(configPath, '{"changed": true}');
-        
-        // Wait for debounce
-        await new Promise(resolve => setTimeout(resolve, 150));
-        
+
+        // Wait for poll interval + debounce — use a longer wait under full suite load
+        await new Promise(resolve => setTimeout(resolve, 500));
+
         expect(callback).toHaveBeenCalledWith({ changed: true });
         
         cleanup();
@@ -326,7 +324,7 @@ DATABASE__URL=mysql://localhost/db
         const configPath = join(testDir, "watch-debounce.json");
         writeFileSync(configPath, '{"initial": true}');
         
-        const loader = createLoader(clock);
+        const loader = createLoader();
         const source: ConfigSource = {
           type: "file",
           path: configPath
@@ -340,9 +338,9 @@ DATABASE__URL=mysql://localhost/db
         writeFileSync(configPath, '{"change2": true}');
         writeFileSync(configPath, '{"change3": true}');
         
-        // Wait for debounce
-        await new Promise(resolve => setTimeout(resolve, 150));
-        
+        // Wait for poll interval + debounce — use a longer wait under full suite load
+        await new Promise(resolve => setTimeout(resolve, 500));
+
         // Should only be called once with the final change
         expect(callback).toHaveBeenCalledTimes(1);
         expect(callback).toHaveBeenCalledWith({ change3: true });
@@ -351,7 +349,7 @@ DATABASE__URL=mysql://localhost/db
       });
       
       it("should return no-op cleanup for non-file sources", () => {
-        const loader = createLoader(clock);
+        const loader = createLoader();
         const source: ConfigSource = {
           type: "env"
         };
@@ -364,7 +362,7 @@ DATABASE__URL=mysql://localhost/db
       });
       
       it("should handle watch errors gracefully", () => {
-        const loader = createLoader(clock);
+        const loader = createLoader();
         const source: ConfigSource = {
           type: "file",
           path: "/invalid/path/file.json"

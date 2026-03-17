@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { writeFileSync, rmSync, mkdirSync } from "fs";
 import { join } from "path";
 import { createSystemClock } from "@phyxiusjs/clock";
-import { createInMemoryJournal } from "@phyxiusjs/journal";
+import { Journal } from "@phyxiusjs/journal";
 import { z } from "zod";
 import { createConfig } from "../src/config";
 import type { ConfigOptions, ConfigEvent } from "../src/types";
@@ -10,7 +10,7 @@ import type { ConfigOptions, ConfigEvent } from "../src/types";
 describe("config", () => {
   const testDir = "/tmp/config-main-test";
   const clock = createSystemClock();
-  const journal = createInMemoryJournal(clock);
+  const journal = new Journal<ConfigEvent>({ clock });
   
   beforeEach(() => {
     try {
@@ -651,7 +651,7 @@ describe("config", () => {
       expect(metadata.environment).toBe("production");
       expect(metadata.watchEnabled).toBe(true);
       expect(metadata.reloadCount).toBe(0);
-      expect(typeof metadata.loadedAt).toBe("number");
+      expect(typeof metadata.loadedAt.wallMs).toBe("number");
     });
     
     it("should update reload count on reload", () => {

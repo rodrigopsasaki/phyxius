@@ -1,86 +1,53 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import { createSystemClock } from "@phyxiusjs/clock";
+import type { Millis } from "@phyxiusjs/clock";
 import { Journal } from "@phyxiusjs/journal";
-import { createRuntime } from "@phyxiusjs/runtime";
-import { defineFunction, ServiceError, NO_RETRY, NO_CIRCUIT_BREAKER } from "@phyxiusjs/service";
-import { ok, err, isOk, isErr } from "@phyxiusjs/fp";
-import { z } from "zod";
-import { createHandler, defineHandler, HandlerError, type HandlerJournalEvent } from "../src/index.js";
+import { isOk, isErr } from "@phyxiusjs/fp";
+import {
+  createHandler,
+  defineHandler,
+  HandlerError,
+  type HandlerEvent,
+} from "../src/index.js";
 
 // ── Shared test infrastructure ───────────────────────────────────────────────
 
-function makeEchoFunction() {
-  return defineFunction({
-    name: "test.echo",
-    layer: "data",
-    input: z.object({ message: z.string() }),
-    output: z.object({ echo: z.string() }),
-    policy: {
-      timeout: 5_000 as import("@phyxiusjs/clock").Millis,
-      retry: NO_RETRY,
-      circuitBreaker: NO_CIRCUIT_BREAKER,
-    },
-    handler: async (_ctx, input) => ok({ echo: input.message }),
-  });
+function echoProcessor(input: { message: string }): Promise<{ echo: string }> {
+  return Promise.resolve({ echo: input.message });
 }
 
-function makeFailingFunction() {
-  return defineFunction({
-    name: "test.fail",
-    layer: "data",
-    input: z.object({ message: z.string() }),
-    output: z.object({ result: z.string() }),
-    policy: {
-      timeout: 5_000 as import("@phyxiusjs/clock").Millis,
-      retry: NO_RETRY,
-      circuitBreaker: NO_CIRCUIT_BREAKER,
-    },
-    handler: async (_ctx, _input) => err(ServiceError.internal("Intentional test failure")),
-  });
+function failingProcessor(_input: { message: string }): Promise<{ result: string }> {
+  return Promise.reject(new Error("Intentional test failure"));
 }
 
-function makeSlowFunction(delayMs: number) {
-  return defineFunction({
-    name: "test.slow",
-    layer: "data",
-    input: z.object({ value: z.number() }),
-    output: z.object({ value: z.number() }),
-    policy: {
-      timeout: 10_000 as import("@phyxiusjs/clock").Millis,
-      retry: NO_RETRY,
-      circuitBreaker: NO_CIRCUIT_BREAKER,
-    },
-    handler: async (_ctx, input) => {
-      await new Promise((resolve) => setTimeout(resolve, delayMs));
-      return ok({ value: input.value });
-    },
-  });
+function slowProcessor(delayMs: number) {
+  return async (input: { value: number }): Promise<{ value: number }> => {
+    await new Promise((resolve) => setTimeout(resolve, delayMs));
+    return { value: input.value };
+  };
 }
 
 describe("Handler", () => {
   let clock: ReturnType<typeof createSystemClock>;
-  let journal: Journal<HandlerJournalEvent>;
-  let runtime: ReturnType<typeof createRuntime>;
+  let journal: Journal<HandlerEvent>;
 
   beforeEach(() => {
     clock = createSystemClock();
     journal = new Journal({ clock });
-    runtime = createRuntime({ clock });
   });
 
   // ── defineHandler ──────────────────────────────────────────────────────────
 
   describe("defineHandler", () => {
     it("returns the definition unchanged (pure configuration)", () => {
-      const fn = makeEchoFunction();
       const definition = defineHandler({
         name: "echo-handler",
-        fn,
+        processor: echoProcessor,
         concurrency: { max: 5, backpressure: "reject", queueSize: 10 },
       });
 
       expect(definition.name).toBe("echo-handler");
-      expect(definition.fn).toBe(fn);
+      expect(definition.processor).toBe(echoProcessor);
       expect(definition.concurrency.max).toBe(5);
       expect(definition.concurrency.backpressure).toBe("reject");
       expect(definition.concurrency.queueSize).toBe(10);
@@ -94,10 +61,10 @@ describe("Handler", () => {
       const handler = createHandler(
         defineHandler({
           name: "test",
-          fn: makeEchoFunction(),
+          processor: echoProcessor,
           concurrency: { max: 1, backpressure: "reject", queueSize: 5 },
         }),
-        { clock, journal, runtime },
+        { clock, journal },
       );
 
       expect(handler.getState()).toBe("idle");
@@ -107,10 +74,10 @@ describe("Handler", () => {
       const handler = createHandler(
         defineHandler({
           name: "test",
-          fn: makeEchoFunction(),
+          processor: echoProcessor,
           concurrency: { max: 1, backpressure: "reject", queueSize: 5 },
         }),
-        { clock, journal, runtime },
+        { clock, journal },
       );
 
       await handler.start();
@@ -124,10 +91,10 @@ describe("Handler", () => {
       const handler = createHandler(
         defineHandler({
           name: "test",
-          fn: makeEchoFunction(),
+          processor: echoProcessor,
           concurrency: { max: 1, backpressure: "reject", queueSize: 5 },
         }),
-        { clock, journal, runtime },
+        { clock, journal },
       );
 
       await handler.start();
@@ -140,10 +107,10 @@ describe("Handler", () => {
       const handler = createHandler(
         defineHandler({
           name: "test",
-          fn: makeEchoFunction(),
+          processor: echoProcessor,
           concurrency: { max: 1, backpressure: "reject", queueSize: 5 },
         }),
-        { clock, journal, runtime },
+        { clock, journal },
       );
 
       await handler.start();
@@ -157,27 +124,27 @@ describe("Handler", () => {
       const handler = createHandler(
         defineHandler({
           name: "test",
-          fn: makeEchoFunction(),
+          processor: echoProcessor,
           concurrency: { max: 1, backpressure: "reject", queueSize: 5 },
         }),
-        { clock, journal, runtime },
+        { clock, journal },
       );
 
       await expect(handler.stop()).resolves.toBeUndefined();
     });
   });
 
-  // ── submit() basic execution ───────────────────────────────────────────────
+  // ── submit() basic execution ─────────────────────────────────────────────
 
   describe("submit() — basic execution", () => {
-    it("executes the ServiceFunction and returns Ok on success", async () => {
+    it("executes the processor and returns Ok on success", async () => {
       const handler = createHandler(
         defineHandler({
           name: "echo",
-          fn: makeEchoFunction(),
+          processor: echoProcessor,
           concurrency: { max: 5, backpressure: "reject", queueSize: 10 },
         }),
-        { clock, journal, runtime },
+        { clock, journal },
       );
 
       await handler.start();
@@ -192,14 +159,14 @@ describe("Handler", () => {
       await handler.stop();
     });
 
-    it("returns Err wrapping the ServiceError on failure", async () => {
+    it("returns Err wrapping the error on failure", async () => {
       const handler = createHandler(
         defineHandler({
           name: "failing",
-          fn: makeFailingFunction(),
+          processor: failingProcessor,
           concurrency: { max: 5, backpressure: "reject", queueSize: 10 },
         }),
-        { clock, journal, runtime },
+        { clock, journal },
       );
 
       await handler.start();
@@ -219,10 +186,10 @@ describe("Handler", () => {
       const handler = createHandler(
         defineHandler({
           name: "test",
-          fn: makeEchoFunction(),
+          processor: echoProcessor,
           concurrency: { max: 5, backpressure: "reject", queueSize: 10 },
         }),
-        { clock, journal, runtime },
+        { clock, journal },
       );
 
       const result = await handler.submit({ message: "too early" });
@@ -237,10 +204,10 @@ describe("Handler", () => {
       const handler = createHandler(
         defineHandler({
           name: "traced",
-          fn: makeEchoFunction(),
+          processor: echoProcessor,
           concurrency: { max: 5, backpressure: "reject", queueSize: 10 },
         }),
-        { clock, journal, runtime },
+        { clock, journal },
       );
 
       await handler.start();
@@ -266,24 +233,25 @@ describe("Handler", () => {
     });
   });
 
-  // ── submit() blocks when concurrency max is reached ─────────────────────
+  // ── submit() concurrency ───────────────────────────────────────────────────
 
   describe("submit() — concurrency", () => {
     it("queues work when concurrency max is reached, executes when slot opens", async () => {
-      const fn = makeSlowFunction(50);
       const handler = createHandler(
         defineHandler({
           name: "limited",
-          fn,
+          processor: slowProcessor(50),
           concurrency: { max: 1, backpressure: "reject", queueSize: 5 },
         }),
-        { clock, journal, runtime },
+        { clock, journal },
       );
 
       await handler.start();
 
-      // Submit two items concurrently — max=1 so second must queue
-      const [r1, r2] = await Promise.all([handler.submit({ value: 1 }), handler.submit({ value: 2 })]);
+      const [r1, r2] = await Promise.all([
+        handler.submit({ value: 1 }),
+        handler.submit({ value: 2 }),
+      ]);
 
       expect(isOk(r1)).toBe(true);
       expect(isOk(r2)).toBe(true);
@@ -292,23 +260,20 @@ describe("Handler", () => {
     });
 
     it("getMetrics() shows activeCount and queuedCount", async () => {
-      const fn = makeSlowFunction(200);
       const handler = createHandler(
         defineHandler({
           name: "measured",
-          fn,
+          processor: slowProcessor(200),
           concurrency: { max: 1, backpressure: "reject", queueSize: 5 },
         }),
-        { clock, journal, runtime },
+        { clock, journal },
       );
 
       await handler.start();
 
-      // Start two submissions but don't await — check metrics in between
       const p1 = handler.submit({ value: 1 });
       const p2 = handler.submit({ value: 2 });
 
-      // Give them a tick to be picked up
       await new Promise((r) => setTimeout(r, 10));
 
       const metrics = handler.getMetrics();
@@ -324,23 +289,21 @@ describe("Handler", () => {
 
   describe("submit() — backpressure: reject", () => {
     it("returns BACKPRESSURE_REJECT when queue is full with 'reject' policy", async () => {
-      const fn = makeSlowFunction(500); // very slow so queue fills up
       const handler = createHandler(
         defineHandler({
           name: "capped",
-          fn,
+          processor: slowProcessor(500),
           concurrency: { max: 1, backpressure: "reject", queueSize: 1 },
         }),
-        { clock, journal, runtime },
+        { clock, journal },
       );
 
       await handler.start();
 
-      // Submit 3: first executes (uses the 1 slot), second queues (queueSize=1), third is rejected
       const p1 = handler.submit({ value: 1 });
-      await new Promise((r) => setTimeout(r, 5)); // let p1 start executing
-      const p2 = handler.submit({ value: 2 }); // should queue
-      const p3 = handler.submit({ value: 3 }); // queue full — should reject
+      await new Promise((r) => setTimeout(r, 5));
+      const p2 = handler.submit({ value: 2 });
+      const p3 = handler.submit({ value: 3 });
 
       const r3 = await p3;
       expect(isErr(r3)).toBe(true);
@@ -348,7 +311,6 @@ describe("Handler", () => {
         expect(r3.error.code).toBe("BACKPRESSURE_REJECT");
       }
 
-      // Cleanup
       await Promise.all([p1, p2]);
       await handler.stop();
     });
@@ -356,31 +318,28 @@ describe("Handler", () => {
 
   describe("submit() — backpressure: drop-oldest", () => {
     it("evicts the oldest queued item and enqueues the new one when queue is full", async () => {
-      const fn = makeSlowFunction(500);
       const handler = createHandler(
         defineHandler({
           name: "drop-oldest",
-          fn,
+          processor: slowProcessor(500),
           concurrency: { max: 1, backpressure: "drop-oldest", queueSize: 1 },
         }),
-        { clock, journal, runtime },
+        { clock, journal },
       );
 
       await handler.start();
 
-      const p1 = handler.submit({ value: 1 }); // starts executing
+      const p1 = handler.submit({ value: 1 });
       await new Promise((r) => setTimeout(r, 5));
-      const p2 = handler.submit({ value: 2 }); // queued
-      const p3 = handler.submit({ value: 3 }); // drops p2, queues p3
+      const p2 = handler.submit({ value: 2 });
+      const p3 = handler.submit({ value: 3 });
 
-      // p2 should be dropped (BACKPRESSURE_REJECT)
       const r2 = await p2;
       expect(isErr(r2)).toBe(true);
       if (isErr(r2)) {
         expect(r2.error.code).toBe("BACKPRESSURE_REJECT");
       }
 
-      // p3 should eventually execute (it replaced p2)
       await Promise.all([p1, p3]);
       await handler.stop();
     });
@@ -393,10 +352,10 @@ describe("Handler", () => {
       const handler = createHandler(
         defineHandler({
           name: "journaled",
-          fn: makeEchoFunction(),
+          processor: echoProcessor,
           concurrency: { max: 5, backpressure: "reject", queueSize: 10 },
         }),
-        { clock, journal, runtime },
+        { clock, journal },
       );
 
       await handler.start();
@@ -415,10 +374,10 @@ describe("Handler", () => {
       const handler = createHandler(
         defineHandler({
           name: "test.echo",
-          fn: makeEchoFunction(),
+          processor: echoProcessor,
           concurrency: { max: 5, backpressure: "reject", queueSize: 10 },
         }),
-        { clock, journal, runtime },
+        { clock, journal },
       );
 
       await handler.start();
@@ -438,11 +397,12 @@ describe("Handler", () => {
       expect(event).toBeDefined();
       if (!event) return;
 
-      expect(event.functionName).toBe("test.echo");
+      expect(event.handlerName).toBe("test.echo");
       expect(event.source).toBe("http");
       expect(event.correlationId).toBe("trace-abc");
       expect(event.outcome).toBe("success");
       expect(event.durationMs).toBeGreaterThanOrEqual(0);
+      expect(event.attempts).toBe(1);
       expect(event.error).toBeUndefined();
     });
 
@@ -450,10 +410,10 @@ describe("Handler", () => {
       const handler = createHandler(
         defineHandler({
           name: "test.fail",
-          fn: makeFailingFunction(),
+          processor: failingProcessor,
           concurrency: { max: 5, backpressure: "reject", queueSize: 10 },
         }),
-        { clock, journal, runtime },
+        { clock, journal },
       );
 
       await handler.start();
@@ -469,58 +429,91 @@ describe("Handler", () => {
 
       expect(event.outcome).toBe("failure");
       expect(event.error).toBeDefined();
-      expect(event.error?.code).toBeDefined();
+      expect(event.error?.message).toBe("Intentional test failure");
     });
-  });
 
-  // ── Graceful shutdown ─────────────────────────────────────────────────────
+    it("Journal event captures observed data from Context+Observe", async () => {
+      const processorWithObserve = async (input: { userId: string }): Promise<{ ok: true }> => {
+        const { observe } = await import("@phyxiusjs/observe");
+        observe.set("userId", input.userId);
+        observe.set("action", "profile.lookup");
+        observe.inc("lookupCount");
+        return { ok: true };
+      };
 
-  describe("stop() — graceful shutdown", () => {
-    it("drains active work before stopping", async () => {
-      const fn = makeSlowFunction(100);
       const handler = createHandler(
         defineHandler({
-          name: "graceful",
-          fn,
+          name: "observe-test",
+          processor: processorWithObserve,
           concurrency: { max: 5, backpressure: "reject", queueSize: 10 },
         }),
-        { clock, journal, runtime },
+        { clock, journal: journal as unknown as Journal<HandlerEvent> },
       );
 
       await handler.start();
 
-      // Kick off work but don't await it
-      const work = handler.submit({ value: 42 });
+      await handler.submit({ userId: "user-42" });
 
-      // Stop while work is in-flight
       await handler.stop();
 
-      // Work should have completed
+      const snapshot = journal.getSnapshot();
+      const event = snapshot.entries[0]?.data;
+      expect(event).toBeDefined();
+      if (!event) return;
+
+      // Handler-seeded observe data
+      expect(event.observed["handler"]).toBe("observe-test");
+      expect(event.observed["executionId"]).toBeDefined();
+      expect(event.observed["source"]).toBe("unknown");
+
+      // Processor-set observe data — THE MISSING PIECE
+      expect(event.observed["userId"]).toBe("user-42");
+      expect(event.observed["action"]).toBe("profile.lookup");
+      expect(event.observed["lookupCount"]).toBe(1);
+    });
+  });
+
+  // ── Graceful shutdown ───────────────────────────────────────────────────────
+
+  describe("stop() — graceful shutdown", () => {
+    it("drains active work before stopping", async () => {
+      const handler = createHandler(
+        defineHandler({
+          name: "graceful",
+          processor: slowProcessor(100),
+          concurrency: { max: 5, backpressure: "reject", queueSize: 10 },
+        }),
+        { clock, journal },
+      );
+
+      await handler.start();
+
+      const work = handler.submit({ value: 42 });
+
+      await handler.stop();
+
       const result = await work;
       expect(isOk(result)).toBe(true);
 
-      // State is stopped
       expect(handler.getState()).toBe("stopped");
     });
 
     it("rejects queued (not yet started) work when stopping", async () => {
-      const fn = makeSlowFunction(500);
       const handler = createHandler(
         defineHandler({
           name: "clear-queue",
-          fn,
+          processor: slowProcessor(500),
           concurrency: { max: 1, backpressure: "reject", queueSize: 5 },
         }),
-        { clock, journal, runtime },
+        { clock, journal },
       );
 
       await handler.start();
 
-      const p1 = handler.submit({ value: 1 }); // starts executing
+      const p1 = handler.submit({ value: 1 });
       await new Promise((r) => setTimeout(r, 5));
-      const p2 = handler.submit({ value: 2 }); // queued
+      const p2 = handler.submit({ value: 2 });
 
-      // Stop — should drain p1, reject p2
       await handler.stop();
 
       const r2 = await p2;
@@ -529,23 +522,22 @@ describe("Handler", () => {
         expect(r2.error.code).toBe("HANDLER_NOT_RUNNING");
       }
 
-      // p1 should have completed
       const r1 = await p1;
       expect(isOk(r1)).toBe(true);
     });
   });
 
-  // ── Metrics ───────────────────────────────────────────────────────────────
+  // ── Metrics ─────────────────────────────────────────────────────────────────
 
   describe("getMetrics()", () => {
     it("updates totalProcessed, totalSucceeded, totalFailed after each execution", async () => {
       const handler = createHandler(
         defineHandler({
           name: "counted",
-          fn: makeEchoFunction(),
+          processor: echoProcessor,
           concurrency: { max: 5, backpressure: "reject", queueSize: 10 },
         }),
-        { clock, journal, runtime },
+        { clock, journal },
       );
 
       await handler.start();
@@ -565,10 +557,10 @@ describe("Handler", () => {
       const handler = createHandler(
         defineHandler({
           name: "failures",
-          fn: makeFailingFunction(),
+          processor: failingProcessor,
           concurrency: { max: 5, backpressure: "reject", queueSize: 10 },
         }),
-        { clock, journal, runtime },
+        { clock, journal },
       );
 
       await handler.start();
@@ -580,6 +572,206 @@ describe("Handler", () => {
       expect(m.totalProcessed).toBe(2);
       expect(m.totalSucceeded).toBe(0);
       expect(m.totalFailed).toBe(2);
+
+      await handler.stop();
+    });
+  });
+
+  // ── Timeout ─────────────────────────────────────────────────────────────────
+
+  describe("timeout", () => {
+    it("fails with EXECUTION_TIMEOUT when processor exceeds timeout", async () => {
+      const handler = createHandler(
+        defineHandler({
+          name: "timeout-test",
+          processor: slowProcessor(500),
+          concurrency: { max: 5, backpressure: "reject", queueSize: 10 },
+          timeout: 50 as Millis,
+        }),
+        { clock, journal },
+      );
+
+      await handler.start();
+
+      const result = await handler.submit({ value: 1 });
+
+      expect(isErr(result)).toBe(true);
+      if (isErr(result)) {
+        expect(result.error.code).toBe("EXECUTION_FAILED");
+        expect(result.error.message).toContain("timed out");
+      }
+
+      await handler.stop();
+    });
+
+    it("succeeds when processor completes within timeout", async () => {
+      const handler = createHandler(
+        defineHandler({
+          name: "fast-enough",
+          processor: slowProcessor(10),
+          concurrency: { max: 5, backpressure: "reject", queueSize: 10 },
+          timeout: 1000 as Millis,
+        }),
+        { clock, journal },
+      );
+
+      await handler.start();
+
+      const result = await handler.submit({ value: 42 });
+
+      expect(isOk(result)).toBe(true);
+
+      await handler.stop();
+    });
+  });
+
+  // ── Retry ───────────────────────────────────────────────────────────────────
+
+  describe("retry", () => {
+    it("retries the processor on failure up to maxAttempts", async () => {
+      let callCount = 0;
+      const failTwiceThenSucceed = async (input: { value: number }): Promise<{ value: number }> => {
+        callCount++;
+        if (callCount < 3) {
+          throw new Error(`Attempt ${callCount} failed`);
+        }
+        return { value: input.value };
+      };
+
+      const handler = createHandler(
+        defineHandler({
+          name: "retry-test",
+          processor: failTwiceThenSucceed,
+          concurrency: { max: 5, backpressure: "reject", queueSize: 10 },
+          retry: {
+            maxAttempts: 3,
+            backoff: "fixed",
+            initialDelay: 10 as Millis,
+          },
+        }),
+        { clock, journal },
+      );
+
+      await handler.start();
+
+      const result = await handler.submit({ value: 99 });
+
+      expect(isOk(result)).toBe(true);
+      if (isOk(result)) {
+        expect(result.value.value).toBe(99);
+      }
+      expect(callCount).toBe(3);
+
+      // Journal should show 3 attempts
+      const snapshot = journal.getSnapshot();
+      const event = snapshot.entries[0]?.data;
+      expect(event?.attempts).toBe(3);
+
+      await handler.stop();
+    });
+
+    it("fails after exhausting all retry attempts", async () => {
+      const alwaysFail = async (_input: { value: number }): Promise<{ value: number }> => {
+        throw new Error("Always fails");
+      };
+
+      const handler = createHandler(
+        defineHandler({
+          name: "exhausted-retries",
+          processor: alwaysFail,
+          concurrency: { max: 5, backpressure: "reject", queueSize: 10 },
+          retry: {
+            maxAttempts: 2,
+            backoff: "fixed",
+            initialDelay: 10 as Millis,
+          },
+        }),
+        { clock, journal },
+      );
+
+      await handler.start();
+
+      const result = await handler.submit({ value: 1 });
+
+      expect(isErr(result)).toBe(true);
+      if (isErr(result)) {
+        expect(result.error.code).toBe("EXECUTION_FAILED");
+      }
+
+      await handler.stop();
+    });
+  });
+
+  // ── Circuit Breaker ─────────────────────────────────────────────────────────
+
+  describe("circuit breaker", () => {
+    it("opens the circuit after reaching failure threshold", async () => {
+      const alwaysFail = async (_input: { value: number }): Promise<{ value: number }> => {
+        throw new Error("Boom");
+      };
+
+      const handler = createHandler(
+        defineHandler({
+          name: "cb-test",
+          processor: alwaysFail,
+          concurrency: { max: 5, backpressure: "reject", queueSize: 10 },
+          circuitBreaker: {
+            failureThreshold: 2,
+            resetTimeout: 60_000 as Millis,
+          },
+        }),
+        { clock, journal },
+      );
+
+      await handler.start();
+
+      // First two failures trip the circuit
+      await handler.submit({ value: 1 });
+      await handler.submit({ value: 2 });
+
+      // Third call should be rejected by the circuit breaker
+      const result = await handler.submit({ value: 3 });
+
+      expect(isErr(result)).toBe(true);
+      if (isErr(result)) {
+        expect(result.error.code).toBe("CIRCUIT_OPEN");
+      }
+
+      await handler.stop();
+    });
+
+    it("resets the circuit after a successful execution", async () => {
+      let callCount = 0;
+      const failOnceThenSucceed = async (input: { value: number }): Promise<{ value: number }> => {
+        callCount++;
+        if (callCount === 1) {
+          throw new Error("First call fails");
+        }
+        return { value: input.value };
+      };
+
+      const handler = createHandler(
+        defineHandler({
+          name: "cb-reset-test",
+          processor: failOnceThenSucceed,
+          concurrency: { max: 5, backpressure: "reject", queueSize: 10 },
+          circuitBreaker: {
+            failureThreshold: 3,
+            resetTimeout: 60_000 as Millis,
+          },
+        }),
+        { clock, journal },
+      );
+
+      await handler.start();
+
+      // First call fails (1 consecutive failure)
+      await handler.submit({ value: 1 });
+
+      // Second call succeeds — should reset consecutive failures to 0
+      const result = await handler.submit({ value: 2 });
+
+      expect(isOk(result)).toBe(true);
 
       await handler.stop();
     });

@@ -30,9 +30,6 @@
     },
     {
       "path": "../../utils/fp"
-    },
-    {
-      "path": "../../utils/validate"
     }
   ]
 }

@@ -60,8 +60,7 @@
     "@phyxiusjs/atom": "workspace:*",
     "@phyxiusjs/clock": "workspace:*",
     "@phyxiusjs/fp": "workspace:*",
-    "@phyxiusjs/journal": "workspace:*",
-    "@phyxiusjs/validate": "workspace:*"
+    "@phyxiusjs/journal": "workspace:*"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",

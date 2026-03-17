@@ -53,7 +53,7 @@ function filterEnvVars(
  */
 function parseDBTConvention(
   envVars: Record<string, string>,
-  prefix: string
+  _prefix: string
 ): Record<string, unknown> {
   const result: Record<string, unknown> = {};
   
@@ -77,8 +77,8 @@ function parseDBTConvention(
  */
 function parseFlatConvention(
   envVars: Record<string, string>,
-  prefix: string,
-  delimiter: string
+  _prefix: string,
+  _delimiter: string
 ): Record<string, unknown> {
   const result: Record<string, unknown> = {};
   
@@ -194,7 +194,7 @@ export function generateEnvExample(
   const lines: string[] = [];
   
   lines.push("# Generated environment variable example");
-  lines.push("# Convention: " + (convention === "dbt" ? "dbt (double underscore)" : "flat"));
+  lines.push(`# Convention: ${convention === "dbt" ? "dbt (double underscore)" : "flat"}`);
   if (prefix) {
     lines.push(`# Prefix: ${prefix}`);
   }

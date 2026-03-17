@@ -2,13 +2,12 @@ import { ok, err, type Result } from "@phyxiusjs/fp";
 import type { ConfigSource, ConfigError, ConfigLoader } from "./types";
 import { parseEnv } from "./parsers/env";
 import { loadFile } from "./parsers/file";
-import { watch as fsWatch } from "fs";
-import type { Clock } from "@phyxiusjs/clock";
+import { watchFile, unwatchFile, type Stats } from "fs";
 
 /**
  * Create a config loader for all source types
  */
-export function createLoader(clock: Clock): ConfigLoader {
+export function createLoader(): ConfigLoader {
   return {
     load(source: ConfigSource): Result<unknown, ConfigError> {
       switch (source.type) {
@@ -45,7 +44,6 @@ export function createLoader(clock: Clock): ConfigLoader {
         return () => {};
       }
 
-      let watcher: ReturnType<typeof fsWatch> | undefined;
       let debounceTimer: ReturnType<typeof setTimeout> | undefined;
 
       const handleChange = () => {
@@ -62,11 +60,18 @@ export function createLoader(clock: Clock): ConfigLoader {
           if (result._tag === "Ok") {
             callback(result.value);
           }
-        }, 100);
+        }, 20);
+      };
+
+      // Use polling via watchFile for reliable cross-platform file change detection
+      const handleStatChange = (curr: Stats, prev: Stats) => {
+        if (curr.mtimeMs !== prev.mtimeMs) {
+          handleChange();
+        }
       };
 
       try {
-        watcher = fsWatch(source.path, handleChange);
+        watchFile(source.path, { interval: 5, persistent: false }, handleStatChange);
       } catch (error) {
         // Failed to watch, silently ignore
         console.warn(`Failed to watch config file: ${source.path}`, error);
@@ -77,9 +82,7 @@ export function createLoader(clock: Clock): ConfigLoader {
         if (debounceTimer) {
           clearTimeout(debounceTimer);
         }
-        if (watcher) {
-          watcher.close();
-        }
+        unwatchFile(source.path, handleStatChange);
       };
     }
   };
@@ -105,8 +108,8 @@ export function mergeConfigs(
     }
   }
   
-  // Apply configs in reverse order (last has highest precedence)
-  for (let i = configs.length - 1; i >= 0; i--) {
+  // Apply configs in order — later sources override earlier ones
+  for (let i = 0; i < configs.length; i++) {
     const config = configs[i];
     if (typeof config === "object" && config !== null) {
       result = deepMerge(result, config as Record<string, unknown>);

@@ -1,12 +1,9 @@
-import { ok, err, type Result, map, flatMap, pipe } from "@phyxiusjs/fp";
+import { ok, err, type Result } from "@phyxiusjs/fp";
 import { createAtom, type Atom } from "@phyxiusjs/atom";
-import type { Validator } from "@phyxiusjs/validate";
-import type { Clock } from "@phyxiusjs/clock";
-import type { Journal } from "@phyxiusjs/journal";
 import type {
+  Validator,
   ConfigInstance,
   ConfigOptions,
-  ConfigSource,
   ConfigError,
   ConfigEvent,
   ConfigState,
@@ -42,23 +39,28 @@ export function createConfig<T>(
   );
   
   // Create loader
-  const loader = createLoader(clock);
+  const loader = createLoader();
   
   // Watch cleanup functions
   const watchCleanups: Array<() => void> = [];
   
   // Event subscribers
   const subscribers = new Set<(event: ConfigEvent) => void>();
+
+  // Last emitted event — replayed to new subscribers so they get current state
+  let lastEvent: ConfigEvent | undefined;
   
   /**
    * Emit event to subscribers and journal
    */
   function emitEvent(event: ConfigEvent): void {
+    lastEvent = event;
+
     // Log to journal if provided
     if (journal) {
       journal.append(event);
     }
-    
+
     // Notify subscribers
     for (const subscriber of subscribers) {
       try {
@@ -75,18 +77,18 @@ export function createConfig<T>(
    */
   function loadConfig(): Result<T, ConfigError> {
     const configs: unknown[] = [];
-    const errors: ConfigError[] = [];
-    
-    // Load from each source
+
+    // Load from each source — fail fast if a required source errors
     for (const source of sources) {
       const result = loader.load(source);
-      
+
       if (result._tag === "Ok") {
         configs.push(result.value);
       } else if (source.type !== "defaults") {
-        // Defaults are optional, other sources report errors
-        errors.push(result.error);
+        // Non-default source failed — propagate the error immediately
+        return result as Result<T, ConfigError>;
       }
+      // defaults source errors are silently ignored
     }
     
     // Merge all configs
@@ -316,7 +318,16 @@ export function createConfig<T>(
     
     subscribe(callback: (event: ConfigEvent) => void): () => void {
       subscribers.add(callback);
-      
+
+      // Replay the most recent event so new subscribers get current state
+      if (lastEvent !== undefined) {
+        try {
+          callback(lastEvent);
+        } catch (error) {
+          console.error("Config subscriber error:", error);
+        }
+      }
+
       return () => {
         subscribers.delete(callback);
       };
@@ -344,14 +355,14 @@ export function createConfig<T>(
     }
   };
   
-  // Clean up on process exit
-  if (typeof process !== "undefined") {
+  // Clean up watchers on process exit (only when there's something to clean up)
+  if (typeof process !== "undefined" && watchCleanups.length > 0) {
     const cleanup = () => {
       for (const cleanupFn of watchCleanups) {
         cleanupFn();
       }
     };
-    
+
     process.once("exit", cleanup);
     process.once("SIGINT", cleanup);
     process.once("SIGTERM", cleanup);

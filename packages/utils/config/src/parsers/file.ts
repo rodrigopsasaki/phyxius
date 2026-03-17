@@ -79,7 +79,7 @@ function parseJSON(content: string): Result<Record<string, unknown>, ConfigError
   try {
     const data = JSON.parse(content);
     
-    if (typeof data !== "object" || data === null) {
+    if (typeof data !== "object" || data === null || Array.isArray(data)) {
       return err({
         type: "PARSE_ERROR",
         source: "json",
@@ -112,44 +112,80 @@ function parseYAML(content: string): Result<Record<string, unknown>, ConfigError
   try {
     const lines = content.split("\n");
     const result: Record<string, unknown> = {};
-    const stack: Array<{ obj: Record<string, unknown>; indent: number }> = [
-      { obj: result, indent: -1 }
-    ];
-    
+
+    interface StackEntry {
+      obj: Record<string, unknown>;
+      indent: number;
+      /** Key in parentObj that holds this entry's obj (for array conversion) */
+      ownKey?: string;
+      /** Parent object so we can replace this entry's value with an array */
+      parentObj?: Record<string, unknown>;
+      /** Set once this entry's value is converted to an array */
+      arrayMode?: unknown[];
+    }
+
+    const stack: StackEntry[] = [{ obj: result, indent: -1 }];
+
     for (const line of lines) {
-      // Skip empty lines and comments
+      // Skip empty lines and full-line comments
       if (!line.trim() || line.trim().startsWith("#")) {
         continue;
       }
-      
+
       const indent = line.length - line.trimStart().length;
       const trimmed = line.trim();
-      
+
+      // Handle dash-style array items (e.g. "  - value")
+      if (trimmed.startsWith("- ")) {
+        const itemValue = trimmed.slice(2).trim();
+
+        // Pop stack to find parent context at a shallower indent
+        while (stack.length > 1 && stack[stack.length - 1].indent >= indent) {
+          stack.pop();
+        }
+
+        const top = stack[stack.length - 1];
+
+        // On the first dash item, convert the placeholder object to an array
+        if (!top.arrayMode && top.ownKey && top.parentObj) {
+          const arr: unknown[] = [];
+          top.parentObj[top.ownKey] = arr;
+          top.arrayMode = arr;
+        }
+
+        if (top.arrayMode) {
+          top.arrayMode.push(parseYAMLValue(itemValue));
+        }
+
+        continue;
+      }
+
       // Handle key-value pairs
       const colonIndex = trimmed.indexOf(":");
       if (colonIndex === -1) continue;
-      
+
       const key = trimmed.slice(0, colonIndex).trim();
       const value = trimmed.slice(colonIndex + 1).trim();
-      
+
       // Pop stack to current indent level
       while (stack.length > 1 && stack[stack.length - 1].indent >= indent) {
         stack.pop();
       }
-      
-      const current = stack[stack.length - 1].obj;
-      
+
+      const top = stack[stack.length - 1];
+      const current = top.obj;
+
       if (value) {
         // Simple value
         current[key] = parseYAMLValue(value);
       } else {
-        // Nested object
+        // Nested object (may become an array when dash items follow)
         const nested: Record<string, unknown> = {};
         current[key] = nested;
-        stack.push({ obj: nested, indent });
+        stack.push({ obj: nested, indent, ownKey: key, parentObj: current });
       }
     }
-    
+
     return ok(result);
   } catch (error) {
     return err({
@@ -163,7 +199,16 @@ function parseYAML(content: string): Result<Record<string, unknown>, ConfigError
 /**
  * Parse YAML value
  */
-function parseYAMLValue(value: string): unknown {
+function parseYAMLValue(rawValue: string): unknown {
+  // Strip inline comments from unquoted values (e.g. "3000  # port" → "3000")
+  let value = rawValue;
+  if (!(value.startsWith('"') || value.startsWith("'"))) {
+    const commentIdx = value.indexOf(" #");
+    if (commentIdx !== -1) {
+      value = value.slice(0, commentIdx).trim();
+    }
+  }
+
   // Remove quotes if present
   if ((value.startsWith('"') && value.endsWith('"')) ||
       (value.startsWith("'") && value.endsWith("'"))) {

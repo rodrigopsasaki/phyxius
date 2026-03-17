@@ -28,20 +28,17 @@
   "dependencies": {
     "@phyxiusjs/atom": "workspace:*",
     "@phyxiusjs/clock": "workspace:*",
+    "@phyxiusjs/context": "workspace:*",
+    "@phyxiusjs/fp": "workspace:*",
     "@phyxiusjs/journal": "workspace:*",
-    "@phyxiusjs/process": "workspace:*",
-    "@phyxiusjs/runtime": "workspace:*",
-    "@phyxiusjs/service": "workspace:*",
-    "@phyxiusjs/fp": "workspace:*"
+    "@phyxiusjs/observe": "workspace:*",
+    "@phyxiusjs/process": "workspace:*"
   },
   "devDependencies": {
-    "@phyxiusjs/service": "workspace:*",
-    "@phyxiusjs/runtime": "workspace:*",
     "@vitest/coverage-v8": "^2.1.8",
     "tsup": "^8.3.5",
     "typescript": "^5.7.2",
-    "vitest": "^2.1.8",
-    "zod": "^3.24.4"
+    "vitest": "^2.1.8"
   },
   "publishConfig": {
     "access": "public"

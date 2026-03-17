@@ -1,7 +1,14 @@
 import type { Result } from "@phyxiusjs/fp";
-import type { Validator } from "@phyxiusjs/validate";
 import type { Clock } from "@phyxiusjs/clock";
 import type { Journal } from "@phyxiusjs/journal";
+
+/**
+ * Contract for any validator that can parse input data.
+ * Compatible with Zod schemas and custom validators.
+ */
+export interface Validator<T> {
+  parse(input: unknown): T;
+}
 
 /**
  * Configuration error types

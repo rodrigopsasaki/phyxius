@@ -203,7 +203,7 @@ export function createHttpAdapter(config: HttpAdapterConfig): HttpAdapter {
       if (!isOk(result)) {
         const handlerError = result.error;
 
-        if (handlerError.code === "BACKPRESSURE_REJECT" || handlerError.code === "HANDLER_NOT_RUNNING") {
+        if (handlerError.code === "BACKPRESSURE_REJECT" || handlerError.code === "HANDLER_NOT_RUNNING" || handlerError.code === "CIRCUIT_OPEN") {
           writeResponse(res, on503(incomingRequest));
           return;
         }
