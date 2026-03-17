@@ -1,35 +1,29 @@
 {
   "name": "@phyxiusjs/config",
   "version": "0.1.0",
+  "type": "module",
   "description": "Type-safe configuration management with hot reloading, multiple sources, and observability",
-  "main": "dist/index.js",
-  "module": "dist/index.mjs",
-  "types": "dist/index.d.ts",
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
   "exports": {
     ".": {
-      "import": "./dist/index.mjs",
-      "require": "./dist/index.js",
+      "import": "./dist/index.js",
       "types": "./dist/index.d.ts"
     }
   },
   "files": [
     "dist",
-    "README.md",
-    "LICENSE"
+    "README.md"
   ],
   "scripts": {
-    "build": "tsup src/index.ts --format cjs,esm --dts --clean",
-    "build:watch": "tsup src/index.ts --format cjs,esm --dts --watch",
-    "test": "vitest",
-    "test:watch": "vitest --watch",
-    "test:coverage": "vitest --coverage",
-    "test:ui": "vitest --ui",
-    "type-check": "tsc --noEmit",
-    "lint": "eslint src test --ext .ts",
-    "lint:fix": "eslint src test --ext .ts --fix",
-    "clean": "rm -rf dist",
-    "dev": "npm run build:watch",
-    "prepublishOnly": "npm run clean && npm run build && npm run test && npm run type-check"
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "test": "vitest run",
+    "test:watch": "vitest watch",
+    "test:coverage": "vitest run --coverage",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint ."
   },
   "keywords": [
     "config",
@@ -39,23 +33,19 @@
     "phyxius",
     "typescript",
     "hot-reload",
-    "watch",
-    "validation",
-    "env-vars",
-    "yaml",
-    "json"
+    "validation"
   ],
-  "author": "Phyxius Team",
+  "author": "Rodrigo Sasaki",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/phyxiusjs/phyxius.git",
+    "url": "https://github.com/rodrigopsasaki/phyxius.git",
     "directory": "packages/utils/config"
   },
   "bugs": {
-    "url": "https://github.com/phyxiusjs/phyxius/issues"
+    "url": "https://github.com/rodrigopsasaki/phyxius/issues"
   },
-  "homepage": "https://github.com/phyxiusjs/phyxius/tree/main/packages/utils/config#readme",
+  "homepage": "https://github.com/rodrigopsasaki/phyxius/tree/main/packages/utils/config#readme",
   "dependencies": {
     "@phyxiusjs/atom": "workspace:*",
     "@phyxiusjs/clock": "workspace:*",
@@ -63,15 +53,11 @@
     "@phyxiusjs/journal": "workspace:*"
   },
   "devDependencies": {
-    "@types/node": "^20.0.0",
-    "@typescript-eslint/eslint-plugin": "^6.0.0",
-    "@typescript-eslint/parser": "^6.0.0",
-    "@vitest/coverage-v8": "^1.0.0",
-    "@vitest/ui": "^1.0.0",
-    "eslint": "^8.0.0",
-    "tsup": "^8.0.0",
-    "typescript": "^5.0.0",
-    "vitest": "^1.0.0",
+    "@types/node": "^22.10.2",
+    "@vitest/coverage-v8": "^2.1.8",
+    "tsup": "^8.3.5",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8",
     "zod": "^3.22.0"
   },
   "peerDependencies": {
@@ -79,11 +65,11 @@
   },
   "peerDependenciesMeta": {
     "zod": {
-      "optional": false
+      "optional": true
     }
   },
   "engines": {
-    "node": ">=18.0.0"
+    "node": ">=22.0.0"
   },
   "publishConfig": {
     "access": "public"

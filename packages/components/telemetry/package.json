@@ -1,6 +1,7 @@
 {
   "name": "@phyxiusjs/telemetry",
   "version": "0.0.0",
+  "private": true,
   "type": "module",
   "description": "Queryable local analytics over Journal — P50/P95/P99, error rates, slowest endpoints, retry stats",
   "main": "./dist/index.js",

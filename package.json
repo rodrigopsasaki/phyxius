@@ -19,9 +19,13 @@
     "build": "nx run-many -t build",
     "affected:build": "nx affected -t build",
     "affected:test": "nx affected -t test",
-    "affected:lint": "nx affected -t lint"
+    "affected:lint": "nx affected -t lint",
+    "changeset": "changeset",
+    "version-packages": "changeset version",
+    "release": "pnpm build && changeset publish"
   },
   "devDependencies": {
+    "@changesets/cli": "^2.27.0",
     "@eslint/js": "^9.16.0",
     "@types/node": "^22.10.2",
     "eslint": "^9.16.0",

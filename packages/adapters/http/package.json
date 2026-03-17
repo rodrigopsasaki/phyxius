@@ -1,6 +1,7 @@
 {
   "name": "@phyxiusjs/http",
   "version": "0.0.0",
+  "private": true,
   "type": "module",
   "description": "HTTP adapter — translates IncomingMessage/ServerResponse to Handler inputs and results",
   "main": "./dist/index.js",

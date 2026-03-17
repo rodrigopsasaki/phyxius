@@ -1,6 +1,7 @@
 {
   "name": "@phyxiusjs/handler",
   "version": "0.0.0",
+  "private": true,
   "type": "module",
   "description": "Universal work unit — a supervised Process with concurrency, backpressure, and automatic observability",
   "main": "./dist/index.js",
