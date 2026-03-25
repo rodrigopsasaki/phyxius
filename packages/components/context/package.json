@@ -26,6 +26,9 @@
     "lint": "eslint .",
     "size": "size-limit"
   },
+  "peerDependencies": {
+    "@types/node": ">=18"
+  },
   "devDependencies": {
     "@size-limit/preset-small-lib": "^11.1.7",
     "@vitest/coverage-v8": "^2.1.8",

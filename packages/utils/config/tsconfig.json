@@ -2,34 +2,8 @@
   "extends": "../../../tsconfig.json",
   "compilerOptions": {
     "outDir": "./dist",
-    "rootDir": "./src",
-    "declaration": true,
-    "declarationMap": true,
-    "sourceMap": true,
-    "composite": true,
-    "incremental": true,
-    "tsBuildInfoFile": "./dist/.tsbuildinfo"
+    "rootDir": "./src"
   },
-  "include": [
-    "src/**/*"
-  ],
-  "exclude": [
-    "dist",
-    "node_modules",
-    "test"
-  ],
-  "references": [
-    {
-      "path": "../../core/atom"
-    },
-    {
-      "path": "../../core/clock"
-    },
-    {
-      "path": "../../core/journal"
-    },
-    {
-      "path": "../../utils/fp"
-    }
-  ]
+  "include": ["src/**/*"],
+  "exclude": ["dist", "node_modules", "test", "**/*.test.ts", "**/*.spec.ts"]
 }

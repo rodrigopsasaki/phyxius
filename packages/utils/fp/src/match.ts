@@ -84,11 +84,15 @@ export function matchValue<T, R>(value: T, patterns: Record<string, (value: T) =
   // Try to match string representation
   const key = String(value);
   if (key in patterns && key !== "_") {
-    return patterns[key]!(value);
+    const handler = patterns[key];
+    if (handler !== undefined) {
+      return handler(value);
+    }
   }
   // Fall back to default
-  if ("_" in patterns) {
-    return patterns._!(value);
+  const defaultHandler = patterns._;
+  if (defaultHandler !== undefined) {
+    return defaultHandler(value);
   }
   throw new Error(`No pattern matched for value: ${key}`);
 }

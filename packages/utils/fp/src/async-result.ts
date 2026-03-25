@@ -200,26 +200,24 @@ export async function retryAsync<T, E>(
     shouldRetry = () => true,
   } = options;
 
-  let lastError: E;
+  let lastResult = await fn();
 
-  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    const result = await fn();
-
-    if (isOk(result)) {
-      return result;
+  for (let attempt = 1; attempt < maxAttempts; attempt++) {
+    if (isOk(lastResult)) {
+      return lastResult;
     }
 
-    lastError = result.error;
-
-    if (attempt < maxAttempts && shouldRetry(lastError, attempt)) {
-      const delay = Math.min(baseDelayMs * Math.pow(backoffFactor, attempt - 1), maxDelayMs) as Millis;
-      await clock.timeout(delay);
-    } else {
+    if (!shouldRetry(lastResult.error, attempt)) {
       break;
     }
+
+    const delay = Math.min(baseDelayMs * Math.pow(backoffFactor, attempt - 1), maxDelayMs) as Millis;
+    await clock.timeout(delay);
+
+    lastResult = await fn();
   }
 
-  return err(lastError!);
+  return lastResult;
 }
 
 /** Timeout an AsyncResult using Clock */

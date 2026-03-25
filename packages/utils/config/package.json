@@ -61,6 +61,7 @@
     "zod": "^3.22.0"
   },
   "peerDependencies": {
+    "@types/node": ">=18",
     "zod": "^3.22.0"
   },
   "peerDependenciesMeta": {

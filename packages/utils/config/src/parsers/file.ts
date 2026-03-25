@@ -1,23 +1,20 @@
 import { ok, err, type Result } from "@phyxiusjs/fp";
 import { readFileSync, existsSync } from "fs";
 import { extname } from "path";
-import type { ConfigError, FileLoaderOptions } from "../types";
-import { parseEnv } from "./env";
+import type { ConfigError, FileLoaderOptions } from "../types.js";
+import { parseEnv } from "./env.js";
 
 /**
  * Load and parse configuration from file
  */
-export function loadFile(
-  path: string,
-  options: FileLoaderOptions = {}
-): Result<Record<string, unknown>, ConfigError> {
+export function loadFile(path: string, options: FileLoaderOptions = {}): Result<Record<string, unknown>, ConfigError> {
   const { format, encoding = "utf-8" } = options;
 
   // Check if file exists
   if (!existsSync(path)) {
     return err({
       type: "FILE_NOT_FOUND",
-      path
+      path,
     });
   }
 
@@ -36,7 +33,7 @@ export function loadFile(
         return err({
           type: "PARSE_ERROR",
           source: path,
-          message: `Unsupported file format: ${detectedFormat}`
+          message: `Unsupported file format: ${detectedFormat}`,
         });
     }
   } catch (error) {
@@ -44,7 +41,7 @@ export function loadFile(
       type: "SOURCE_ERROR",
       source: path,
       message: error instanceof Error ? error.message : "Failed to load file",
-      cause: error
+      cause: error,
     });
   }
 }
@@ -54,7 +51,7 @@ export function loadFile(
  */
 function detectFormat(path: string): "json" | "yaml" | "env" | "unknown" {
   const ext = extname(path).toLowerCase();
-  
+
   switch (ext) {
     case ".json":
       return "json";
@@ -78,27 +75,27 @@ function detectFormat(path: string): "json" | "yaml" | "env" | "unknown" {
 function parseJSON(content: string): Result<Record<string, unknown>, ConfigError> {
   try {
     const data = JSON.parse(content);
-    
+
     if (typeof data !== "object" || data === null || Array.isArray(data)) {
       return err({
         type: "PARSE_ERROR",
         source: "json",
-        message: "JSON must be an object"
+        message: "JSON must be an object",
       });
     }
-    
+
     // Check for circular references
     const checkResult = checkCircularReferences(data);
     if (checkResult._tag === "Err") {
       return checkResult;
     }
-    
+
     return ok(data as Record<string, unknown>);
   } catch (error) {
     return err({
       type: "PARSE_ERROR",
       source: "json",
-      message: error instanceof Error ? error.message : "Invalid JSON"
+      message: error instanceof Error ? error.message : "Invalid JSON",
     });
   }
 }
@@ -124,7 +121,19 @@ function parseYAML(content: string): Result<Record<string, unknown>, ConfigError
       arrayMode?: unknown[];
     }
 
-    const stack: StackEntry[] = [{ obj: result, indent: -1 }];
+    const stack: [StackEntry, ...StackEntry[]] = [{ obj: result, indent: -1 }];
+
+    function peekStack(): StackEntry {
+      return stack[stack.length - 1] as StackEntry;
+    }
+
+    function popToIndent(indent: number): void {
+      while (stack.length > 1) {
+        const top = peekStack();
+        if (top.indent < indent) break;
+        stack.pop();
+      }
+    }
 
     for (const line of lines) {
       // Skip empty lines and full-line comments
@@ -139,12 +148,8 @@ function parseYAML(content: string): Result<Record<string, unknown>, ConfigError
       if (trimmed.startsWith("- ")) {
         const itemValue = trimmed.slice(2).trim();
 
-        // Pop stack to find parent context at a shallower indent
-        while (stack.length > 1 && stack[stack.length - 1].indent >= indent) {
-          stack.pop();
-        }
-
-        const top = stack[stack.length - 1];
+        popToIndent(indent);
+        const top = peekStack();
 
         // On the first dash item, convert the placeholder object to an array
         if (!top.arrayMode && top.ownKey && top.parentObj) {
@@ -167,13 +172,8 @@ function parseYAML(content: string): Result<Record<string, unknown>, ConfigError
       const key = trimmed.slice(0, colonIndex).trim();
       const value = trimmed.slice(colonIndex + 1).trim();
 
-      // Pop stack to current indent level
-      while (stack.length > 1 && stack[stack.length - 1].indent >= indent) {
-        stack.pop();
-      }
-
-      const top = stack[stack.length - 1];
-      const current = top.obj;
+      popToIndent(indent);
+      const current = peekStack().obj;
 
       if (value) {
         // Simple value
@@ -191,7 +191,7 @@ function parseYAML(content: string): Result<Record<string, unknown>, ConfigError
     return err({
       type: "PARSE_ERROR",
       source: "yaml",
-      message: error instanceof Error ? error.message : "Invalid YAML"
+      message: error instanceof Error ? error.message : "Invalid YAML",
     });
   }
 }
@@ -210,18 +210,17 @@ function parseYAMLValue(rawValue: string): unknown {
   }
 
   // Remove quotes if present
-  if ((value.startsWith('"') && value.endsWith('"')) ||
-      (value.startsWith("'") && value.endsWith("'"))) {
+  if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
     return value.slice(1, -1);
   }
-  
+
   // Boolean
   if (value === "true") return true;
   if (value === "false") return false;
-  
+
   // Null
   if (value === "null" || value === "~") return null;
-  
+
   // Number
   if (/^-?\d+(\.\d+)?$/.test(value)) {
     const num = Number(value);
@@ -229,13 +228,16 @@ function parseYAMLValue(rawValue: string): unknown {
       return num;
     }
   }
-  
+
   // Array (simple case)
   if (value.startsWith("[") && value.endsWith("]")) {
-    const items = value.slice(1, -1).split(",").map(item => parseYAMLValue(item.trim()));
+    const items = value
+      .slice(1, -1)
+      .split(",")
+      .map((item) => parseYAMLValue(item.trim()));
     return items;
   }
-  
+
   return value;
 }
 
@@ -245,30 +247,29 @@ function parseYAMLValue(rawValue: string): unknown {
 function parseDotEnv(content: string): Result<Record<string, unknown>, ConfigError> {
   const lines = content.split("\n");
   const envVars: Record<string, string> = {};
-  
+
   for (const line of lines) {
     // Skip empty lines and comments
     const trimmed = line.trim();
     if (!trimmed || trimmed.startsWith("#")) {
       continue;
     }
-    
+
     // Parse KEY=VALUE format
     const equalsIndex = trimmed.indexOf("=");
     if (equalsIndex === -1) continue;
-    
+
     const key = trimmed.slice(0, equalsIndex).trim();
     let value = trimmed.slice(equalsIndex + 1).trim();
-    
+
     // Remove quotes if present
-    if ((value.startsWith('"') && value.endsWith('"')) ||
-        (value.startsWith("'") && value.endsWith("'"))) {
+    if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
       value = value.slice(1, -1);
     }
-    
+
     envVars[key] = value;
   }
-  
+
   // Use env parser with dbt convention for .env files
   return parseEnv(envVars as NodeJS.ProcessEnv, { convention: "dbt" });
 }
@@ -276,23 +277,20 @@ function parseDotEnv(content: string): Result<Record<string, unknown>, ConfigErr
 /**
  * Check for circular references in object
  */
-function checkCircularReferences(
-  obj: unknown,
-  seen = new WeakSet()
-): Result<void, ConfigError> {
+function checkCircularReferences(obj: unknown, seen = new WeakSet()): Result<void, ConfigError> {
   if (obj === null || typeof obj !== "object") {
     return ok(undefined);
   }
-  
+
   if (seen.has(obj)) {
     return err({
       type: "CIRCULAR_REFERENCE",
-      path: "unknown"
+      path: "unknown",
     });
   }
-  
+
   seen.add(obj);
-  
+
   if (Array.isArray(obj)) {
     for (const item of obj) {
       const result = checkCircularReferences(item, seen);
@@ -304,6 +302,6 @@ function checkCircularReferences(
       if (result._tag === "Err") return result;
     }
   }
-  
+
   return ok(undefined);
 }

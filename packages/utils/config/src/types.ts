@@ -87,12 +87,12 @@ export interface ConfigInstance<T> {
   /**
    * Get a value at the specified path
    */
-  get<K extends PathKeys<T>>(path: K): Result<PathValue<T, K>, ConfigError>;
+  get(path: string): Result<unknown, ConfigError>;
 
   /**
    * Get a value or return default if not found
    */
-  getOrDefault<K extends PathKeys<T>, D>(path: K, defaultValue: D): PathValue<T, K> | D;
+  getOrDefault<D>(path: string, defaultValue: D): unknown | D;
 
   /**
    * Get the entire configuration
@@ -146,11 +146,7 @@ export interface ConfigState<T> {
  */
 export type PathKeys<T> = T extends object
   ? {
-      [K in keyof T]: K extends string
-        ? T[K] extends object
-          ? K | `${K}.${PathKeys<T[K]>}`
-          : K
-        : never;
+      [K in keyof T]: K extends string ? (T[K] extends object ? K | `${K}.${PathKeys<T[K]>}` : K) : never;
     }[keyof T]
   : never;
 
@@ -164,8 +160,8 @@ export type PathValue<T, P extends string> = P extends `${infer K}.${infer Rest}
       : never
     : never
   : P extends keyof T
-  ? T[P]
-  : never;
+    ? T[P]
+    : never;
 
 /**
  * Configuration loader interface

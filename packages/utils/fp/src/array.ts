@@ -13,7 +13,45 @@ export function head<T>(arr: readonly T[]): Option<T> {
   if (!arr || arr.length === 0) {
     return none();
   }
-  return some(arr[0]!);
+
+  const first = arr[0];
+  if (first === undefined) {
+    return none();
+  }
+
+  return some(first);
+}
+
+/**
+ * Get the last element of an array wrapped in Option.
+ */
+export function last<T>(arr: readonly T[]): Option<T> {
+  if (!arr || arr.length === 0) {
+    return none();
+  }
+
+  const item = arr[arr.length - 1];
+  if (item === undefined) {
+    return none();
+  }
+
+  return some(item);
+}
+
+/**
+ * Get an element at a specific index wrapped in Option.
+ */
+export function at<T>(arr: readonly T[], index: number): Option<T> {
+  if (!arr || index < 0 || index >= arr.length) {
+    return none();
+  }
+
+  const item = arr[index];
+  if (item === undefined) {
+    return none();
+  }
+
+  return some(item);
 }
 
 /**

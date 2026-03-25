@@ -186,8 +186,8 @@ export const array = {
     (arr: T[]) => {
       const errors: ValidationError[] = [];
 
-      for (let i = 0; i < arr.length; i++) {
-        const result = itemValidator(arr[i]!);
+      for (const [i, item] of arr.entries()) {
+        const result = itemValidator(item);
         if (isErr(result)) {
           errors.push(
             ...result.error.map((e) => ({
