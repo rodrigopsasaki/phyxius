@@ -518,7 +518,7 @@ function describeError(error: HandlerError): {
     case "TIMEOUT":
       return { type: error.type, message: `Timed out after ${error.timeoutMs}ms` };
     case "HANDLER_ERROR": {
-      const {cause} = error;
+      const { cause } = error;
       if (cause instanceof Error) {
         const base: { type: HandlerError["type"]; message: string; stack?: string } = {
           type: error.type,

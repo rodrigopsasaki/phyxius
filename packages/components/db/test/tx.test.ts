@@ -9,7 +9,7 @@ import type { DbQueryResult } from "../src/types.js";
 
 function setup(handler?: (sql: string, params: readonly unknown[]) => DbQueryResult | Promise<DbQueryResult>) {
   const clock = createControlledClock({ initialTime: 0 });
-  const driver = createMemoryDriver({ handler });
+  const driver = createMemoryDriver(handler ? { handler } : {});
   const db = createDb({ driver, clock });
   return { clock, driver, db };
 }

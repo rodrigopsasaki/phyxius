@@ -98,7 +98,7 @@ describe("createScheduler — basic firing", () => {
     // Advance past the first tick time (now=1000, first tick at 1100).
     await stepClock(clock, 150);
 
-    const {entries} = journal.getSnapshot();
+    const { entries } = journal.getSnapshot();
     expect(entries).toHaveLength(1);
     expect(entries[0]?.data.name).toBe("tick.counter");
     expect(entries[0]?.data.source).toBe("scheduler");
@@ -135,7 +135,7 @@ describe("createScheduler — basic firing", () => {
     // Advance enough to fire 3 ticks (50ms each starting at 1050).
     await stepClock(clock, 200);
 
-    const {entries} = journal.getSnapshot();
+    const { entries } = journal.getSnapshot();
     expect(entries.length).toBeGreaterThanOrEqual(3);
     // Tick indexes are 0, 1, 2, ...
     const tickIndexes = entries.map((e) => (e.data.observed as { tickIndex: number }).tickIndex);
@@ -215,7 +215,7 @@ describe("multiple jobs", () => {
     // fast fires at 1050, 1100, 1150, 1200 → 4
     // slow fires at 1150 → 1
     // Total: at least 5 journal entries.
-    const {entries} = journal.getSnapshot();
+    const { entries } = journal.getSnapshot();
     expect(entries.length).toBeGreaterThanOrEqual(4);
 
     await scheduler.stop();

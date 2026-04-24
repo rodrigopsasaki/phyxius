@@ -186,7 +186,7 @@ export function createMemorySource(options: MemorySourceOptions): MemoryQueue {
       }
 
       // retry — delayMs is honored via the clock when provided.
-      const {delayMs} = reason;
+      const { delayMs } = reason;
       if (delayMs !== undefined && delayMs > 0) {
         const timer = clock.timeout(delayMs);
         void clock

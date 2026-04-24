@@ -27,7 +27,7 @@ export function defaultEncode<T>(result: Result<T, HandlerError>): HttpResponse 
     };
   }
 
-  const {error} = result;
+  const { error } = result;
 
   switch (error.type) {
     case "VALIDATION_ERROR":

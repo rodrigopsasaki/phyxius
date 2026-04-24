@@ -210,7 +210,7 @@ function describeError(error: HandleError): string {
     case "TIMEOUT":
       return `Timed out after ${error.timeoutMs}ms`;
     case "HANDLER_ERROR": {
-      const {cause} = error;
+      const { cause } = error;
       if (cause instanceof Error) return cause.message;
       return String(cause);
     }

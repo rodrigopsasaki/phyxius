@@ -16,7 +16,7 @@ export function stdoutSink<T>(): Sink<T> {
           sequence: entry.sequence,
           ...(entry.data as Record<string, unknown>),
         });
-        process.stdout.write(`${line  }\n`);
+        process.stdout.write(`${line}\n`);
       }
     },
   };

@@ -31,7 +31,7 @@ export function defaultOnResult<T>(result: Result<T, HandlerError>, _message: Qu
     return { action: "ack" };
   }
 
-  const {error} = result;
+  const { error } = result;
 
   switch (error.type) {
     case "VALIDATION_ERROR":

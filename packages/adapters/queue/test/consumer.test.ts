@@ -95,7 +95,7 @@ describe("createQueueConsumer", () => {
     await waitUntil(() => source.getAckHistory().length === 1);
 
     // Transport-stable journal entry — same shape as HTTP.
-    const {entries} = journal.getSnapshot();
+    const { entries } = journal.getSnapshot();
     expect(entries).toHaveLength(1);
     expect(entries[0]?.data.source).toBe("queue");
     expect(entries[0]?.data.outcome).toBe("success");
@@ -128,7 +128,7 @@ describe("createQueueConsumer", () => {
 
     await waitUntil(() => source.getAckHistory().length === 1);
 
-    const {entries} = journal.getSnapshot();
+    const { entries } = journal.getSnapshot();
     expect(entries[0]?.data.correlationId).toBe("trace-upstream-123");
 
     await consumer.stop();
@@ -157,7 +157,7 @@ describe("createQueueConsumer", () => {
     expect(source.getAckHistory()).toHaveLength(0);
 
     // The journal records the failure the same way HTTP would.
-    const {entries} = journal.getSnapshot();
+    const { entries } = journal.getSnapshot();
     expect(entries[0]?.data.outcome).toBe("failure");
     expect(entries[0]?.data.error?.type).toBe("VALIDATION_ERROR");
 

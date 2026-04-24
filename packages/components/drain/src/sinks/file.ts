@@ -25,7 +25,7 @@ export function fileSink<T>(options: FileSinkOptions): Sink<T> {
         }),
       );
 
-      await appendFile(path, `${lines.join("\n")  }\n`, "utf-8");
+      await appendFile(path, `${lines.join("\n")}\n`, "utf-8");
     },
   };
 }

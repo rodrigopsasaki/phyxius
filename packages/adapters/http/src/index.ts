@@ -89,7 +89,7 @@ async function dispatch(request: HttpRequest, routes: CompiledRoutes, deps: Disp
   let pathMatchedAnyMethod = false;
 
   for (const entry of routes.entries) {
-    const {pattern} = entry;
+    const { pattern } = entry;
     if (pattern.method !== request.method) {
       // Different method: check if path shape matches to flag 405 candidacy.
       if (pathShapeMatches(pattern.segments, request.path)) {
@@ -289,7 +289,7 @@ function emptyRequestFor(req: IncomingMessage): HttpRequest {
 
 function writeResponse(res: ServerResponse, response: HttpResponse): void {
   const headers = response.headers ?? {};
-  const {body} = response;
+  const { body } = response;
 
   if (body === undefined) {
     res.writeHead(response.status, { ...headers });

@@ -114,7 +114,7 @@ describe("createApp — use()", () => {
     await handler.invoke({ value: 1 });
     await handler.invoke({ value: 2 });
 
-    const {entries} = journal.getSnapshot();
+    const { entries } = journal.getSnapshot();
     expect(entries).toHaveLength(2);
     expect(entries[0]?.data.name).toBe("noop");
 

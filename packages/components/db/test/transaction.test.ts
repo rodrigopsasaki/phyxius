@@ -8,7 +8,7 @@ import type { DbEvent, DbQueryResult } from "../src/types.js";
 
 function setup(handler?: (sql: string, params: readonly unknown[]) => DbQueryResult | Promise<DbQueryResult>) {
   const clock = createSystemClock();
-  const driver = createMemoryDriver({ handler });
+  const driver = createMemoryDriver(handler ? { handler } : {});
   const events: DbEvent[] = [];
   const db = createDb({ driver, clock, emit: (e) => events.push(e) });
   return { clock, driver, db, events };
@@ -56,7 +56,6 @@ describe("transaction lifecycle", () => {
     const { driver, db } = setup();
 
     const result = await db.transaction(async () => {
-       
       throw "synchronous boom";
     });
 

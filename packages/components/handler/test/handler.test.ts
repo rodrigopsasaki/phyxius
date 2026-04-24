@@ -460,7 +460,7 @@ describe("@phyxiusjs/handler", () => {
       await handler.invoke({ value: "bad" } as never);
       await handler.invoke({ value: 2 });
 
-      const {entries} = journal.getSnapshot();
+      const { entries } = journal.getSnapshot();
       expect(entries).toHaveLength(3);
       for (const e of entries) {
         expect(e.data).toHaveProperty("name", "double");

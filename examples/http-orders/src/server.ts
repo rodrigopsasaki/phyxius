@@ -131,9 +131,9 @@ async function main() {
   const port = Number(process.env["PORT"] ?? 3000);
 
   await new Promise<void>((resolve) => server.listen(port, resolve));
-   
+
   console.error(`[http-orders] listening on http://localhost:${port}`);
-   
+
   console.error(`[http-orders] journal events → stdout (JSON lines)`);
 
   // ── Graceful shutdown ──────────────────────────────────────────────────
@@ -141,7 +141,7 @@ async function main() {
   const shutdown = async (signal: string) => {
     if (shuttingDown) return;
     shuttingDown = true;
-     
+
     console.error(`[http-orders] received ${signal}, draining…`);
 
     // 1. Stop accepting new connections. In-flight requests continue.
@@ -158,7 +158,6 @@ async function main() {
     // 3. Flush the drain so no journal entries are lost.
     await drain.stop();
 
-     
     console.error(`[http-orders] clean exit`);
     process.exit(0);
   };
@@ -168,7 +167,6 @@ async function main() {
 }
 
 main().catch((err) => {
-   
   console.error("[http-orders] fatal:", err);
   process.exit(1);
 });

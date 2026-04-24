@@ -100,7 +100,7 @@ describe("createHttpAdapter", () => {
     expect(response.body).toEqual({ chargeId: "charge_alice", amount: 99.99 });
 
     // Journal entry was produced with the correlation ID flowing through.
-    const {entries} = journal.getSnapshot();
+    const { entries } = journal.getSnapshot();
     expect(entries).toHaveLength(1);
     expect(entries[0]?.data.correlationId).toBe("req-abc");
     expect(entries[0]?.data.source).toBe("http");
@@ -276,7 +276,7 @@ describe("createHttpAdapter", () => {
       }),
     );
 
-    const {entries} = journal.getSnapshot();
+    const { entries } = journal.getSnapshot();
     expect(entries[0]?.data.correlationId).toBe("trace-123");
 
     await handler.stop();
