@@ -139,6 +139,7 @@ That's a supervised, timeout-bounded, retry-aware, circuit-broken, backpressure-
 | [`@phyxiusjs/temporal`](packages/utils/temporal)               | Clock-driven debounce / throttle — deterministic in tests.                                                                                                                                                            |
 | [`@phyxiusjs/config`](packages/utils/config)                   | Layered config with typed schema, file-watching, and first-wins precedence. No YAML, no surprises.                                                                                                                    |
 | [`@phyxiusjs/strategy`](packages/utils/strategy)               | Pure named computation with shadow deployment. Sync-by-type (purity fence); primary + shadows for versioned rollouts, experimentation, gradual trust. Mismatches are typed events carrying full input + both outputs. |
+| [`@phyxiusjs/state-machine`](packages/utils/state-machine)     | Typed state machines. States are discriminated unions, transitions are strategies, the graph is the primitive. Invalid transitions are typed errors, not throws. No interpreter, no event queue, no hidden runtime.   |
 
 ### Adapters — transports
 
