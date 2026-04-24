@@ -2,168 +2,103 @@
 
 > _"Phyxius is an epithet of Zeus. It means 'the god who gives escape'. To flee from flaky systems, to take refuge from opaque ones. You, running full steam ahead on that maze — I think there may be another way."_
 
-Phyxius is a set of small, composable primitives for building Node.js systems where **every failure mode is a typed value, every timing decision goes through an injected Clock, and every stability policy is a required part of the type**. Silence is not a valid answer.
+Phyxius is a TypeScript framework for Node.js systems. It's opinionated about one thing: **you shouldn't be able to ship a handler that silently defaulted a stability decision**. Timeouts, retries, circuit breakers, concurrency limits, failure modes — all declared as values, all visible in the type, all carried on the same journal shape regardless of whether work enters your system through HTTP, a queue, a cron tick, or a 3rd-party API call.
 
-It is not a framework. There is no global registry, no lifecycle hook, no "new Phyxius().use(...)" moment. Each package does one thing, and composes with the others through plain values and contracts.
-
----
-
-## The idea
-
-Most Node codebases get the same things wrong in the same order:
-
-1. **Time is ambient.** `Date.now()`, `setTimeout`, `Date.now() again` — spread through the code until no test is reproducible.
-2. **Failures are implicit.** A `Promise` either resolves or rejects with `any`. The failure surface isn't visible anywhere in the type.
-3. **Stability is a to-do item.** Timeouts, retries, circuit breakers, concurrency limits — every project adds them "later," which means selectively.
-4. **Observability is assembled per-endpoint.** HTTP logs here, queue logs there, cron logs in a third format. No shared shape.
-
-Phyxius flips each one:
-
-1. **Time is a value.** `Clock` is a dependency. A `ControlledClock` in tests makes every timing concern deterministic.
-2. **Failures are values.** `Result<T, E>` with a discriminated `E` — no throws cross primitive boundaries. Every failure mode has a name.
-3. **Stability is required.** `defineHandler` won't compile without a `timeout`, a `retry` policy, a `circuitBreaker`, and a `concurrency` shape. "No retry" is a value — `retry.none()` — not an absence.
-4. **One journal entry per invocation, same shape across transports.** HTTP, queue, cron, internal — all produce the same `HandlerEvent`.
-
-The payoff: the same handler runs behind HTTP today and behind a queue tomorrow, with the same timeouts, the same retries, the same observability. You stop rebuilding those concerns per transport.
+It's a framework for people who've operated what they've built and want the production-ready shape from day one — without thinking about it more than once per invariant.
 
 ---
 
-## Installation
-
-All packages are published under the `@phyxiusjs/` scope. Install the ones you need:
-
-```bash
-# The handler and its transport adapter
-npm install @phyxiusjs/handler @phyxiusjs/http
-
-# Dependencies the handler expects at runtime
-npm install @phyxiusjs/clock @phyxiusjs/journal @phyxiusjs/observe @phyxiusjs/validate @phyxiusjs/fp
-```
-
-The handler re-exports `retry` and `cb` from `@phyxiusjs/retry` and `@phyxiusjs/circuit-breaker`, so you don't need to install those directly.
-
----
-
-## Quick start — a handler behind HTTP
+## The 60-second version
 
 ```ts
-import { createServer } from "node:http";
+import { createApp } from "@phyxiusjs/framework";
+import { defineHandler, retry, cb } from "@phyxiusjs/handler";
+import { observe } from "@phyxiusjs/observe";
+import { ms } from "@phyxiusjs/clock";
 import { z } from "zod";
 
-import { createSystemClock, ms } from "@phyxiusjs/clock";
-import { Journal } from "@phyxiusjs/journal";
-import { observe } from "@phyxiusjs/observe";
-import { defineHandler, spawn, retry, cb } from "@phyxiusjs/handler";
-import { createHttpAdapter } from "@phyxiusjs/http";
+const app = await createApp({ config: "./phyxius.yaml" });
 
-// 1. Declare what the handler observes (typed sidecar, one entry per invocation).
 const orderFields = observe.fields({
   customerId: observe.field<string>(),
   amount: observe.number(),
 });
 
-// 2. Define the handler. Every stability field is required.
-const orderSpec = defineHandler({
-  name: "order.process",
-  input: z.object({ customerId: z.string(), amount: z.number().positive() }),
-  output: z.object({ chargeId: z.string(), amount: z.number() }),
-  fields: orderFields,
+const processOrder = await app.use(
+  defineHandler({
+    name: "order.process",
+    input: z.object({ customerId: z.string(), amount: z.number().positive() }),
+    output: z.object({ chargeId: z.string(), amount: z.number() }),
+    fields: orderFields,
 
-  timeout: ms(5_000),
-  concurrency: { max: 20, queueSize: 100, backpressure: "reject" },
-  retry: retry.exponential({ maxAttempts: 3, initialDelay: ms(200) }),
-  circuitBreaker: cb.policy({ failureThreshold: 10, resetTimeout: ms(30_000) }),
+    // You cannot ship this without these four decisions. No defaults. No silence.
+    timeout: ms(5_000),
+    concurrency: { max: 20, queueSize: 100, backpressure: "reject" },
+    retry: retry.exponential({ maxAttempts: 3, initialDelay: ms(200) }),
+    circuitBreaker: cb.policy({ failureThreshold: 10, resetTimeout: ms(30_000) }),
 
-  run: async ({ customerId, amount }) => {
-    orderFields.customerId.set(customerId);
-    orderFields.amount.set(amount);
-    return { chargeId: `charge_${customerId}`, amount };
-  },
-});
-
-// 3. Materialize a supervised, running instance.
-const clock = createSystemClock();
-const journal = new Journal({ clock });
-const orderHandler = await spawn(orderSpec, { clock, journal });
-
-// 4. Wire the HTTP adapter. It knows nothing about stability — that lives on the handler.
-const adapter = createHttpAdapter({
-  routes: [
-    {
-      method: "POST",
-      path: "/orders",
-      handler: orderHandler,
-      decode: (req) => req.body as { customerId: string; amount: number },
+    run: async ({ customerId, amount }) => {
+      orderFields.customerId.set(customerId);
+      orderFields.amount.set(amount);
+      return { chargeId: `ch_${customerId}`, amount };
     },
-  ],
-});
+  }),
+);
 
-createServer(adapter.listener).listen(3000);
+app.route({ method: "POST", path: "/orders", handler: processOrder });
+
+await app.start();
 ```
 
-That's a supervised, timeout-bounded, retry-aware, circuit-broken, backpressure-shaped endpoint. The adapter is ~300 lines. The handler's guarantees are the same whether you put an HTTP adapter, a queue consumer, or a cron scheduler in front of it.
+That's a supervised, timeout-bounded, retry-aware, circuit-broken, backpressure-shaped HTTP endpoint — with deterministic sampling, rolling percentile stats, hot-reloadable config, and one structured journal entry per invocation. **Every one of those guarantees is the same value type you'd read in your logs next Tuesday at 3am**, because they all came from the same spec.
+
+Put the same `processOrder` behind `app.schedule(...)` or `app.consume(...)` instead, and you'd get the exact same guarantees with the exact same journal shape. The transport is a small translator; the spec is where the work lives.
 
 ---
 
-## Packages
+## Why this exists
 
-### Core — the primitive layer
+Every real Node service gets the same things wrong in the same order:
 
-| Package                                         | What it is                                                                                                                      |
-| ----------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
-| [`@phyxiusjs/clock`](packages/core/clock)       | Injected time. Wall + monotonic. `ControlledClock` for tests. `Budget` — deadline + AbortSignal as a value.                     |
-| [`@phyxiusjs/atom`](packages/core/atom)         | Versioned observable state with CAS. Transactional, linearizable, never unbounded.                                              |
-| [`@phyxiusjs/journal`](packages/core/journal)   | Bounded, ordered, append-only event log. Same shape for every transport.                                                        |
-| [`@phyxiusjs/process`](packages/core/process)   | Single-owner supervision. Start / stop / crash is structural, not convention.                                                   |
-| [`@phyxiusjs/resource`](packages/core/resource) | Acquire / use / release with guaranteed cleanup. Parallel + sequence compose lifecycles. Release errors never mask body errors. |
+- **Time is ambient.** `Date.now()`, `setTimeout`, retry windows measured in "however long the test felt like running." Nothing is reproducible.
+- **Failures are implicit.** A promise rejects with `any`. The failure surface isn't visible anywhere in the type, so retry predicates are regex on `.message` and pagers fire on the wrong errors.
+- **Stability is a to-do item.** Timeouts, retries, breakers, concurrency — every service adds them "later," which means selectively, which means the one endpoint that didn't get them is the one that takes the service down.
+- **Observability is assembled per-endpoint.** HTTP logs in one format, queue logs in another, cron logs in a third. You rebuild the dashboard every quarter.
 
-### Components — composed primitives
+Phyxius flips all four:
 
-| Package                                             | What it is                                                                                                                                                                        |
-| --------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| [`@phyxiusjs/context`](packages/components/context) | Typed `AsyncLocalStorage`. A scope is a value; data flows without prop-drilling.                                                                                                  |
-| [`@phyxiusjs/observe`](packages/components/observe) | Typed field handles (`observe.fields({...})`) that snapshot into each journal entry.                                                                                              |
-| [`@phyxiusjs/handle`](packages/components/handle)   | Scoped observable handle — the low-level building block behind `handler`.                                                                                                         |
-| [`@phyxiusjs/drain`](packages/components/drain)     | Bounded batching pump from journal to sink (stdout / file / OTLP-shaped). Optional per-entry `filter` unlocks declarative sampling and gating at the sink layer.                  |
-| [`@phyxiusjs/handler`](packages/components/handler) | **The universal work-unit.** Validated, supervised, timing-bounded, retry-aware, breaker-guarded, backpressure-shaped. Every field required.                                      |
-| [`@phyxiusjs/db`](packages/components/db)           | Database boundary. Transaction-as-context (no prop-drilling), typed errors (DEADLOCK / SERIALIZATION / UNIQUE / etc.), driver-agnostic. Ships with an in-memory driver for tests. |
-| [`@phyxiusjs/stats`](packages/components/stats)     | Poor-man's APM. Per-handler rolling percentiles, error rates, edge-triggered threshold alerts — composed from Journal + Clock. Bounded memory, zero vendor tax.                   |
+- **Time is a value.** `Clock` is a dependency. A `ControlledClock` in tests makes every timing concern deterministic.
+- **Failures are values.** Eight typed variants. Pattern-matchable. No throws cross primitive boundaries.
+- **Stability is required.** `defineHandler` won't compile without a timeout, a retry, a breaker, and a concurrency shape. "No retry" is a value — `retry.none()` — not an absence.
+- **One journal entry per invocation, same shape across transports.** HTTP, queue, cron, connector — all produce a `HandlerEvent`. One dashboard, one query layer, one alerting surface.
 
-### Utilities — value-level building blocks
-
-| Package                                                        | What it is                                                                                                                                                                                                            |
-| -------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| [`@phyxiusjs/fp`](packages/utils/fp)                           | `Result<T, E>`, `Option<T>`, pattern-match, pipe. No throws as a value language.                                                                                                                                      |
-| [`@phyxiusjs/validate`](packages/utils/validate)               | `Validator<T>` contract. Zod-compatible, framework-free — so the handler doesn't couple to a validator.                                                                                                               |
-| [`@phyxiusjs/retry`](packages/utils/retry)                     | Retry policies as values. `retry.none()`, `retry.fixed(...)`, `retry.exponential(...)`.                                                                                                                               |
-| [`@phyxiusjs/circuit-breaker`](packages/utils/circuit-breaker) | Closed / open / half-open state machine with injected clock. `cb.none()` is a first-class decision.                                                                                                                   |
-| [`@phyxiusjs/temporal`](packages/utils/temporal)               | Clock-driven debounce / throttle — deterministic in tests.                                                                                                                                                            |
-| [`@phyxiusjs/config`](packages/utils/config)                   | Layered config with typed schema, file-watching, and first-wins precedence. No YAML, no surprises.                                                                                                                    |
-| [`@phyxiusjs/strategy`](packages/utils/strategy)               | Pure named computation with shadow deployment. Sync-by-type (purity fence); primary + shadows for versioned rollouts, experimentation, gradual trust. Mismatches are typed events carrying full input + both outputs. |
-| [`@phyxiusjs/state-machine`](packages/utils/state-machine)     | Typed state machines. States are discriminated unions, transitions are strategies, the graph is the primitive. Invalid transitions are typed errors, not throws. No interpreter, no event queue, no hidden runtime.   |
-
-### Adapters — transports
-
-| Package                                               | What it is                                                                                                                                                                                                                      |
-| ----------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| [`@phyxiusjs/http`](packages/adapters/http)           | Thin Node `http` adapter. Pure `handle(HttpRequest): Promise<HttpResponse>` core — testable without sockets. Maps every `HandlerError` variant to a standard HTTP status.                                                       |
-| [`@phyxiusjs/queue`](packages/adapters/queue)         | Broker-agnostic queue consumer. Pull-based `MessageSource` contract, drop-in for SQS / Redis / Kafka / any broker. Maps every `HandlerError` to ack / nack (retry, DLQ, requeue-now). Ships with an in-memory source for tests. |
-| [`@phyxiusjs/scheduler`](packages/adapters/scheduler) | Time-driven handler invocations. Pluggable `Schedule` values (`every` / `at` / `never` built in; cron by composition). Overlap policy, catchup policy, drift tracking — all declared, none defaulted.                           |
-| [`@phyxiusjs/db-pg`](packages/adapters/db-pg)         | Postgres driver for `@phyxiusjs/db`. Wraps `pg.Pool`; translates SQLSTATE + Node errno into the typed `DbError` union (`DEADLOCK` / `SERIALIZATION_FAILURE` / `CONNECTION_ERROR` / `UNIQUE_VIOLATION` / …) via a curated table. |
-
-HTTP (requests), queue (events), scheduler (time) — full coverage of how work enters a system. The handler owns stability and observability; each adapter is a small translator. `db-pg` is the same idea applied to DB: translate the native error vocabulary into the typed variant the handler already knows how to reason about.
-
-### Framework — the convenience bow
-
-| Package                                      | What it is                                                                                                                                                                                                                                                                       |
-| -------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| [`@phyxiusjs/framework`](packages/framework) | The packaged composition. `createApp()` wires Clock + Journal + Drain + Stats + Config, exposes `.route` / `.schedule` / `.consume` / `.use` on top. Transports are optional peer deps. Sampling and stats thresholds are YAML-driven, hot-reloadable. Graceful shutdown opt-in. |
+The payoff compounds: the same handler runs behind HTTP today and a queue tomorrow with the same timeouts, the same retries, the same observability. You stop rebuilding those concerns per transport.
 
 ---
 
-## The "no non-decision" rule
+## What `createApp` actually does
 
-This is the load-bearing invariant.
+```ts
+const app = await createApp({ config: "./phyxius.yaml" });
+```
+
+That single line wires up five primitives:
+
+1. A `Clock` — the one place `Date.now()` and `setTimeout` live.
+2. A `Journal` — a bounded, ordered, append-only event log. The ring buffer is a feature, not a bug: memory growth is impossible by construction.
+3. A `Drain` — the journal-to-sink pump. Ships structured JSON to stdout by default; swap it for a file, OTLP, or anything else without touching the handler.
+4. A `Stats` engine — poor-man's APM. Rolling p50/p95/p99 + error rate per handler, with edge-triggered threshold alerts declared in YAML.
+5. A `Config` watcher — typed, layered, hot-reloadable. Flip a sampling ratio or an alert threshold in production, save the file, and the next invocation sees the change.
+
+Then it hands you `.route` / `.schedule` / `.consume` / `.use`, each of which is a **documented composition** — the framework source reads as "here's how you'd have written it by hand." Nothing is hidden; you can drop beneath any of it at any time.
+
+When you're ready to look deeper: [**framework/README**](packages/framework/README.md).
+
+---
+
+## The spec is the whole story
+
+Everything useful in Phyxius starts with `HandlerSpec`:
 
 ```ts
 interface HandlerSpec<TInput, TOutput, TFields> {
@@ -171,21 +106,27 @@ interface HandlerSpec<TInput, TOutput, TFields> {
   input: Validator<TInput>;
   output: Validator<TOutput>;
   fields: TFields;
+
   timeout: Millis;
   concurrency: { max: number; queueSize: number; backpressure: "reject" | "drop-oldest" };
   retry: RetryPolicy; // retry.none() is a value
   circuitBreaker: CircuitBreakerPolicy; // cb.none() is a value
+
   run: (input: TInput, tools: HandlerTools) => Promise<TOutput>;
 }
 ```
 
-Every field is **required at the type level**. `defineHandler` won't compile with any of them missing. "No retry" is explicit (`retry.none()`). "No breaker" is explicit (`cb.none()`). You cannot ship a handler that silently defaulted a stability decision, because silence isn't an accepted input.
+Every stability field is required at the type level. `defineHandler` won't compile with any of them missing. "No retry" is a value. "No breaker" is a value. **Silence isn't an accepted input.**
 
-This is the "every failure mode must be directly assertable" invariant, expressed structurally.
+This is the load-bearing invariant. "Every failure mode must be directly assertable" isn't a principle we wrote in a doc — it's structural. You can't accidentally ship code that skipped a stability decision, because the type won't let the file typecheck.
+
+The same spec shape carries into the other work-unit primitives. A `ConnectorSpec` (a wrapper around a 3rd-party API call) `extends HandlerSpec` plus two fields: `provider` and `mapError`. When the specialization extends cleanly, that's the design test passing — the substrate is right.
+
+→ [handler/README](packages/components/handler/README.md), [connector/README](packages/components/connector/README.md)
 
 ---
 
-## Failure modes are typed values
+## Eight failure modes, each one named
 
 ```ts
 type HandlerError =
@@ -199,7 +140,11 @@ type HandlerError =
   | { type: "HANDLER_NOT_RUNNING" };
 ```
 
-Eight named outcomes. Every one is pattern-matchable. No generic `catch`. The HTTP adapter's default encoder maps each to a sensible status (`TIMEOUT` → 504, `CIRCUIT_OPEN` → 503 + `Retry-After`, `BACKPRESSURE_REJECT` → 503, validation → 400/500, etc.), and the same map applies regardless of transport.
+Eight named outcomes. Every one is pattern-matchable. No generic `catch`.
+
+The HTTP adapter's default encoder maps each variant to a sensible HTTP status (`TIMEOUT` → 504, `CIRCUIT_OPEN` → 503 + `Retry-After`, `BACKPRESSURE_REJECT` → 503, validation → 400 / 500, etc.). The queue adapter maps each to an ack / nack decision. The scheduler logs and moves on. Different transports, same union — because the failure space is a property of the work, not of how the work was triggered.
+
+When a connector wraps a 3rd-party API, its errors land in `HandlerError.cause` as a typed `ConnectorError` (`UNAUTHORIZED` / `RATE_LIMITED` / `NOT_FOUND` / ...), so retry predicates can narrow without looking at stack traces or status strings.
 
 ---
 
@@ -210,7 +155,7 @@ interface HandlerEvent {
   name: string;
   invocationId: string;
   correlationId?: string;
-  source: string; // "http" | "queue" | "cron" | "internal" | ...
+  source: string; // "http" | "queue" | "cron" | "internal" | "connector"
   startedAt: Instant;
   completedAt: Instant;
   durationMs: number;
@@ -222,61 +167,102 @@ interface HandlerEvent {
 }
 ```
 
-HTTP requests produce this shape. Queue messages produce this shape. Cron ticks produce this shape. One dashboard, one query layer, one alerting surface — regardless of transport.
+Everything produces this shape. HTTP requests produce this shape. Queue messages produce this shape. Cron ticks produce this shape. Connector calls produce this shape. **One dashboard, one query layer, one alerting surface** — regardless of transport.
 
-Pair with [`@phyxiusjs/drain`](packages/components/drain) to ship the journal to any sink.
+The `observed` bag is where the per-invocation narrative lives. You declare field handles alongside the spec (`observe.fields({ customerId: observe.field<string>() })`), set them during `run`, and they snapshot into the journal entry at completion. Fields come in two tiers — `core` (always shipped) and `extra` (debug breadcrumbs, filtered in production by default). Flip a config key during an incident and the very next journal entry carries the extras. No restart.
+
+The goal: when someone asks "what happened at 3am?", the answer is a readable narrative — _one customer tried to place an order, Stripe was rate-limiting us, we retried three times with exponential backoff, the fourth attempt succeeded, here's the charge ID_ — because the fields were a curated product, not a `console.log` someone forgot to remove.
+
+→ [observe/README](packages/components/observe/README.md), [journal/README](packages/core/journal/README.md), [drain/README](packages/components/drain/README.md)
 
 ---
 
-## Testing
-
-Every timing decision goes through the `Clock`. A `ControlledClock` makes time a value you can advance deterministically — no flaky backoff, no real timers, no race-condition flakes.
+## Time is injected. Tests are deterministic.
 
 ```ts
 import { createControlledClock, ms } from "@phyxiusjs/clock";
-import { Journal } from "@phyxiusjs/journal";
-import { spawn } from "@phyxiusjs/handler";
 
 const clock = createControlledClock({ initialTime: 0 });
-const journal = new Journal({ clock });
-const running = await spawn(spec, { clock, journal });
+const handler = await spawn(spec, { clock, journal });
 
-const result = await running.invoke({ ... });
-
-// Advance time past the retry delay — deterministically.
+const promise = handler.invoke(input);
 clock.advanceBy(ms(500));
 await clock.flush();
-
-const entries = journal.getSnapshot().entries;
-expect(entries[0].data.outcome).toBe("success");
+const result = await promise;
 ```
 
-The HTTP adapter exposes a pure `handle(HttpRequest): Promise<HttpResponse>` so every route, encoding, and error path is exercised without sockets.
+No real timers. No race-condition flakes. No "oh this test only fails in CI, must be an infrastructure problem." Every `setTimeout`, every retry delay, every circuit-breaker reset, every schedule tick — goes through the injected `Clock`. A `ControlledClock` makes time a value you can advance deterministically.
+
+→ [clock/README](packages/core/clock/README.md)
+
+---
+
+## The packages, if you want to look
+
+The framework is one composition of the primitives. Nothing stops you from dropping to the primitive layer and composing differently — each package is a standalone value, each has its own README, each does one thing.
+
+### Framework
+
+| Package                                      | What it is                                                                   |
+| -------------------------------------------- | ---------------------------------------------------------------------------- |
+| [`@phyxiusjs/framework`](packages/framework) | `createApp()` — the packaged composition. Transports are optional peer deps. |
+
+### Adapters — how work enters the system
+
+| Package                                               | What it is                                                                                                   |
+| ----------------------------------------------------- | ------------------------------------------------------------------------------------------------------------ |
+| [`@phyxiusjs/http`](packages/adapters/http)           | Thin Node `http` adapter. Pure `handle(HttpRequest): Promise<HttpResponse>` core — testable without sockets. |
+| [`@phyxiusjs/queue`](packages/adapters/queue)         | Broker-agnostic pull-based consumer. Drop-in for SQS / Redis / Kafka. In-memory source for tests.            |
+| [`@phyxiusjs/scheduler`](packages/adapters/scheduler) | Time-driven invocations. Pluggable schedules, explicit overlap / catchup / drift policies.                   |
+| [`@phyxiusjs/db-pg`](packages/adapters/db-pg)         | Postgres driver for `@phyxiusjs/db`. Curated SQLSTATE → `DbError` mapping.                                   |
+
+### Components — composed primitives
+
+| Package                                                 | What it is                                                                                                             |
+| ------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| [`@phyxiusjs/handler`](packages/components/handler)     | **The universal work-unit.** Validated, supervised, timing-bounded, retry-aware, breaker-guarded, backpressure-shaped. |
+| [`@phyxiusjs/connector`](packages/components/connector) | 3rd-party integration primitive. `ConnectorSpec extends HandlerSpec` + typed `ConnectorError` + HTTP deepdive.         |
+| [`@phyxiusjs/db`](packages/components/db)               | Database boundary. Transaction-as-context, typed errors, driver-agnostic.                                              |
+| [`@phyxiusjs/observe`](packages/components/observe)     | Typed field handles. `core` vs `extra` tiers. Snapshots into every journal entry.                                      |
+| [`@phyxiusjs/context`](packages/components/context)     | Typed `AsyncLocalStorage`. A scope is a value.                                                                         |
+| [`@phyxiusjs/drain`](packages/components/drain)         | Journal-to-sink pump with declarative filtering.                                                                       |
+| [`@phyxiusjs/stats`](packages/components/stats)         | Poor-man's APM. Rolling percentiles, error rates, edge-triggered alerts.                                               |
+| [`@phyxiusjs/handle`](packages/components/handle)       | Scoped observable handle — the low-level building block behind `handler`.                                              |
+
+### Core — the primitive layer
+
+| Package                                         | What it is                                                                       |
+| ----------------------------------------------- | -------------------------------------------------------------------------------- |
+| [`@phyxiusjs/clock`](packages/core/clock)       | Injected time. Wall + monotonic. `Budget` — deadline + AbortSignal as a value.   |
+| [`@phyxiusjs/atom`](packages/core/atom)         | Versioned observable state with CAS. Transactional, linearizable, bounded.       |
+| [`@phyxiusjs/journal`](packages/core/journal)   | Bounded, ordered, append-only event log.                                         |
+| [`@phyxiusjs/process`](packages/core/process)   | Single-owner supervision. Start / stop / crash is structural, not convention.    |
+| [`@phyxiusjs/resource`](packages/core/resource) | Acquire / use / release with guaranteed cleanup. Release errors never mask body. |
+
+### Utilities — value-level building blocks
+
+| Package                                                        | What it is                                                                                                     |
+| -------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------- |
+| [`@phyxiusjs/fp`](packages/utils/fp)                           | `Result<T, E>`, `Option<T>`, pattern-match, pipe.                                                              |
+| [`@phyxiusjs/validate`](packages/utils/validate)               | `Validator<T>` contract. Zod-compatible, framework-free.                                                       |
+| [`@phyxiusjs/retry`](packages/utils/retry)                     | Retry policies as values. `retry.none()`, `retry.fixed(...)`, `retry.exponential(...)`.                        |
+| [`@phyxiusjs/circuit-breaker`](packages/utils/circuit-breaker) | Closed / open / half-open state machine. `cb.none()` is a first-class decision.                                |
+| [`@phyxiusjs/temporal`](packages/utils/temporal)               | Clock-driven debounce / throttle. Deterministic in tests.                                                      |
+| [`@phyxiusjs/config`](packages/utils/config)                   | Layered typed config with file-watching and first-wins precedence.                                             |
+| [`@phyxiusjs/strategy`](packages/utils/strategy)               | Pure named computation with shadow deployment. Primary + shadows for versioned rollouts.                       |
+| [`@phyxiusjs/state-machine`](packages/utils/state-machine)     | Typed state machines. States are discriminated unions, transitions are strategies, the graph is the primitive. |
 
 ---
 
 ## Principles
 
 - **Every failure mode must be directly assertable.** No generic errors, no catch-all. The type tells you the full outcome space.
-- **No unboundedness.** Queues have sizes. Backpressure has a policy. History has a ring. Silence is not a valid decision.
+- **No unboundedness.** Queues have sizes. Backpressure has a policy. Event history has a ring. Silence is not a valid answer.
 - **No non-decision.** Timeouts, retries, breakers, concurrency — all required. "None" is a value, never an absence.
 - **Time is injected.** `Date.now()` lives in exactly one place: `@phyxiusjs/clock/system-clock`. Everywhere else uses the injected Clock.
 - **Composition over configuration.** Small primitives you assemble. No framework lifecycle, no global state, no surprise behavior.
-- **Transport-stable observability.** One journal event per invocation. Same shape across transports.
-
----
-
-## Repository layout
-
-```
-packages/
-├── core/           # clock, atom, journal, process, resource
-├── components/     # context, observe, handle, drain, handler, db, stats
-├── utils/          # fp, validate, retry, circuit-breaker, temporal, config, strategy, state-machine
-└── adapters/       # http, queue, scheduler, db-pg
-```
-
-Each package has its own README. Read [`@phyxiusjs/handler`](packages/components/handler) first — it's the primitive everything else composes around.
+- **Transport-stable observability.** One journal event per invocation. Same shape across every way work enters the system.
+- **If a new primitive extends an existing one's shape naturally, the existing shape is right.** If it doesn't, either the new primitive is wrong or the substrate is missing something. The test is generative either way.
 
 ---
 

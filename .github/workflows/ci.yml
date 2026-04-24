@@ -26,7 +26,9 @@ jobs:
           fetch-depth: 0
 
       - name: Install pnpm
-        uses: pnpm/action-setup@v4
+        # v6 runs on Node 24; v4 runs on Node 20 which GitHub is
+        # deprecating (removal scheduled 2026-09-16).
+        uses: pnpm/action-setup@v6
 
       - name: Setup Node.js ${{ matrix.node-version }}
         uses: actions/setup-node@v5
