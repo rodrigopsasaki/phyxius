@@ -43,13 +43,17 @@ jobs:
       - name: Check formatting
         run: pnpm format:check
 
-      - name: Typecheck
-        run: pnpm typecheck
-
+      # Build must run before typecheck: workspace packages import each
+      # other via `workspace:*` and resolve to `dist/index.d.ts` — that
+      # file only exists after the build. Locally this is masked by
+      # leftover dist dirs from prior runs; CI starts clean.
       - name: Build
         run: pnpm build
         env:
           NX_DAEMON: false
+
+      - name: Typecheck
+        run: pnpm typecheck
 
       - name: Test
         run: pnpm test
