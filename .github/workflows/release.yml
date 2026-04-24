@@ -16,6 +16,16 @@ jobs:
     name: Version & Publish
     runs-on: ubuntu-latest
 
+    # Release is deliberately disabled while we iterate on the substrate.
+    # Every push in an unfinished codebase publishing to npm is the exact
+    # opposite of the "we own the timing of when this goes public" stance.
+    #
+    # To enable when ready:
+    #   1. Create an automation-scoped npm token for @phyxiusjs/*.
+    #   2. Add it as repo secret NPM_TOKEN (Settings → Secrets → Actions).
+    #   3. Change the condition below to `true` (or just delete this line).
+    if: false
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
