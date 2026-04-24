@@ -109,12 +109,13 @@ That's a supervised, timeout-bounded, retry-aware, circuit-broken, backpressure-
 
 ### Core — the primitive layer
 
-| Package                                       | What it is                                                                                                  |
-| --------------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
-| [`@phyxiusjs/clock`](packages/core/clock)     | Injected time. Wall + monotonic. `ControlledClock` for tests. `Budget` — deadline + AbortSignal as a value. |
-| [`@phyxiusjs/atom`](packages/core/atom)       | Versioned observable state with CAS. Transactional, linearizable, never unbounded.                          |
-| [`@phyxiusjs/journal`](packages/core/journal) | Bounded, ordered, append-only event log. Same shape for every transport.                                    |
-| [`@phyxiusjs/process`](packages/core/process) | Single-owner supervision. Start / stop / crash is structural, not convention.                               |
+| Package                                         | What it is                                                                                                                      |
+| ----------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| [`@phyxiusjs/clock`](packages/core/clock)       | Injected time. Wall + monotonic. `ControlledClock` for tests. `Budget` — deadline + AbortSignal as a value.                     |
+| [`@phyxiusjs/atom`](packages/core/atom)         | Versioned observable state with CAS. Transactional, linearizable, never unbounded.                                              |
+| [`@phyxiusjs/journal`](packages/core/journal)   | Bounded, ordered, append-only event log. Same shape for every transport.                                                        |
+| [`@phyxiusjs/process`](packages/core/process)   | Single-owner supervision. Start / stop / crash is structural, not convention.                                                   |
+| [`@phyxiusjs/resource`](packages/core/resource) | Acquire / use / release with guaranteed cleanup. Parallel + sequence compose lifecycles. Release errors never mask body errors. |
 
 ### Components — composed primitives
 
