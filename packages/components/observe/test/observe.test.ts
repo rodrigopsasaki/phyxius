@@ -302,4 +302,109 @@ describe("observe — typed field handles", () => {
       expect(example.events).toHaveLength(1);
     });
   });
+
+  describe("field tiers — core vs extra", () => {
+    it("fields declared with observe.field/number/array are tagged as core", () => {
+      const fields = observe.fields({
+        a: observe.field<string>(),
+        b: observe.number(),
+        c: observe.array<number>(),
+      });
+      expect(fields.a.tier).toBe("core");
+      expect(fields.b.tier).toBe("core");
+      expect(fields.c.tier).toBe("core");
+    });
+
+    it("fields declared with observe.extra/extraNumber/extraArray are tagged as extra", () => {
+      const fields = observe.fields({
+        a: observe.extra<string>(),
+        b: observe.extraNumber(),
+        c: observe.extraArray<number>(),
+      });
+      expect(fields.a.tier).toBe("extra");
+      expect(fields.b.tier).toBe("extra");
+      expect(fields.c.tier).toBe("extra");
+    });
+
+    it("extra fields capture values the same way core fields do", async () => {
+      const fields = observe.fields({
+        coreMsg: observe.field<string>(),
+        debugPrompt: observe.extra<string>(),
+      });
+
+      await context.scope(async () => {
+        fields.coreMsg.set("hello");
+        fields.debugPrompt.set("internal prompt text");
+
+        expect(fields.coreMsg.get()).toBe("hello");
+        expect(fields.debugPrompt.get()).toBe("internal prompt text");
+      });
+    });
+
+    it("snapshot() defaults to includeExtra=true (backward compatible)", async () => {
+      const fields = observe.fields({
+        msg: observe.field<string>(),
+        debug: observe.extra<string>(),
+      });
+
+      await context.scope(async () => {
+        fields.msg.set("visible");
+        fields.debug.set("breadcrumb");
+
+        const snap = observe.snapshot(fields);
+        expect(snap.msg).toBe("visible");
+        expect(snap.debug).toBe("breadcrumb");
+      });
+    });
+
+    it("snapshot(..., { includeExtra: false }) filters out extras but keeps core", async () => {
+      const fields = observe.fields({
+        msg: observe.field<string>(),
+        debug: observe.extra<string>(),
+        counter: observe.number(),
+        debugCounter: observe.extraNumber(),
+      });
+
+      await context.scope(async () => {
+        fields.msg.set("visible");
+        fields.debug.set("hidden");
+        fields.counter.inc(5);
+        fields.debugCounter.inc(99);
+
+        const snap = observe.snapshot(fields, { includeExtra: false });
+        expect(snap.msg).toBe("visible");
+        expect(snap.counter).toBe(5);
+        expect("debug" in snap).toBe(false);
+        expect("debugCounter" in snap).toBe(false);
+      });
+    });
+
+    it("snapshot(..., { includeExtra: true }) includes everything", async () => {
+      const fields = observe.fields({
+        msg: observe.field<string>(),
+        debug: observe.extra<string>(),
+      });
+
+      await context.scope(async () => {
+        fields.msg.set("a");
+        fields.debug.set("b");
+
+        const snap = observe.snapshot(fields, { includeExtra: true });
+        expect(snap.msg).toBe("a");
+        expect(snap.debug).toBe("b");
+      });
+    });
+
+    it("unset extras are absent from the snapshot regardless of includeExtra", async () => {
+      const fields = observe.fields({
+        debug: observe.extra<string>(),
+      });
+
+      await context.scope(async () => {
+        // Never set. Should be absent either way.
+        expect("debug" in observe.snapshot(fields, { includeExtra: false })).toBe(false);
+        expect("debug" in observe.snapshot(fields, { includeExtra: true })).toBe(false);
+      });
+    });
+  });
 });

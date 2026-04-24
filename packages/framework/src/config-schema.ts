@@ -90,6 +90,21 @@ export const frameworkConfigSchema = z.object({
             .default({}),
         })
         .default({}),
+
+      /**
+       * Observe-field tier control. Handlers declare observation fields
+       * in two tiers: `core` (always shipped) and `extra` (debug
+       * breadcrumbs). In production, you almost always want only core
+       * fields going out — that's the cost-safe default. During an
+       * incident, flip `include_extra` to `true`, hot-reload the config,
+       * and the very next journal entry carries the extras. Flip back
+       * when you're done.
+       */
+      observe: z
+        .object({
+          include_extra: z.boolean().default(false),
+        })
+        .default({}),
     })
     .default({}),
 });

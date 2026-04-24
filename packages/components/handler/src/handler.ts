@@ -62,6 +62,7 @@ export async function spawn<TInput, TOutput, TFields>(
   runtime: HandlerRuntime,
 ): Promise<RunningHandler<TInput, TOutput>> {
   const { clock, journal } = runtime;
+  const includeExtra = runtime.includeExtra ?? (() => true);
 
   // Per-factory invocation counter — avoid module-global state.
   let invocationCounter = 0;
@@ -366,17 +367,35 @@ export async function spawn<TInput, TOutput, TFields>(
   }
 
   /**
+   * Build the set of field keys the spec declared as `"extra"`. Computed
+   * once at spawn time — field tiers are schema-level and don't change
+   * across invocations.
+   */
+  const extraFieldKeys = new Set<string>();
+  for (const handle of Object.values(spec.fields as Record<string, { key: string; tier: "core" | "extra" }>)) {
+    if (handle && handle.tier === "extra") extraFieldKeys.add(handle.key);
+  }
+
+  /**
    * Snapshot the current context scope's data, stripping handler-internal
    * infra keys (`__handlerName`, etc.) so the `observed` field on the
    * journal entry holds only caller-written observations.
+   *
+   * Fields declared as `observe.extra*()` are filtered out when the
+   * runtime's `includeExtra()` getter returns false. Call the getter once
+   * per snapshot so hot-reloadable config takes effect on the next event,
+   * no restart required.
    */
   function snapshotObservedFromCurrentScope(): Record<string, unknown> {
     const ctx = context.current();
     if (!ctx) return {};
     const data = ctx.data as Record<string, unknown>;
+    const shipExtras = includeExtra();
     const copy: Record<string, unknown> = {};
     for (const [k, v] of Object.entries(data)) {
-      if (!k.startsWith("__")) copy[k] = v;
+      if (k.startsWith("__")) continue;
+      if (!shipExtras && extraFieldKeys.has(k)) continue;
+      copy[k] = v;
     }
     return copy;
   }

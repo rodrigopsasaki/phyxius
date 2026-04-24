@@ -106,7 +106,14 @@ export async function createApp<TAppConfig extends Record<string, unknown> = Rec
   async function use<TInput, TOutput>(
     spec: HandlerSpec<TInput, TOutput, unknown>,
   ): Promise<RunningHandler<TInput, TOutput>> {
-    const handler = await spawn(spec, { clock, journal });
+    const handler = await spawn(spec, {
+      clock,
+      journal,
+      // Each invocation re-reads the flag from config, so flipping
+      // `observability.observe.include_extra` in phyxius.yaml hot-reloads
+      // on the next handler event — no restart needed.
+      includeExtra: () => readObservability(config).observe.include_extra,
+    });
     handlers.push(handler as RunningHandler<unknown, unknown>);
     return handler;
   }

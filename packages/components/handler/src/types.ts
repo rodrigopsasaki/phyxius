@@ -166,4 +166,16 @@ export interface HandlerRuntime {
   readonly journal: Journal<HandlerEvent>;
   /** Optional: override invocation-ID generation (useful for deterministic tests). */
   readonly idGenerator?: () => string;
+  /**
+   * Optional: a getter for the "include extras" flag. Called once per
+   * invocation, so hot-reloadable config (e.g. flipping debug mode during
+   * an incident) takes effect on the very next journal entry without a
+   * restart. If omitted, extras are included — existing handlers see every
+   * declared field, unchanged.
+   *
+   * Set this to a function so the decision is re-read per invocation:
+   *
+   *     includeExtra: () => config.getAll().value.observability.observe.include_extra
+   */
+  readonly includeExtra?: () => boolean;
 }

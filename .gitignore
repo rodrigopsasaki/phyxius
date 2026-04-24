@@ -37,3 +37,6 @@ lerna-debug.log*
 test-results/
 playwright-report/
 playwright/.cache/
+
+# Local design notes (not checked in)
+.mycelium/

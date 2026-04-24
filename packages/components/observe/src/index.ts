@@ -6,18 +6,33 @@ import { context } from "@phyxiusjs/context";
 // resolved when you pass them through `observe.fields({ ... })`. The tagged
 // `__kind` field drives runtime dispatch; the phantom type fields carry the
 // generic through to the resolved handle.
+//
+// Every field has a `__tier` — either `"core"` (always captured + shipped,
+// subject to sampling) or `"extra"` (captured in-scope but only serialized
+// when the runtime opts in). Extras are the breadcrumbs that matter during
+// debugging but aren't worth the log-bill in prod.
+
+/**
+ * Field tier. `"core"` = always captured, always shipped through the
+ * sampling filter. `"extra"` = captured, shipped only when the runtime's
+ * extras flag is on (typically dev / on-call debug windows).
+ */
+export type FieldTier = "core" | "extra";
 
 interface PendingValueField<T> {
   readonly __kind: "value";
+  readonly __tier: FieldTier;
   readonly __type?: T;
 }
 
 interface PendingNumericField {
   readonly __kind: "number";
+  readonly __tier: FieldTier;
 }
 
 interface PendingArrayField<T> {
   readonly __kind: "array";
+  readonly __tier: FieldTier;
   readonly __element?: T;
 }
 
@@ -27,6 +42,8 @@ type AnyPendingField = PendingValueField<unknown> | PendingNumericField | Pendin
 
 export interface ObserveField<T> {
   readonly key: string;
+  /** The tier — `"core"` or `"extra"`. Drives whether the snapshot ships the value. */
+  readonly tier: FieldTier;
   /** Set the value. Overwrites any existing value at this key. */
   set(value: T): void;
   /** Read the value, or undefined if not set in the current scope's data. */
@@ -96,9 +113,10 @@ function dataOf(): Record<string, unknown> {
   return context.get().data as Record<string, unknown>;
 }
 
-function makeValueHandle<T>(key: string): ObserveField<T> {
+function makeValueHandle<T>(key: string, tier: FieldTier): ObserveField<T> {
   return {
     key,
+    tier,
     set(value: T): void {
       dataOf()[key] = value;
     },
@@ -119,8 +137,8 @@ function makeValueHandle<T>(key: string): ObserveField<T> {
   };
 }
 
-function makeNumericHandle(key: string): NumericObserveField {
-  const base = makeValueHandle<number>(key);
+function makeNumericHandle(key: string, tier: FieldTier): NumericObserveField {
+  const base = makeValueHandle<number>(key, tier);
   return {
     ...base,
     inc(amount: number = 1): void {
@@ -138,8 +156,8 @@ function makeNumericHandle(key: string): NumericObserveField {
   };
 }
 
-function makeArrayHandle<T>(key: string): ArrayObserveField<T> {
-  const base = makeValueHandle<T[]>(key);
+function makeArrayHandle<T>(key: string, tier: FieldTier): ArrayObserveField<T> {
+  const base = makeValueHandle<T[]>(key, tier);
   return {
     ...base,
     push(value: T): void {
@@ -160,11 +178,11 @@ function makeArrayHandle<T>(key: string): ArrayObserveField<T> {
 function makeHandle(key: string, pending: AnyPendingField): unknown {
   switch (pending.__kind) {
     case "value":
-      return makeValueHandle(key);
+      return makeValueHandle(key, pending.__tier);
     case "number":
-      return makeNumericHandle(key);
+      return makeNumericHandle(key, pending.__tier);
     case "array":
-      return makeArrayHandle(key);
+      return makeArrayHandle(key, pending.__tier);
   }
 }
 
@@ -197,19 +215,47 @@ function makeHandle(key: string, pending: AnyPendingField): unknown {
  * ```
  */
 export const observe = {
-  /** Declare a pending typed-value field. Resolved by `observe.fields()`. */
+  // ── Core tier ──────────────────────────────────────────────────────────
+  // Core fields are always captured and always shipped (subject to
+  // sampling). Use them for the load-bearing observation data — the things
+  // an operator reconstructs the story from at 3am.
+
+  /** Declare a core typed-value field. Resolved by `observe.fields()`. */
   field<T>(): PendingValueField<T> {
-    return { __kind: "value" };
+    return { __kind: "value", __tier: "core" };
   },
 
-  /** Declare a pending numeric field (gains `.inc()`). */
+  /** Declare a core numeric field (gains `.inc()`). */
   number(): PendingNumericField {
-    return { __kind: "number" };
+    return { __kind: "number", __tier: "core" };
   },
 
-  /** Declare a pending array field (gains `.push()`). */
+  /** Declare a core array field (gains `.push()`). */
   array<T>(): PendingArrayField<T> {
-    return { __kind: "array" };
+    return { __kind: "array", __tier: "core" };
+  },
+
+  // ── Extra tier ─────────────────────────────────────────────────────────
+  // Extras are captured the same way (same `set()`, same `push()`, same
+  // context scope), but a runtime opts into whether they survive the
+  // journal snapshot. Use them for debug breadcrumbs, intermediate values,
+  // verbose context you want during investigation but not during steady
+  // state. Cost is a knob, not a code change: flip the runtime flag and
+  // the same handler starts (or stops) emitting them.
+
+  /** Declare an extra typed-value field — captured always, shipped on opt-in. */
+  extra<T>(): PendingValueField<T> {
+    return { __kind: "value", __tier: "extra" };
+  },
+
+  /** Declare an extra numeric field (gains `.inc()`). */
+  extraNumber(): PendingNumericField {
+    return { __kind: "number", __tier: "extra" };
+  },
+
+  /** Declare an extra array field (gains `.push()`). */
+  extraArray<T>(): PendingArrayField<T> {
+    return { __kind: "array", __tier: "extra" };
   },
 
   /**
@@ -231,11 +277,21 @@ export const observe = {
    * Take a typed snapshot of the fields currently set in the active scope's
    * data. Only keys declared in the schema are included; the result is a
    * `Partial` because individual fields may not have been written yet.
+   *
+   * `includeExtra` defaults to `true` — existing callers get every declared
+   * field, as before. Pass `false` to filter out fields declared with
+   * `observe.extra*()`, which is what runtimes do in production when the
+   * verbose-debug flag is off.
    */
-  snapshot<S extends Record<string, AnyPendingField>>(fields: ResolvedFields<S>): Partial<InferShape<S>> {
+  snapshot<S extends Record<string, AnyPendingField>>(
+    fields: ResolvedFields<S>,
+    options: { includeExtra?: boolean } = {},
+  ): Partial<InferShape<S>> {
+    const { includeExtra = true } = options;
     const data = dataOf();
     const result: Record<string, unknown> = {};
     for (const handle of Object.values(fields as Record<string, ObserveField<unknown>>)) {
+      if (!includeExtra && handle.tier === "extra") continue;
       if (handle.key in data) {
         result[handle.key] = data[handle.key];
       }
