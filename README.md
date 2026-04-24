@@ -130,14 +130,15 @@ That's a supervised, timeout-bounded, retry-aware, circuit-broken, backpressure-
 
 ### Utilities — value-level building blocks
 
-| Package                                                        | What it is                                                                                              |
-| -------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------- |
-| [`@phyxiusjs/fp`](packages/utils/fp)                           | `Result<T, E>`, `Option<T>`, pattern-match, pipe. No throws as a value language.                        |
-| [`@phyxiusjs/validate`](packages/utils/validate)               | `Validator<T>` contract. Zod-compatible, framework-free — so the handler doesn't couple to a validator. |
-| [`@phyxiusjs/retry`](packages/utils/retry)                     | Retry policies as values. `retry.none()`, `retry.fixed(...)`, `retry.exponential(...)`.                 |
-| [`@phyxiusjs/circuit-breaker`](packages/utils/circuit-breaker) | Closed / open / half-open state machine with injected clock. `cb.none()` is a first-class decision.     |
-| [`@phyxiusjs/temporal`](packages/utils/temporal)               | Clock-driven debounce / throttle — deterministic in tests.                                              |
-| [`@phyxiusjs/config`](packages/utils/config)                   | Layered config with typed schema, file-watching, and first-wins precedence. No YAML, no surprises.      |
+| Package                                                        | What it is                                                                                                                                                                                                            |
+| -------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| [`@phyxiusjs/fp`](packages/utils/fp)                           | `Result<T, E>`, `Option<T>`, pattern-match, pipe. No throws as a value language.                                                                                                                                      |
+| [`@phyxiusjs/validate`](packages/utils/validate)               | `Validator<T>` contract. Zod-compatible, framework-free — so the handler doesn't couple to a validator.                                                                                                               |
+| [`@phyxiusjs/retry`](packages/utils/retry)                     | Retry policies as values. `retry.none()`, `retry.fixed(...)`, `retry.exponential(...)`.                                                                                                                               |
+| [`@phyxiusjs/circuit-breaker`](packages/utils/circuit-breaker) | Closed / open / half-open state machine with injected clock. `cb.none()` is a first-class decision.                                                                                                                   |
+| [`@phyxiusjs/temporal`](packages/utils/temporal)               | Clock-driven debounce / throttle — deterministic in tests.                                                                                                                                                            |
+| [`@phyxiusjs/config`](packages/utils/config)                   | Layered config with typed schema, file-watching, and first-wins precedence. No YAML, no surprises.                                                                                                                    |
+| [`@phyxiusjs/strategy`](packages/utils/strategy)               | Pure named computation with shadow deployment. Sync-by-type (purity fence); primary + shadows for versioned rollouts, experimentation, gradual trust. Mismatches are typed events carrying full input + both outputs. |
 
 ### Adapters — transports
 
