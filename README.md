@@ -140,12 +140,13 @@ That's a supervised, timeout-bounded, retry-aware, circuit-broken, backpressure-
 
 ### Adapters — transports
 
-| Package                                       | What it is                                                                                                                                                                                                                      |
-| --------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| [`@phyxiusjs/http`](packages/adapters/http)   | Thin Node `http` adapter. Pure `handle(HttpRequest): Promise<HttpResponse>` core — testable without sockets. Maps every `HandlerError` variant to a standard HTTP status.                                                       |
-| [`@phyxiusjs/queue`](packages/adapters/queue) | Broker-agnostic queue consumer. Pull-based `MessageSource` contract, drop-in for SQS / Redis / Kafka / any broker. Maps every `HandlerError` to ack / nack (retry, DLQ, requeue-now). Ships with an in-memory source for tests. |
+| Package                                               | What it is                                                                                                                                                                                                                      |
+| ----------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| [`@phyxiusjs/http`](packages/adapters/http)           | Thin Node `http` adapter. Pure `handle(HttpRequest): Promise<HttpResponse>` core — testable without sockets. Maps every `HandlerError` variant to a standard HTTP status.                                                       |
+| [`@phyxiusjs/queue`](packages/adapters/queue)         | Broker-agnostic queue consumer. Pull-based `MessageSource` contract, drop-in for SQS / Redis / Kafka / any broker. Maps every `HandlerError` to ack / nack (retry, DLQ, requeue-now). Ships with an in-memory source for tests. |
+| [`@phyxiusjs/scheduler`](packages/adapters/scheduler) | Time-driven handler invocations. Pluggable `Schedule` values (`every` / `at` / `never` built in; cron by composition). Overlap policy, catchup policy, drift tracking — all declared, none defaulted.                           |
 
-A scheduler adapter will follow the same shape: decode transport event → invoke handler → encode result. The handler owns stability and observability; each adapter is a small translator.
+HTTP (requests), queue (events), scheduler (time) — full coverage of how work enters a system. The handler owns stability and observability; each adapter is a small translator.
 
 ---
 
