@@ -149,8 +149,9 @@ That's a supervised, timeout-bounded, retry-aware, circuit-broken, backpressure-
 | [`@phyxiusjs/http`](packages/adapters/http)           | Thin Node `http` adapter. Pure `handle(HttpRequest): Promise<HttpResponse>` core — testable without sockets. Maps every `HandlerError` variant to a standard HTTP status.                                                       |
 | [`@phyxiusjs/queue`](packages/adapters/queue)         | Broker-agnostic queue consumer. Pull-based `MessageSource` contract, drop-in for SQS / Redis / Kafka / any broker. Maps every `HandlerError` to ack / nack (retry, DLQ, requeue-now). Ships with an in-memory source for tests. |
 | [`@phyxiusjs/scheduler`](packages/adapters/scheduler) | Time-driven handler invocations. Pluggable `Schedule` values (`every` / `at` / `never` built in; cron by composition). Overlap policy, catchup policy, drift tracking — all declared, none defaulted.                           |
+| [`@phyxiusjs/db-pg`](packages/adapters/db-pg)         | Postgres driver for `@phyxiusjs/db`. Wraps `pg.Pool`; translates SQLSTATE + Node errno into the typed `DbError` union (`DEADLOCK` / `SERIALIZATION_FAILURE` / `CONNECTION_ERROR` / `UNIQUE_VIOLATION` / …) via a curated table. |
 
-HTTP (requests), queue (events), scheduler (time) — full coverage of how work enters a system. The handler owns stability and observability; each adapter is a small translator.
+HTTP (requests), queue (events), scheduler (time) — full coverage of how work enters a system. The handler owns stability and observability; each adapter is a small translator. `db-pg` is the same idea applied to DB: translate the native error vocabulary into the typed variant the handler already knows how to reason about.
 
 ### Framework — the convenience bow
 
@@ -269,10 +270,10 @@ The HTTP adapter exposes a pure `handle(HttpRequest): Promise<HttpResponse>` so 
 
 ```
 packages/
-├── core/           # clock, atom, journal, process
-├── components/     # context, observe, handle, drain, handler
-├── utils/          # fp, validate, retry, circuit-breaker, temporal, config
-└── adapters/       # http (queue/scheduler to follow)
+├── core/           # clock, atom, journal, process, resource
+├── components/     # context, observe, handle, drain, handler, db, stats
+├── utils/          # fp, validate, retry, circuit-breaker, temporal, config, strategy, state-machine
+└── adapters/       # http, queue, scheduler, db-pg
 ```
 
 Each package has its own README. Read [`@phyxiusjs/handler`](packages/components/handler) first — it's the primitive everything else composes around.
