@@ -152,6 +152,12 @@ That's a supervised, timeout-bounded, retry-aware, circuit-broken, backpressure-
 
 HTTP (requests), queue (events), scheduler (time) — full coverage of how work enters a system. The handler owns stability and observability; each adapter is a small translator.
 
+### Framework — the convenience bow
+
+| Package                                      | What it is                                                                                                                                                                                                                                                                       |
+| -------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| [`@phyxiusjs/framework`](packages/framework) | The packaged composition. `createApp()` wires Clock + Journal + Drain + Stats + Config, exposes `.route` / `.schedule` / `.consume` / `.use` on top. Transports are optional peer deps. Sampling and stats thresholds are YAML-driven, hot-reloadable. Graceful shutdown opt-in. |
+
 ---
 
 ## The "no non-decision" rule

@@ -1,0 +1,381 @@
+import { createSystemClock, type Clock } from "@phyxiusjs/clock";
+import { createConfig, type ConfigInstance } from "@phyxiusjs/config";
+import { createDrain, stdoutSink, type Drain } from "@phyxiusjs/drain";
+import { spawn, type HandlerEvent, type HandlerSpec, type RunningHandler } from "@phyxiusjs/handler";
+import { Journal } from "@phyxiusjs/journal";
+import { createStats } from "@phyxiusjs/stats";
+import { z } from "zod";
+
+import { frameworkConfigSchema, type FrameworkConfig } from "./config-schema.js";
+import { shouldLog } from "./sampling.js";
+import type { App, AppConsumer, AppRoute, AppScheduledJob, AppStatus, CreateAppOptions } from "./types.js";
+
+// ── Public: createApp ─────────────────────────────────────────────────────
+
+/**
+ * Build an app. The returned value wires together Clock, Journal, Drain,
+ * Stats, and the Config watcher — and exposes methods to register handlers
+ * and transport registrations on top. Transport adapters are loaded
+ * lazily (on first call to `.route` / `.schedule` / `.consume`) so apps
+ * that don't use a transport don't pay for it.
+ *
+ * The invariant: every method here is a documented composition of
+ * primitives. If the behavior feels surprising, read the source — it
+ * reads as "here's how you'd have written it by hand."
+ */
+export async function createApp<TAppConfig extends Record<string, unknown> = Record<string, never>>(
+  options: CreateAppOptions<TAppConfig> = {},
+): Promise<App<TAppConfig>> {
+  const clock = options.clock ?? createSystemClock();
+  const journal = options.journal ?? new Journal<HandlerEvent>({ clock, maxEntries: 10_000 });
+
+  // ── Config ────────────────────────────────────────────────────────────
+
+  const config = await resolveConfig<TAppConfig>(options, clock);
+
+  // ── Drain + sampling ──────────────────────────────────────────────────
+
+  // The drain lives regardless of `log_drain: "none"` — stats still needs
+  // something to subscribe to; this drain just goes nowhere in that case.
+  let drain: Drain | null = null;
+
+  function buildDrain(): Drain {
+    const obs = config.getAll();
+    const mode = obs._tag === "Ok" ? obs.value.observability.log_drain : "stdout";
+
+    if (mode === "none") {
+      return createDrain<HandlerEvent>({
+        journal,
+        sink: { async write() {} },
+        clock,
+      });
+    }
+
+    return createDrain<HandlerEvent>({
+      journal,
+      sink: stdoutSink<HandlerEvent>(),
+      clock,
+      // Sampling policy, evaluated per entry against the *current* config.
+      // The drain re-reads config on every event, so a config hot-reload
+      // takes effect on the next entry — no app restart, no deploy.
+      filter: (entry) => {
+        const snap = config.getAll();
+        if (snap._tag !== "Ok") return true; // if config read fails, err on the side of logging
+        return shouldLog(entry.data, snap.value.observability);
+      },
+    });
+  }
+
+  // ── Stats ─────────────────────────────────────────────────────────────
+
+  const statsConfig = readObservability(config).stats;
+  const stats = createStats({
+    journal,
+    clock,
+    windowSize: statsConfig.window_size,
+    thresholds: toHandlerThresholds(statsConfig.thresholds),
+    emit: (event) => {
+      // Route threshold events back into the journal so they share the
+      // same observability stream as everything else. We cast through
+      // unknown because HandlerEvent and StatsEvent are structurally
+      // distinct; the journal is generic so mixing types works at runtime.
+      (journal as unknown as { append: (e: unknown) => void }).append(event);
+    },
+  });
+
+  // ── Registration state ────────────────────────────────────────────────
+
+  const handlers: RunningHandler<unknown, unknown>[] = [];
+  const routes: AppRoute<unknown, unknown>[] = [];
+  const jobs: AppScheduledJob<unknown, unknown>[] = [];
+  const consumers: AppConsumer<unknown, unknown>[] = [];
+
+  // Transport instances. Lazily constructed on `start()` if any
+  // registration for that transport exists.
+  let httpServer: { close: (cb: (err?: Error) => void) => void } | null = null;
+  let scheduler: { start(): Promise<void>; stop(): Promise<void> } | null = null;
+  const runningConsumers: Array<{ start(): Promise<void>; stop(): Promise<void> }> = [];
+
+  // Installed signal listeners, so we can remove them on stop if installed.
+  const installedSignals: Array<{ signal: NodeJS.Signals; listener: () => void }> = [];
+
+  let status: AppStatus = "idle";
+
+  // ── Method: use ───────────────────────────────────────────────────────
+
+  async function use<TInput, TOutput>(
+    spec: HandlerSpec<TInput, TOutput, unknown>,
+  ): Promise<RunningHandler<TInput, TOutput>> {
+    const handler = await spawn(spec, { clock, journal });
+    handlers.push(handler as RunningHandler<unknown, unknown>);
+    return handler;
+  }
+
+  // ── Method: route ─────────────────────────────────────────────────────
+
+  function route<TInput, TOutput>(r: AppRoute<TInput, TOutput>): void {
+    if (status !== "idle") {
+      throw new Error("app.route() must be called before app.start()");
+    }
+    routes.push(r as AppRoute<unknown, unknown>);
+  }
+
+  // ── Method: schedule ──────────────────────────────────────────────────
+
+  function schedule<TInput, TOutput>(job: AppScheduledJob<TInput, TOutput>): void {
+    if (status !== "idle") {
+      throw new Error("app.schedule() must be called before app.start()");
+    }
+    jobs.push(job as AppScheduledJob<unknown, unknown>);
+  }
+
+  // ── Method: consume ───────────────────────────────────────────────────
+
+  function consume<TInput, TOutput>(c: AppConsumer<TInput, TOutput>): void {
+    if (status !== "idle") {
+      throw new Error("app.consume() must be called before app.start()");
+    }
+    consumers.push(c as AppConsumer<unknown, unknown>);
+  }
+
+  // ── Method: start ─────────────────────────────────────────────────────
+
+  async function start(): Promise<void> {
+    if (status === "running" || status === "starting") return;
+    if (status === "stopping" || status === "stopped") {
+      throw new Error("app.start() cannot be called after app.stop()");
+    }
+
+    status = "starting";
+
+    // 1. Drain comes up first — handler events registered during spawn()
+    //    need a subscriber in place.
+    drain = buildDrain();
+
+    // 2. HTTP server, if any routes registered.
+    if (routes.length > 0) {
+      const { createHttpAdapter } = await loadPeer("@phyxiusjs/http");
+      const adapter = createHttpAdapter({
+        routes: routes as ReadonlyArray<unknown> as Parameters<typeof createHttpAdapter>[0]["routes"],
+      });
+
+      const serverPort = readServer(config)?.port;
+      if (serverPort === undefined) {
+        throw new Error(
+          "routes registered but server.port is missing from config. Either add `server.port` to your config or don't call app.route(...).",
+        );
+      }
+
+      const { createServer } = await import("node:http");
+      const server = createServer(adapter.listener);
+      await new Promise<void>((resolve) => server.listen(serverPort, resolve));
+      httpServer = server;
+    }
+
+    // 3. Scheduler, if any jobs registered.
+    if (jobs.length > 0) {
+      const { createScheduler } = await loadPeer("@phyxiusjs/scheduler");
+      const s = createScheduler({
+        clock,
+        jobs: jobs as ReadonlyArray<unknown> as Parameters<typeof createScheduler>[0]["jobs"],
+      });
+      await s.start();
+      scheduler = s as unknown as { start(): Promise<void>; stop(): Promise<void> };
+    }
+
+    // 4. Queue consumers, if any registered.
+    if (consumers.length > 0) {
+      const { createQueueConsumer } = await loadPeer("@phyxiusjs/queue");
+      for (const c of consumers) {
+        const consumer = createQueueConsumer({
+          clock,
+          source: c.source as never,
+          handler: c.handler as never,
+          decode: c.decode as never,
+          ...(c.maxConcurrent !== undefined ? { maxConcurrent: c.maxConcurrent } : {}),
+        });
+        await consumer.start();
+        runningConsumers.push(consumer as unknown as { start(): Promise<void>; stop(): Promise<void> });
+      }
+    }
+
+    status = "running";
+  }
+
+  // ── Method: stop ──────────────────────────────────────────────────────
+
+  async function stop(): Promise<void> {
+    if (status === "stopping") return;
+
+    // Signal listener cleanup is orthogonal to the lifecycle: if they were
+    // installed, they should be removable even when the app never ran.
+    // Do this up front so the early-return paths don't skip it.
+    uninstallSignalHandlers();
+
+    if (status === "stopped" || status === "idle") {
+      status = "stopped";
+      return;
+    }
+
+    status = "stopping";
+
+    // 1. Stop accepting new HTTP connections. In-flight requests continue.
+    if (httpServer) {
+      await new Promise<void>((resolve) => {
+        httpServer!.close(() => resolve());
+      });
+      httpServer = null;
+    }
+
+    // 2. Stop scheduler (drains in-flight ticks).
+    if (scheduler) {
+      await scheduler.stop().catch(() => {});
+      scheduler = null;
+    }
+
+    // 3. Stop consumers (drains in-flight messages).
+    for (const c of runningConsumers) {
+      await c.stop().catch(() => {});
+    }
+    runningConsumers.length = 0;
+
+    // 4. Stop handlers (drains their own internal queues).
+    await Promise.allSettled(handlers.map((h) => h.stop()));
+    handlers.length = 0;
+
+    // 5. Flush + stop drain.
+    if (drain) {
+      await drain.stop().catch(() => {});
+      drain = null;
+    }
+
+    // 6. Stats unsubscribes.
+    stats.stop();
+
+    // 7. Config watcher disposes.
+    try {
+      config.dispose();
+    } catch {
+      // ignore
+    }
+
+    status = "stopped";
+  }
+
+  function uninstallSignalHandlers(): void {
+    for (const { signal, listener } of installedSignals) {
+      process.removeListener(signal, listener);
+    }
+    installedSignals.length = 0;
+  }
+
+  // ── Method: installSignalHandlers ────────────────────────────────────
+
+  function installSignalHandlers(): void {
+    const handler = () => {
+      void stop();
+    };
+    process.on("SIGTERM", handler);
+    process.on("SIGINT", handler);
+    installedSignals.push({ signal: "SIGTERM", listener: handler });
+    installedSignals.push({ signal: "SIGINT", listener: handler });
+  }
+
+  // ── Assemble the app value ────────────────────────────────────────────
+
+  return {
+    use,
+    route,
+    schedule,
+    consume,
+    start,
+    stop,
+    installSignalHandlers,
+    clock,
+    journal,
+    config,
+    stats,
+    get status() {
+      return status;
+    },
+  };
+}
+
+// ── Internals ──────────────────────────────────────────────────────────────
+
+async function resolveConfig<TAppConfig extends Record<string, unknown>>(
+  options: CreateAppOptions<TAppConfig>,
+  clock: Clock,
+): Promise<ConfigInstance<FrameworkConfig & TAppConfig>> {
+  const schema = options.appSchema
+    ? frameworkConfigSchema.and(options.appSchema as z.ZodType<TAppConfig>)
+    : (frameworkConfigSchema as unknown as z.ZodType<FrameworkConfig & TAppConfig>);
+
+  // Already-built ConfigInstance: use it as-is.
+  if (options.config && typeof options.config === "object" && "get" in options.config) {
+    return options.config as ConfigInstance<FrameworkConfig & TAppConfig>;
+  }
+
+  // File path: load via file source, hot-reloading enabled.
+  if (typeof options.config === "string") {
+    return createConfig<FrameworkConfig & TAppConfig>(schema as z.ZodType<FrameworkConfig & TAppConfig>, {
+      sources: [{ type: "file", path: options.config }, { type: "defaults" }],
+      clock,
+      watch: true,
+    });
+  }
+
+  // Inline object (or undefined).
+  return createConfig<FrameworkConfig & TAppConfig>(schema as z.ZodType<FrameworkConfig & TAppConfig>, {
+    sources: [{ type: "object", data: (options.config as object) ?? {} }, { type: "defaults" }],
+    clock,
+  });
+}
+
+function readObservability<T>(config: ConfigInstance<T & FrameworkConfig>): FrameworkConfig["observability"] {
+  const snap = config.getAll();
+  if (snap._tag !== "Ok") {
+    // Shouldn't happen — schema validates at createConfig time.
+    return frameworkConfigSchema.parse({}).observability;
+  }
+  return (snap.value as FrameworkConfig).observability;
+}
+
+function readServer<T>(config: ConfigInstance<T & FrameworkConfig>): FrameworkConfig["server"] {
+  const snap = config.getAll();
+  if (snap._tag !== "Ok") return undefined;
+  return (snap.value as FrameworkConfig).server;
+}
+
+function toHandlerThresholds(
+  raw: FrameworkConfig["observability"]["stats"]["thresholds"],
+): Record<string, { p50Ms?: number; p95Ms?: number; p99Ms?: number; errorRate?: number }> {
+  const out: Record<string, { p50Ms?: number; p95Ms?: number; p99Ms?: number; errorRate?: number }> = {};
+  for (const [name, t] of Object.entries(raw)) {
+    out[name] = {
+      ...(t.p50_ms !== undefined ? { p50Ms: t.p50_ms } : {}),
+      ...(t.p95_ms !== undefined ? { p95Ms: t.p95_ms } : {}),
+      ...(t.p99_ms !== undefined ? { p99Ms: t.p99_ms } : {}),
+      ...(t.error_rate !== undefined ? { errorRate: t.error_rate } : {}),
+    };
+  }
+  return out;
+}
+
+/**
+ * Dynamic import of an optional peer package. Gives a clear, actionable
+ * error if the caller tried to use a transport without installing its
+ * adapter.
+ */
+async function loadPeer(name: "@phyxiusjs/http"): Promise<typeof import("@phyxiusjs/http")>;
+async function loadPeer(name: "@phyxiusjs/queue"): Promise<typeof import("@phyxiusjs/queue")>;
+async function loadPeer(name: "@phyxiusjs/scheduler"): Promise<typeof import("@phyxiusjs/scheduler")>;
+async function loadPeer(name: string): Promise<unknown> {
+  try {
+    return await import(name);
+  } catch {
+    throw new Error(
+      `${name} is an optional peer dependency. Install it: \`npm install ${name}\` (or the equivalent with your package manager).`,
+    );
+  }
+}
