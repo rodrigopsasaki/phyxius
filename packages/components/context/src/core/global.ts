@@ -2,29 +2,29 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import type { PhyxiusContext, ContextRuntimeState } from "./types.js";
 
 /**
- * Global key for context runtime state.
- * Using a string key ensures the same access across all versions of the context package.
+ * Global registry key for the context runtime state.
+ *
+ * We use `Symbol.for` so that every copy of `@phyxiusjs/context` loaded into
+ * the same process — even across version mismatches in `node_modules` — shares
+ * the same `AsyncLocalStorage` instance. Without this, two copies of the package
+ * would create two independent stores and context would silently fail to flow
+ * across the boundary between them.
+ *
+ * `Symbol.for` is safer than a string key: it cannot collide with user-defined
+ * globals and avoids polluting the global namespace at the type level.
  */
-const CONTEXT_RUNTIME_KEY = "__phyxius_context_runtime__";
+const RUNTIME_KEY = Symbol.for("phyxius.context.runtime");
 
-/**
- * Type augmentation for the global runtime state.
- */
-declare global {
-  // biome-ignore lint/style/noVar: required for global state type
-  var __phyxius_context_runtime__: ContextRuntimeState;
-}
+type GlobalWithRuntime = typeof globalThis & {
+  [RUNTIME_KEY]?: ContextRuntimeState;
+};
 
-// Initialize the global runtime state if it doesn't exist
-if (!globalThis[CONTEXT_RUNTIME_KEY]) {
-  globalThis[CONTEXT_RUNTIME_KEY] = {};
-}
-
-/**
- * Gets the global context runtime state.
- */
 function getRuntimeState<T = Record<string, unknown>>(): ContextRuntimeState<T> {
-  return globalThis[CONTEXT_RUNTIME_KEY] as ContextRuntimeState<T>;
+  const global = globalThis as GlobalWithRuntime;
+  if (!global[RUNTIME_KEY]) {
+    global[RUNTIME_KEY] = {};
+  }
+  return global[RUNTIME_KEY] as ContextRuntimeState<T>;
 }
 
 /**

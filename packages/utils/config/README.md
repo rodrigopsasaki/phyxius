@@ -1,342 +1,326 @@
-# @phyxiusjs/config
+# Config
 
-Configuration that tells you when it's wrong. Config that can't surprise you. Settings that explain themselves.
+Configuration that tells you when it's wrong. Layered sources, typed path access, hot reload, observable changes — all with explicit precedence and deterministic testing.
 
-Every production failure starts with configuration. Missing env vars, wrong types, hidden defaults, different behavior between dev and prod. You don't find out until the system crashes.
+---
 
-Config fixes this. Explicit schemas, validated types, observable changes.
+## What this really is
+
+Every production failure starts with configuration. Missing env vars, wrong types, hidden defaults, different behavior between dev and prod. `@phyxiusjs/config` gives you:
+
+- **Validator-agnostic schemas.** Any `{ parse(input): T }` works — Zod, custom validators, anything with that shape.
+- **Layered sources with explicit precedence.** Env > file > object > defaults, or whatever order you declare. The **first source in the list wins**.
+- **Typed path access.** `config.get("server.port")` returns `Result<number, ConfigError>` — the value type is inferred from your schema.
+- **Hot reload with file watching.** File-change detection with a Clock-driven debounce, deterministic in tests.
+- **Observable changes.** Every event is a typed value routed through subscribers and (optionally) a Journal.
+
+---
 
 ## Installation
 
 ```bash
-npm install @phyxiusjs/config @phyxiusjs/validate @phyxiusjs/clock @phyxiusjs/atom @phyxiusjs/fp
+npm install @phyxiusjs/config @phyxiusjs/clock @phyxiusjs/fp
 ```
 
-## The Problem
+Requires `@phyxiusjs/atom`, `@phyxiusjs/journal`, and `@phyxiusjs/temporal` as runtime deps (installed transitively).
 
-Traditional configuration is a minefield:
+---
 
-```typescript
-// This is broken. You just don't know it yet.
-const port = process.env.PORT || 3000;           // Is 3000 right? Who knows?
-const timeout = parseInt(process.env.TIMEOUT);   // NaN if missing
-const apiKey = process.env.API_KEY;              // undefined? Crash later!
-
-if (!apiKey) {
-  throw new Error("API_KEY required");           // At least crashes early...
-}
-```
-
-Hidden defaults, missing validation, type coercion surprises. Configuration is where good systems go to die.
-
-## Config Helps You With This
-
-### Example 1 — Schema-Driven Configuration
+## Quick start
 
 ```typescript
 import { createConfig } from "@phyxiusjs/config";
 import { createSystemClock } from "@phyxiusjs/clock";
-import { z } from "zod";  // Or any validator
+import { z } from "zod";
 
 const clock = createSystemClock();
 
-// Define your schema
 const schema = z.object({
   server: z.object({
     port: z.number().min(1).max(65535),
     host: z.string().default("localhost"),
-    timeout: z.number().default(30000)
   }),
   database: z.object({
     url: z.string().url(),
-    poolSize: z.number().min(1).max(100).default(10)
+    poolSize: z.number().default(10),
   }),
-  features: z.object({
-    rateLimit: z.boolean().default(true),
-    maxRequests: z.number().default(100)
-  })
 });
 
-// Load with explicit sources
 const config = createConfig(schema, {
+  // Precedence order: FIRST source wins.
   sources: [
-    { type: "env" },           // Environment variables (highest priority)
-    { type: "file", path: ".env" },  // .env file
-    { type: "defaults" }       // Schema defaults (lowest priority)
+    { type: "env", prefix: "APP_", convention: "dbt" },
+    { type: "file", path: "./config.json" },
+    { type: "defaults" },
   ],
-  clock
+  clock,
 });
 
-// Type-safe access with Result types
-const port = config.get("server.port");  // Result<number, ConfigError>
-match(port, {
-  ok: (p) => console.log(`Starting on port ${p}`),
-  err: (e) => console.error(`Config error: ${e.message}`)
-});
+// Typed paths — return type follows from the schema.
+const port = config.get("server.port"); // Result<number, ConfigError>
+const url = config.get("database.url"); // Result<string, ConfigError>
+
+// Or with a fallback:
+const poolSize = config.getOrDefault("database.poolSize", 5); // number
 ```
 
-### Example 2 — dbt-Style Environment Variables
+---
+
+## Precedence: first source wins
+
+Sources are declared in priority order, highest first:
 
 ```typescript
-// Environment variables with double underscore nesting
-// SERVER__PORT=3000
-// SERVER__HOST=localhost
-// DATABASE__URL=postgres://localhost/mydb
-// FEATURES__RATE_LIMIT=true
-// FEATURES__MAX_REQUESTS=100
-
-const config = createConfig(schema, {
-  sources: [{ type: "env" }],  // Automatically uses dbt convention
-  clock
-});
-
-// Nested values are properly parsed
-const host = config.get("server.host");      // "localhost"
-const rateLimit = config.get("features.rateLimit");  // true (boolean)
+sources: [
+  { type: "object", data: runtimeOverrides }, // highest — always wins where set
+  { type: "env", prefix: "APP_" }, // next
+  { type: "file", path: ".env" }, // next
+  { type: "defaults" }, // lowest — only fills gaps
+];
 ```
 
-### Example 3 — Hot Reloading with Watch
+When two sources provide the same key, the earlier one wins. Lower-priority sources fill in fields that higher-priority sources don't specify.
+
+---
+
+## Typed path access
+
+The schema type flows through to `get`:
+
+```typescript
+const schema = z.object({
+  server: z.object({ port: z.number(), host: z.string() }),
+});
+
+const config = createConfig(schema, { ... });
+
+const port = config.get("server.port");
+//     ^? Result<number, ConfigError>
+
+const host = config.get("server.host");
+//     ^? Result<string, ConfigError>
+
+// Typos caught at compile time:
+// config.get("server.prt"); // ❌ TS2345: "server.prt" not in Path<T>
+```
+
+For cases where paths are dynamic (computed at runtime), use the untyped escape hatch:
+
+```typescript
+const result = config.getPath(dynamicPath); // Result<unknown, ConfigError>
+```
+
+Arrays are treated as leaf values — no numeric-index paths in the typed API. Use `getPath` when you need to reach into arrays.
+
+---
+
+## Sources
+
+### `{ type: "env", prefix?, convention? }`
+
+Environment variables. Two conventions:
+
+- **`"dbt"`** (default) — `SERVER__PORT=3000` becomes `{ server: { port: 3000 } }`
+- **`"flat"`** — `SERVER_PORT=3000` becomes `{ serverPort: 3000 }`
+
+Values are auto-coerced: `"true"`/`"false"` → boolean, numeric strings → number, `"null"` → null.
+
+### `{ type: "file", path, format? }`
+
+JSON or `.env` files. **YAML is intentionally not supported** — a correct YAML implementation is beyond the scope of a config primitive. If you need YAML, pre-process with `js-yaml` and pass the result as `{ type: "object", data }`.
+
+### `{ type: "object", data }`
+
+Inline data. Useful for overrides in tests and programmatic configuration.
+
+### `{ type: "defaults" }`
+
+Currently a placeholder — schema defaults are applied by the validator itself (e.g., `z.string().default(...)`). Kept for future schema-introspection use.
+
+---
+
+## Hot reload
 
 ```typescript
 const config = createConfig(schema, {
-  sources: [{ type: "file", path: "config.json" }],
-  watch: true,  // Enable hot reloading
-  clock
+  sources: [{ type: "file", path: "./config.json" }],
+  clock,
+  watch: true,
 });
 
-// Subscribe to changes
 config.subscribe((event) => {
-  console.log(`Config updated: ${event.type}`);
-  event.changes.forEach(change => {
-    console.log(`  ${change.path}: ${change.oldValue} → ${change.newValue}`);
-  });
+  if (event.type === "CONFIG_RELOADED") {
+    console.log("changes:", event.changes);
+  }
 });
-
-// Config automatically reloads when file changes
 ```
 
-### Example 4 — Environment-Specific Configuration
+File-change detection uses `fs.watchFile` with a Clock-driven debounce (default 20ms), so rapid changes to the file produce a single reload. The Clock backing means timing is deterministic in tests with a controlled Clock.
+
+The filesystem poll interval (default 100ms) is real-time — it's inherent to `fs.watchFile`. You can configure it via the custom loader if you need different behavior:
 
 ```typescript
-const environment = process.env.NODE_ENV || "development";
+import { createLoader } from "@phyxiusjs/config";
+
+const loader = createLoader({ clock, watchPollIntervalMs: 50 });
 
 const config = createConfig(schema, {
-  sources: [
-    { type: "env" },
-    { type: "file", path: `config.${environment}.json` },
-    { type: "defaults" }
-  ],
-  clock
-});
-
-// Development gets different defaults than production
-const timeout = config.get("server.timeout");
-// development: 5000ms (from config.development.json)
-// production: 30000ms (from config.production.json)
-```
-
-### Example 5 — Testing with Controlled Config
-
-```typescript
-import { createControlledClock } from "@phyxiusjs/clock";
-
-test("with specific config", () => {
-  const clock = createControlledClock();
-  
-  const config = createConfig(schema, {
-    sources: [{
-      type: "object",
-      data: {
-        server: { port: 9999, host: "test.local" },
-        database: { url: "sqlite::memory:" },
-        features: { rateLimit: false }
-      }
-    }],
-    clock
-  });
-  
-  // Test with controlled configuration
-  const port = config.get("server.port");
-  expect(port).toEqual(ok(9999));
+  sources: [...],
+  clock,
+  watch: true,
+  loader,
 });
 ```
 
-## Config Does NOT Help You With This
+---
 
-### Example 1 — Secret Management
+## Observability
 
-```typescript
-// Not Config's job - use a secret manager:
-const secrets = await secretManager.getSecrets();
-```
-
-### Example 2 — Remote Configuration Services
+Every meaningful state transition emits a `ConfigEvent`:
 
 ```typescript
-// Not Config's job - use a config service client:
-const remoteConfig = await configService.fetch();
+type ConfigEvent =
+  | { type: "CONFIG_LOADED"; at: Instant }
+  | { type: "CONFIG_RELOADED"; changes: ConfigChange[]; at: Instant }
+  | { type: "CONFIG_ERROR"; error: ConfigError; at: Instant }
+  | { type: "WATCH_STARTED"; path: string; at: Instant }
+  | { type: "WATCH_STOPPED"; path: string; at: Instant };
 ```
 
-### Example 3 — Configuration UI/Admin Panels
+Pair with `@phyxiusjs/journal` for a replayable audit trail:
 
 ```typescript
-// Not Config's job - build on top:
-const configUI = new ConfigAdminPanel(config);
-```
+import { Journal } from "@phyxiusjs/journal";
 
-## API Reference
+const journal = new Journal<ConfigEvent>({ clock });
 
-### `createConfig(schema, options)`
-
-Creates a configuration instance with validation and type safety.
-
-**Parameters:**
-- `schema`: Validation schema (Zod, Yup, Joi, or any validator)
-- `options`: Configuration options
-  - `sources`: Array of configuration sources (order matters - first wins)
-  - `clock`: Clock instance for time operations
-  - `watch`: Enable hot reloading (default: false)
-  - `journal`: Optional journal for event logging
-
-**Returns:** `ConfigInstance<T>` where T is inferred from schema
-
-### Configuration Sources
-
-#### Environment Variables
-```typescript
-{ type: "env", prefix?: string, convention?: "dbt" | "flat" }
-```
-- Reads from `process.env`
-- dbt convention: `SERVER__PORT` → `server.port`
-- Optional prefix: `APP_SERVER__PORT` with prefix "APP_"
-
-#### File
-```typescript
-{ type: "file", path: string, format?: "json" | "yaml" | "env" }
-```
-- Reads from file system
-- Auto-detects format from extension
-- Supports JSON, YAML, and .env files
-
-#### Object
-```typescript
-{ type: "object", data: unknown }
-```
-- Static configuration object
-- Useful for testing and defaults
-
-#### Defaults
-```typescript
-{ type: "defaults" }
-```
-- Uses defaults from schema
-- Always lowest priority
-
-### Config Instance Methods
-
-#### `get(path: string): Result<T, ConfigError>`
-Gets a value at the specified path. Returns Result type for safe access.
-
-#### `getOrDefault<T>(path: string, defaultValue: T): T`
-Gets a value or returns the provided default if not found or invalid.
-
-#### `getAll(): Result<Config, ConfigError>`
-Returns the entire configuration object.
-
-#### `reload(): Result<void, ConfigError>`
-Manually triggers configuration reload from sources.
-
-#### `subscribe(callback: (event: ConfigEvent) => void): () => void`
-Subscribes to configuration changes. Returns unsubscribe function.
-
-#### `generateExample(): string`
-Generates example configuration based on schema.
-
-## Environment Variable Parsing
-
-### dbt Convention (Default)
-
-Double underscore indicates nesting:
-```bash
-SERVER__PORT=3000                    # server.port = 3000
-DATABASE__POOL__MIN=5                # database.pool.min = 5
-FEATURES__RATE_LIMIT__ENABLED=true   # features.rateLimit.enabled = true
-```
-
-### Type Coercion
-
-Values are automatically parsed based on content:
-- `"true"` / `"false"` → boolean
-- `"123"` → number
-- `"12.34"` → number
-- `"null"` → null
-- Everything else → string
-
-### Arrays
-
-Arrays use numeric indices:
-```bash
-CORS__ORIGINS__0=http://localhost:3000
-CORS__ORIGINS__1=https://example.com
-# Becomes: cors.origins = ["http://localhost:3000", "https://example.com"]
-```
-
-## Testing
-
-Config is designed for testing:
-
-```typescript
-describe("api endpoint", () => {
-  it("handles rate limiting", () => {
-    const config = createConfig(schema, {
-      sources: [{
-        type: "object",
-        data: {
-          features: { rateLimit: true, maxRequests: 5 }
-        }
-      }],
-      clock: createControlledClock()
-    });
-    
-    // Test with specific configuration
-  });
+const config = createConfig(schema, {
+  sources: [...],
+  clock,
+  journal,
 });
+
+// Every ConfigEvent is appended to the journal automatically.
 ```
 
-## Integration with Phyxius
+---
 
-Config uses Phyxius primitives throughout:
+## Errors
 
-- **Clock**: All time operations for watch functionality
-- **Atom**: Atomic state updates for configuration changes
-- **Journal**: Optional event logging for audit trails
-- **FP Result**: Safe access without exceptions
-- **Validate**: Schema validation with any library
+Errors are structured values, never thrown:
 
-## Why Config?
+```typescript
+type ConfigError =
+  | { type: "VALIDATION_ERROR"; message: string; details?: unknown }
+  | { type: "SOURCE_ERROR"; source: string; message: string; cause?: unknown }
+  | { type: "PARSE_ERROR"; source: string; message: string }
+  | { type: "FILE_NOT_FOUND"; path: string }
+  | { type: "PATH_NOT_FOUND"; path: string };
+```
 
-Traditional configuration fails silently:
-- Missing variables discovered at runtime
-- Type mismatches cause crashes
-- Hidden defaults nobody remembers
-- Different behavior in different environments
-- No way to track configuration changes
+When the most recent load failed, subsequent `get`/`getPath`/`getAll` calls return the original failure (e.g. `VALIDATION_ERROR` or `FILE_NOT_FOUND`) — no wrapping, the cause is the value you see.
 
-Config makes everything explicit:
-- Schema validation at startup
-- Type-safe access throughout
-- Observable changes for hot reloading
-- Explicit source precedence
-- Result types prevent crashes
+---
 
-## Philosophy
+## Teardown
 
-Config follows Phyxius principles:
-- **Make complexity explicit**: Show source precedence
-- **Errors are values**: Result types for safe access
-- **Test what matters**: Controllable configuration
-- **Composition over configuration**: Small pieces that fit together
+`createConfig` with `watch: true` installs file watchers. Call `dispose()` when you're done:
 
-## License
+```typescript
+const config = createConfig(schema, { sources, clock, watch: true });
 
-MIT
+// ... use config ...
+
+config.dispose(); // idempotent, stops watchers, clears subscribers
+```
+
+**No process exit handlers are registered automatically.** The library doesn't touch `process.on`. If you want teardown on shutdown, call `dispose()` yourself in your shutdown hook.
+
+---
+
+## Deterministic testing
+
+Config is fully Clock-driven except the OS filesystem poll. For tests that don't involve file watching, everything is deterministic:
+
+```typescript
+import { createControlledClock, ms } from "@phyxiusjs/clock";
+
+const clock = createControlledClock({ initialTime: 0 });
+const config = createConfig(schema, {
+  sources: [{ type: "object", data: { server: { port: 3000 } } }],
+  clock,
+});
+
+const port = config.get("server.port"); // Ok(3000)
+```
+
+For file-watch tests, the debounce is Clock-driven (deterministic under `ControlledClock`), but the `fs.watchFile` poll itself is real-time. Inject a tighter poll interval for tests if needed:
+
+```typescript
+const loader = createLoader({ clock, watchPollIntervalMs: 10 });
+```
+
+---
+
+## API
+
+```typescript
+function createConfig<T>(
+  schema: Validator<T>,
+  options: {
+    sources: ConfigSource[]; // first-wins precedence
+    clock: Clock;
+    watch?: boolean; // enable file watching, default false
+    journal?: Journal<ConfigEvent>; // route events here
+    environment?: string; // metadata tag
+    loader?: ConfigLoader; // inject a custom loader
+  },
+): ConfigInstance<T>;
+
+interface ConfigInstance<T> {
+  get<P extends Path<T>>(path: P): Result<PathValue<T, P>, ConfigError>;
+  getPath(path: string): Result<unknown, ConfigError>;
+  getOrDefault<P extends Path<T>, D>(path: P, defaultValue: D): PathValue<T, P> | D;
+  getAll(): Result<T, ConfigError>;
+  reload(): Result<void, ConfigError>;
+  subscribe(cb: (event: ConfigEvent) => void): () => void;
+  getMetadata(): ConfigMetadata;
+  dispose(): void;
+}
+```
+
+### Custom loaders
+
+```typescript
+interface ConfigLoader {
+  load(source: ConfigSource): Result<unknown, ConfigError>;
+  watch?(source: ConfigSource, callback: (data: unknown) => void): () => void;
+}
+
+const consulLoader: ConfigLoader = { ... };
+createConfig(schema, { sources, clock, loader: consulLoader });
+```
+
+Use this for non-file sources (Consul, Vault, AWS SSM), or to inject test data without touching the filesystem.
+
+---
+
+## What this does NOT do
+
+- **No YAML** — drop the file format or pre-process.
+- **No implicit cleanup** — call `dispose()`. The library never registers process handlers on your behalf.
+- **No async source loading** — sources are loaded synchronously (via `readFileSync`, `process.env`). For async sources (network, DB), inject a custom loader that blocks in `load()` or cache asynchronously outside `createConfig`.
+- **No schema coupling** — the validator is any `{ parse(input): T }`. Config doesn't know about Zod specifically and doesn't leak Zod types into its API.
+- **No stderr pollution** — subscriber errors are contained, not logged to `console.error`. Route through the journal if you want visibility.
+
+---
+
+## What you get
+
+- **Typed config access** where the schema flows all the way to `result.value`.
+- **Precedence you can reason about** — first source wins, documented and tested.
+- **Deterministic hot reload** — Clock-driven debounce, injectable poll interval for tests.
+- **Structured events** — observability by value, not logs.
+- **No leaks** — explicit `dispose()`, bounded state, no accumulating arrays.
+
+Config is a small primitive made to be reached for, not wrestled with.

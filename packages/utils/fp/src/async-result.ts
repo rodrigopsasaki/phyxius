@@ -212,7 +212,7 @@ export async function retryAsync<T, E>(
     }
 
     const delay = Math.min(baseDelayMs * Math.pow(backoffFactor, attempt - 1), maxDelayMs) as Millis;
-    await clock.timeout(delay);
+    await clock.sleep(delay);
 
     lastResult = await fn();
   }
@@ -227,7 +227,7 @@ export function timeoutAsync<T, E>(
   timeoutError: E,
   clock: Clock,
 ): AsyncResult<T, E> {
-  return Promise.race([asyncResult, clock.timeout(ms).then(() => err(timeoutError))]);
+  return Promise.race([asyncResult, clock.sleep(ms).then(() => err(timeoutError))]);
 }
 
 /** Convert AsyncResult to Promise (escape hatch - use sparingly) */

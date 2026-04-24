@@ -2,6 +2,11 @@ import { describe, it, expect } from "vitest";
 import { createAtom } from "../src/index.js";
 import { createControlledClock, ms } from "@phyxiusjs/clock";
 
+function defined<T>(value: T | undefined): T {
+  if (value === undefined) throw new Error("Expected value to be defined");
+  return value;
+}
+
 describe("Atom Deterministic Time", () => {
   it("should use clock.now() for all timestamps", () => {
     const clock = createControlledClock({ initialTime: 1000 });
@@ -22,16 +27,16 @@ describe("Atom Deterministic Time", () => {
     atom.reset("first-change");
 
     expect(changes).toHaveLength(1);
-    expect(changes[0]!.at.wallMs).toBe(1500);
-    expect(changes[0]!.at.monoMs).toBe(1500);
+    expect(defined(changes[0]).at.wallMs).toBe(1500);
+    expect(defined(changes[0]).at.monoMs).toBe(1500);
 
     // Advance time again
     clock.advanceBy(ms(300));
     atom.reset("second-change");
 
     expect(changes).toHaveLength(2);
-    expect(changes[1]!.at.wallMs).toBe(1800);
-    expect(changes[1]!.at.monoMs).toBe(1800);
+    expect(defined(changes[1]).at.wallMs).toBe(1800);
+    expect(defined(changes[1]).at.monoMs).toBe(1800);
 
     // Verify current snapshot
     const currentSnapshot = atom.snapshot();
@@ -47,7 +52,7 @@ describe("Atom Deterministic Time", () => {
     const timeAdvances = [100, 50, 200, 25, 75];
 
     for (let i = 0; i < timeAdvances.length; i++) {
-      clock.advanceBy(ms(timeAdvances[i]!));
+      clock.advanceBy(ms(defined(timeAdvances[i])));
       atom.swap((n) => n + 1);
     }
 
@@ -57,13 +62,13 @@ describe("Atom Deterministic Time", () => {
     // Verify monotonic time (skip initial snapshot at index 0)
     let expectedTime = 0;
     for (let i = 1; i < history.length; i++) {
-      expectedTime += timeAdvances[i - 1]!;
-      expect(history[i]!.at.monoMs).toBe(expectedTime);
-      expect(history[i]!.at.wallMs).toBe(expectedTime);
+      expectedTime += defined(timeAdvances[i - 1]);
+      expect(defined(history[i]).at.monoMs).toBe(expectedTime);
+      expect(defined(history[i]).at.wallMs).toBe(expectedTime);
 
       // Ensure monotonic property
       if (i > 0) {
-        expect(history[i]!.at.monoMs).toBeGreaterThanOrEqual(history[i - 1]!.at.monoMs);
+        expect(defined(history[i]).at.monoMs).toBeGreaterThanOrEqual(defined(history[i - 1]).at.monoMs);
       }
     }
   });
@@ -95,14 +100,14 @@ describe("Atom Deterministic Time", () => {
     expect(timestamps).toHaveLength(3);
 
     // Verify monotonic time is always increasing
-    expect(timestamps[0]!.monoMs).toBe(1100); // 1000 + 100
-    expect(timestamps[1]!.monoMs).toBe(1100); // Same monotonic time after jump
-    expect(timestamps[2]!.monoMs).toBe(1300); // 1100 + 200
+    expect(defined(timestamps[0]).monoMs).toBe(1100); // 1000 + 100
+    expect(defined(timestamps[1]).monoMs).toBe(1100); // Same monotonic time after jump
+    expect(defined(timestamps[2]).monoMs).toBe(1300); // 1100 + 200
 
     // Verify wall time reflects the jump
-    expect(timestamps[0]!.wallMs).toBe(1100);
-    expect(timestamps[1]!.wallMs).toBe(5000); // Jumped
-    expect(timestamps[2]!.wallMs).toBe(5200); // 5000 + 200
+    expect(defined(timestamps[0]).wallMs).toBe(1100);
+    expect(defined(timestamps[1]).wallMs).toBe(5000); // Jumped
+    expect(defined(timestamps[2]).wallMs).toBe(5200); // 5000 + 200
   });
 
   it("should synchronize timestamps across multiple atoms with same clock", () => {
@@ -121,20 +126,20 @@ describe("Atom Deterministic Time", () => {
     atom2.reset("changed2");
 
     // Both should have same timestamp
-    expect(atom1Changes[0]!.at.wallMs).toBe(2000);
-    expect(atom2Changes[0]!.at.wallMs).toBe(2000);
-    expect(atom1Changes[0]!.at.monoMs).toBe(2000);
-    expect(atom2Changes[0]!.at.monoMs).toBe(2000);
+    expect(defined(atom1Changes[0]).at.wallMs).toBe(2000);
+    expect(defined(atom2Changes[0]).at.wallMs).toBe(2000);
+    expect(defined(atom1Changes[0]).at.monoMs).toBe(2000);
+    expect(defined(atom2Changes[0]).at.monoMs).toBe(2000);
 
     // Advance and make more changes
     clock.advanceBy(ms(150));
     atom1.reset("changed1-again");
     atom2.reset("changed2-again");
 
-    expect(atom1Changes[1]!.at.wallMs).toBe(2150);
-    expect(atom2Changes[1]!.at.wallMs).toBe(2150);
-    expect(atom1Changes[1]!.at.monoMs).toBe(2150);
-    expect(atom2Changes[1]!.at.monoMs).toBe(2150);
+    expect(defined(atom1Changes[1]).at.wallMs).toBe(2150);
+    expect(defined(atom2Changes[1]).at.wallMs).toBe(2150);
+    expect(defined(atom1Changes[1]).at.monoMs).toBe(2150);
+    expect(defined(atom2Changes[1]).at.monoMs).toBe(2150);
   });
 
   it("should preserve exact timing in history", () => {
@@ -159,9 +164,9 @@ describe("Atom Deterministic Time", () => {
     // Verify each entry has exactly the expected timestamp (skip initial at index 0)
     const expectedTimes = [100, 350, 400, 700];
     for (let i = 1; i < history.length; i++) {
-      expect(history[i]!.at.wallMs).toBe(expectedTimes[i - 1]);
-      expect(history[i]!.at.monoMs).toBe(expectedTimes[i - 1]);
-      expect(history[i]!.value).toBe(i);
+      expect(defined(history[i]).at.wallMs).toBe(expectedTimes[i - 1]);
+      expect(defined(history[i]).at.monoMs).toBe(expectedTimes[i - 1]);
+      expect(defined(history[i]).value).toBe(i);
     }
   });
 

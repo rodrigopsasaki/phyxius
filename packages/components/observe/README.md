@@ -1,8 +1,222 @@
-# @phyxiusjs/observe
+# Observe
 
-> Observability utilities for manipulating context data
+The accumulator. The piece that lets nested code contribute to a single contextual event without threading observability data through every function signature.
 
-Observe provides a convenient namespace with static functions for adding observability data to contexts created by `@phyxiusjs/context`. It's a thin layer that makes it easy to set, increment, and track data without directly manipulating context objects.
+---
+
+## What this really is
+
+Observe is how you write structured data into the current `@phyxiusjs/context` scope. It pairs with Context and Journal to deliver the "one event per unit of work" pattern: any code under a scope can add to the picture, and the outer handler appends one complete journal entry at the end.
+
+Every field you observe is **declared as a typed handle up front**. There is no loose string-keyed bag. The schema you declare becomes the sidecar type for the process — readable by humans, readable by LLMs, enforceable by the compiler.
+
+```ts
+import { observe } from "@phyxiusjs/observe";
+
+// Declare once. This IS the observability schema for the process.
+export const fields = observe.fields({
+  requestId: observe.field<string>(),
+  operation: observe.field<string>(),
+  attempts: observe.number(),
+  events: observe.array<{ type: string; at: number }>(),
+  errors: observe.array<{ message: string; code: string }>(),
+});
+```
+
+Use it inside any `context.scope`:
+
+```ts
+await context.scope(
+  async () => {
+    fields.operation.set("payment.charge"); // typed: must be string
+    fields.attempts.inc(); // typed: must be numeric field
+    fields.events.push({ type: "auth.start", at: clock.now().wallMs });
+
+    await chargeCard();
+
+    fields.attempts.inc();
+    fields.events.push({ type: "card.declined", at: clock.now().wallMs });
+  },
+  { initial: {} },
+);
+```
+
+At the end, get a typed snapshot for the journal:
+
+```ts
+const snap = observe.snapshot(fields);
+// snap: Partial<{
+//   requestId: string;
+//   operation: string;
+//   attempts: number;
+//   events: {type: string; at: number}[];
+//   errors: {message: string; code: string}[];
+// }>
+journal.append(snap);
+```
+
+---
+
+## Why typed-first
+
+The original design was a loose string-keyed bag — easy to add fields, no declaration overhead. That ergonomics ended at the moment the codebase started assuming shapes it never declared: `get("attempts") as number`, `push("events", x)` where `x` could be anything, silent type coercion when somebody `set("events", "oops")` before a nested scope pushed.
+
+Explicit schemas fix this at the source:
+
+- **No silent coercion.** `inc` on a non-numeric field throws. `push` on a non-array field throws. The loose API where "I'll just replace whatever was there" is gone.
+- **LLMs reading the code see the schema.** A re-imagined handler's `observe-fields.ts` is the single file that says "here is what this process observes." No grepping for `observe.set` call sites.
+- **Refactor-friendly.** Rename a field once in the schema; TS flags every call site.
+- **Discoverable.** `fields.` autocompletes to the full observable surface.
+- **Derivable shape.** `InferShape<typeof fields>` gives you the plain-object type — use it anywhere you need to consume the accumulated data downstream.
+
+The declaration cost (writing `observe.fields({...})` once per process) is a rounding error compared to what you get — and in an LLM-authored codebase, the "cost" is zero.
+
+---
+
+## Composition: Context + Observe + Journal
+
+The three primitives together are the mechanism behind "one event per unit of work":
+
+```ts
+import { context } from "@phyxiusjs/context";
+import { observe, type InferShape } from "@phyxiusjs/observe";
+import { Journal } from "@phyxiusjs/journal";
+
+const fields = observe.fields({
+  operation: observe.field<string>(),
+  attempts: observe.number(),
+  spans: observe.array<{ name: string; startedAt: number; durationMs: number }>(),
+});
+
+const journal = new Journal<Partial<InferShape<typeof fields>>>({ clock });
+
+async function runRequest() {
+  await context.scope(
+    async () => {
+      fields.operation.set("checkout");
+
+      // Nested operations push into the SAME accumulated trace —
+      // this is the core of why Context inherits by shallow copy.
+      await validateCart();
+      await reservePayment();
+      await fulfill();
+
+      journal.append(observe.snapshot(fields));
+    },
+    { initial: {} },
+  );
+}
+
+async function validateCart() {
+  const started = clock.now().wallMs;
+  // ... work ...
+  fields.spans.push({
+    name: "cart.validate",
+    startedAt: started,
+    durationMs: clock.now().wallMs - started,
+  });
+}
+```
+
+Any nested function can contribute. At the end, **one** journal entry contains the complete story.
+
+---
+
+## API
+
+### Declarations
+
+```ts
+observe.field<T>(): PendingValueField<T>     // .set / .get / .has / .delete
+observe.number(): PendingNumericField        // + .inc(amount?)
+observe.array<T>(): PendingArrayField<T>     // + .push(value)
+```
+
+Pending fields are declaration-only — they carry the type but not the key. The key comes from the property name when you resolve the schema.
+
+### Resolution
+
+```ts
+observe.fields(schema): ResolvedFields<typeof schema>
+```
+
+Takes a record of pending field declarations, returns a record of typed handles keyed by the same property names.
+
+### Snapshot
+
+```ts
+observe.snapshot(fields): Partial<InferShape<typeof fields>>
+```
+
+Reads the current scope's data and returns only the declared fields that have been set. Fully typed — each key has its declared type.
+
+### Shape inference
+
+```ts
+type Shape = InferShape<typeof fields>;
+```
+
+Derives the plain-object shape from a resolved fields bag. Useful for typing journals, downstream consumers, or cross-boundary payloads.
+
+### Handle API
+
+```ts
+interface ObserveField<T> {
+  readonly key: string;
+  set(value: T): void;
+  get(): T | undefined;
+  has(): boolean;
+  delete(): boolean;
+}
+
+interface NumericObserveField extends ObserveField<number> {
+  inc(amount?: number): void; // throws if existing value is non-numeric
+}
+
+interface ArrayObserveField<T> extends ObserveField<T[]> {
+  push(value: T): void; // throws if existing value is non-array
+}
+```
+
+---
+
+## Cross-scope accumulation
+
+`observe` respects Context's shallow inheritance (which is the point — it's how accumulation works):
+
+```ts
+const fields = observe.fields({
+  trace: observe.array<{ span: string; op: string }>(),
+});
+
+await context.scope(
+  async () => {
+    fields.trace.push({ span: "root", op: "login" });
+
+    await context.scope(async () => {
+      fields.trace.push({ span: "child", op: "validate" });
+    });
+
+    // Parent sees both. This is the mechanism, not a bug.
+    const t = fields.trace.get();
+    // [{ span: "root", op: "login" }, { span: "child", op: "validate" }]
+  },
+  { initial: { trace: [] } },
+);
+```
+
+When you want scope isolation (rare), pass `inherit: false` to the inner `context.scope(...)`.
+
+---
+
+## What observe does NOT do
+
+- **No durability.** Writing happens in-memory on the active scope's data. The snapshot is a value; shipping it to disk or a pipeline is the journal/drain layer's job.
+- **No runtime schema registry.** The schema lives in your code as a typed handle bag, not in a separate system. TypeScript is the only check.
+- **No cross-process propagation.** Everything is local to the current `AsyncLocalStorage` scope. Tracing across services needs transport-level propagation.
+- **No implicit fields.** If it's not declared, you can't observe it. Missing-by-design.
+
+---
 
 ## Installation
 
@@ -10,267 +224,13 @@ Observe provides a convenient namespace with static functions for adding observa
 npm install @phyxiusjs/observe @phyxiusjs/context
 ```
 
-## Quick Start
+---
 
-```typescript
-import { context } from "@phyxiusjs/context";
-import { observe } from "@phyxiusjs/observe";
+## What you get
 
-await context.scope(
-  async () => {
-    // Set operation metadata
-    observe.set("operation", "user.login");
-    observe.set("startTime", Date.now());
+- **Sidecar types.** Your schema file is the observability surface, readable by humans and LLMs, checked by the compiler.
+- **Accumulation that composes.** Nested scopes contribute to the same trace; the outer handler gets the complete story.
+- **Failure modes structurally impossible.** Can't set a string to a numeric field. Can't push to a non-array. Can't silently clobber data by forgetting the shape.
+- **Zero runtime overhead.** Thin wrappers over `ctx.data` reads and writes. The types live at compile time.
 
-    // Track events as they happen
-    observe.push("events", { type: "auth.attempt", method: "password" });
-
-    // Increment counters
-    observe.inc("attempts");
-
-    // Business logic here...
-    const user = await authenticateUser(credentials);
-
-    // Add more observability data
-    observe.set("userId", user.id);
-    observe.push("events", { type: "auth.success", userId: user.id });
-    observe.set("endTime", Date.now());
-  },
-  { initial: { requestId: "req-123" } },
-);
-```
-
-## API Reference
-
-### `observe.set(key, value)`
-
-Sets a key-value pair in the current context data.
-
-```typescript
-observe.set("operation", "user.login");
-observe.set("metadata", { source: "api", version: "v1" });
-observe.set("startTime", Date.now());
-```
-
-### `observe.get(key)`
-
-Gets a value from the current context data.
-
-```typescript
-const operation = observe.get("operation");
-const startTime = observe.get("startTime") as number;
-```
-
-### `observe.push(arrayName, value)`
-
-Pushes a value to an array in the context data. Creates the array if it doesn't exist.
-
-```typescript
-observe.push("events", { type: "database.query", table: "users" });
-observe.push("errors", new Error("Connection failed"));
-observe.push("metrics", { name: "response_time", value: 150 });
-```
-
-### `observe.inc(key, amount?)`
-
-Increments a numeric counter. Initializes to the increment amount if the key doesn't exist.
-
-```typescript
-observe.inc("attempts"); // Increment by 1
-observe.inc("retries", 3); // Increment by 3
-observe.inc("bytes_sent", 1024); // Track cumulative values
-```
-
-### `observe.has(key)`
-
-Checks if a key exists in the current context data.
-
-```typescript
-if (observe.has("userId")) {
-  // User is authenticated
-}
-
-if (!observe.has("startTime")) {
-  observe.set("startTime", Date.now());
-}
-```
-
-### `observe.delete(key)`
-
-Removes a key from the current context data.
-
-```typescript
-observe.delete("temporaryData");
-const wasDeleted = observe.delete("cache"); // returns boolean
-```
-
-### `observe.all()`
-
-Gets all context data as a readonly object.
-
-```typescript
-const allData = observe.all();
-console.log(allData.operation, allData.events);
-```
-
-## Usage Patterns
-
-### Request Tracking
-
-```typescript
-await context.scope(
-  async () => {
-    observe.set("operation", "api.processPayment");
-    observe.set("requestId", req.headers["x-request-id"]);
-    observe.set("userId", req.user?.id);
-    observe.set("startTime", Date.now());
-
-    try {
-      observe.push("events", { type: "payment.start" });
-      const result = await processPayment(req.body);
-
-      observe.push("events", { type: "payment.success", amount: result.amount });
-      observe.set("status", "success");
-
-      return result;
-    } catch (error) {
-      observe.push("events", { type: "payment.error", error: error.message });
-      observe.set("status", "error");
-      throw error;
-    } finally {
-      observe.set("endTime", Date.now());
-      observe.set("duration", observe.get("endTime") - observe.get("startTime"));
-    }
-  },
-  { initial: {} },
-);
-```
-
-### Performance Monitoring
-
-```typescript
-await context.scope(
-  async () => {
-    observe.set("operation", "database.bulkInsert");
-    observe.set("batchSize", records.length);
-
-    for (const record of records) {
-      try {
-        await insertRecord(record);
-        observe.inc("successCount");
-      } catch (error) {
-        observe.inc("errorCount");
-        observe.push("errors", { recordId: record.id, error: error.message });
-      }
-    }
-
-    const successRate = observe.get("successCount") / records.length;
-    observe.set("successRate", successRate);
-  },
-  { initial: { successCount: 0, errorCount: 0, errors: [] } },
-);
-```
-
-### Distributed Tracing
-
-```typescript
-await context.scope(
-  async () => {
-    observe.set("traceId", generateTraceId());
-    observe.set("operation", "order.process");
-    observe.push("spans", { name: "order.validate", start: Date.now() });
-
-    await validateOrder(order);
-    observe.push("spans", { name: "order.validate", end: Date.now() });
-
-    observe.push("spans", { name: "inventory.reserve", start: Date.now() });
-    await reserveInventory(order.items);
-    observe.push("spans", { name: "inventory.reserve", end: Date.now() });
-
-    observe.push("spans", { name: "payment.charge", start: Date.now() });
-    await chargePayment(order.payment);
-    observe.push("spans", { name: "payment.charge", end: Date.now() });
-  },
-  { initial: { spans: [] } },
-);
-```
-
-## Integration with Context
-
-Observe works directly with any context created by `@phyxiusjs/context`:
-
-```typescript
-// Typed contexts work perfectly
-interface RequestContext {
-  requestId: string;
-  operation?: string;
-  events?: Array<{ type: string; timestamp: number }>;
-  metrics?: Record<string, number>;
-}
-
-await context.scope<RequestContext>(
-  async () => {
-    // Type-safe context access
-    const ctx = context.get<RequestContext>();
-    console.log(ctx.data.requestId); // string
-
-    // observe namespace still works
-    observe.set("operation", "user.profile.update");
-    observe.push("events", { type: "profile.start", timestamp: Date.now() });
-  },
-  { initial: { requestId: "req-456" } },
-);
-```
-
-## Context Inheritance
-
-Observe respects context inheritance - child contexts inherit and can modify parent observability data:
-
-```typescript
-await context.scope(
-  async () => {
-    observe.set("service", "user-api");
-    observe.push("trace", { span: "root", operation: "getUser" });
-
-    await context.scope(async () => {
-      // Child can see and modify parent data
-      observe.push("trace", { span: "child", operation: "validateToken" });
-      observe.inc("validations");
-
-      console.log(observe.get("service")); // "user-api"
-    });
-
-    // Parent sees child modifications
-    const trace = observe.get("trace") as Array<{ span: string; operation: string }>;
-    console.log(trace.length); // 2 spans
-  },
-  { initial: {} },
-);
-```
-
-## Error Handling
-
-All observe functions throw an error if no active context is available:
-
-```typescript
-// This will throw "No active context available"
-observe.set("key", "value");
-
-// Always use within a context scope
-await context.scope(async () => {
-  observe.set("key", "value"); // Works fine
-});
-```
-
-## Why Observe?
-
-Observe is designed to be a **utility namespace** - it provides convenient methods for common observability patterns without being opinionated about how you structure your data. It's perfect for:
-
-- **Adding observability** to existing applications without refactoring
-- **Incremental adoption** - start simple, add more sophisticated patterns later
-- **Auto-completion** - IDE support for discovering available operations
-- **Consistency** - standard way to add observability data across teams
-
-## License
-
-MIT © [Rodrigo Sasaki](https://github.com/rodrigopsasaki)
+Observe is the small primitive that made the composition click. Once you have Context flowing data, Observe declaring the shape, and Journal holding the entries, you don't need middleware, handlers-as-classes, or framework ceremony. You just need to know what you want to observe — and now the compiler knows too.

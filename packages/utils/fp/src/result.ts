@@ -196,8 +196,14 @@ export function swap<T, E>(result: Result<T, E>): Result<E, T> {
   return isOk(result) ? err(result.value) : ok(result.error);
 }
 
-/** Convert Result to Option (Some for Ok, None for Err) */
-export function toOption<T, E>(result: Result<T, E>): T | undefined {
+/**
+ * Convert a Result to a plain `T | undefined`. Err maps to `undefined`.
+ *
+ * Note: this does NOT return an `Option<T>`. For that, import `toResult`
+ * from `@phyxiusjs/fp` and flip with `option.toResult` elsewhere, or
+ * convert via `fromNullable(toUndefined(result))`.
+ */
+export function toUndefined<T, E>(result: Result<T, E>): T | undefined {
   return isOk(result) ? result.value : undefined;
 }
 

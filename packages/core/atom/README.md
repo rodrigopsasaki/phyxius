@@ -1,87 +1,72 @@
 # Atom
 
-State that can't race. State with time. State you can trust.
-
-Every bug you've debugged that starts with "it works on my machine" traces back to race conditions in shared state. Two updates happening at the same time. Lost writes. Inconsistent reads.
-
-Atom fixes this. One value, atomic updates, complete history.
-
-Two implementations, one interface:
-
-- In-memory atom for single-process state management with atomic operations.
-- Controlled atom for tests, with deterministic timing and observable changes.
+Versioned, observable state. Timestamped by a Clock you control. A working `compareAndSet` for the moment that actually bites in Node: async retry.
 
 ---
 
-## Why shared state is broken
+## What this really is
 
-### Race conditions in async operations
+Clojure's atom was built for a preemptive-multithreaded runtime. Node isn't that. A synchronous block in JavaScript — including the entire body of `swap(updater)` — can't be interrupted by anything else. So "atomic against threads" isn't the pitch.
 
-```js
-// This is broken. You just don't see it yet.
-let counter = 0;
+The pitch is what's left once you take that for granted:
 
-// Two async operations
-Promise.resolve().then(() => counter++);
-Promise.resolve().then(() => counter++);
+- **Versioned state** — every commit bumps a monotonic number. Useful for ordering, for "did this change since I last looked?", and as the basis for compare-and-set.
+- **Structured change notifications** — `watch` gives you a typed `Change<T>` with old value, new value, version pair, and an `Instant` from the injected Clock. Subscribe, route into a Journal, build whatever audit trail you want.
+- **Clock-bound timestamps** — every snapshot and change carries an `Instant` (wall + mono). Integrate with `createControlledClock` and your state transitions become deterministic in tests.
+- **A working CAS for async retry** — the one case where "atomic" is the right word in Node: a read, an await, then a conditional write.
 
-// What's the final value? 1? 2? You don't know.
-setTimeout(() => console.log(counter), 0); // Mystery
-```
-
-### Lost updates during concurrent access
-
-```js
-// Classic check-then-act race condition
-let balance = 100;
-
-function withdraw(amount) {
-  if (balance >= amount) {
-    // Another withdrawal can happen here!
-    balance -= amount;
-    return true;
-  }
-  return false;
-}
-
-// Two concurrent withdrawals of $60
-withdraw(60); // true (balance now 40)
-withdraw(60); // true (balance now -20!)
-```
-
-Most solutions add locks, mutexes, channels - complexity to manage complexity. Atom takes a different approach: make the operation atomic, not the access.
+None of these are "race conditions." The word is rented from a runtime Node doesn't have. Drop it.
 
 ---
 
-## The Problem
+## The pattern that actually bites
 
-Shared mutable state is the source of all evil. Multiple writers, inconsistent reads, lost updates, race conditions that only happen in production when Jupiter aligns with Mars.
+Node's event loop is single-threaded, but it is not strictly ordered across async boundaries. The moment you `await`, state can change underneath you:
 
 ```ts
-// Business logic mixed with concurrency concerns
-class UserService {
-  private cache = new Map();
+// Two concurrent handleEvent calls for different events
+async function handleEvent(e) {
+  const current = state; // read
+  const processed = await process(e); // yield — state may now be stale
+  state = {
+    // write with stale `current`
+    count: current.count + 1,
+    events: [...current.events, processed],
+  };
+}
+```
 
-  async getUser(id: string) {
-    // Check cache
-    if (this.cache.has(id)) {
-      return this.cache.get(id);
-    }
+Event A lands, Event B lands, one write is lost. Classic.
 
-    // Race condition: two requests for same user might both fetch
-    const user = await this.database.getUser(id);
-    this.cache.set(id, user); // Lost update if cache was cleared
+Atom fixes this not by adding locks but by making the commit sync:
 
-    return user;
-  }
+```ts
+async function handleEvent(e) {
+  const processed = await process(e);
+  atoms.state.swap((s) => ({
+    count: s.count + 1,
+    events: [...s.events, processed],
+  }));
+}
+```
+
+The swap body is synchronous. Both events land. No CAS needed in this shape because the derivation happens inside the updater — the updater always sees the committed latest value.
+
+When the derivation genuinely depends on a value that was read before an await, use CAS:
+
+```ts
+const curr = atom.deref();
+const next = await derive(curr); // yields
+if (!atom.compareAndSet(curr, next)) {
+  // somebody else swapped during the await — retry or reconcile
 }
 ```
 
 ---
 
-## Atom helps you with this
+## Examples
 
-### Example 1 — Atomic updates without race conditions
+### Example 1 — Atomic commit across concurrent async flows
 
 ```ts
 import { createAtom } from "@phyxiusjs/atom";
@@ -90,132 +75,111 @@ import { createSystemClock } from "@phyxiusjs/clock";
 const clock = createSystemClock();
 const counter = createAtom(0, clock);
 
-// Two atomic updates
-counter.swap((n) => n + 1);
-counter.swap((n) => n + 1);
+await Promise.all(Array.from({ length: 100 }, () => Promise.resolve().then(() => counter.swap((n) => n + 1))));
 
-console.log(counter.deref()); // Always 2, never 1, never mystery
+console.log(counter.deref()); // exactly 100
 ```
 
-### Example 2 — Safe concurrent withdrawals
+### Example 2 — CAS for async read-modify-write
 
 ```ts
-const balance = createAtom(100, clock);
+async function safeWithdraw(amount: number): Promise<boolean> {
+  while (true) {
+    const curr = balance.deref();
+    if (curr < amount) return false;
 
-function withdraw(amount: number): boolean {
-  const current = balance.deref();
+    const next = curr - amount;
+    // await a side-effect like a risk check, audit log, etc.
+    await recordIntent(curr, next);
 
-  if (current >= amount) {
-    // Atomic compare-and-set prevents race conditions
-    return balance.compareAndSet(current, current - amount);
-  }
-
-  return false; // Insufficient funds
-}
-
-// Two concurrent withdrawals of $60
-const success1 = withdraw(60); // true (balance now 40)
-const success2 = withdraw(60); // false (balance still 40)
-```
-
-### Example 3 — Reactive state with change notifications
-
-```ts
-const temperature = createAtom(20, clock);
-
-// Subscribe to changes
-const unsubscribe = temperature.watch((change) => {
-  console.log(`Temperature: ${change.from}°C → ${change.to}°C`);
-
-  if (change.to > 30) {
-    console.log("🔥 Too hot! Turn on AC");
-  }
-});
-
-temperature.swap((t) => t + 15); // Temperature: 20°C → 35°C
-// 🔥 Too hot! Turn on AC
-```
-
-### Example 4 — Complete audit trail with history
-
-```ts
-const user = createAtom(
-  { name: "Alice", status: "offline" },
-  clock,
-  { historySize: 5 }, // Keep last 5 snapshots
-);
-
-user.swap((u) => ({ ...u, status: "online" }));
-user.swap((u) => ({ ...u, name: "Alice Smith" }));
-
-// Get complete history
-const history = user.history();
-history.forEach((snap) => {
-  console.log(`v${snap.version}: ${snap.value.name} - ${snap.value.status}`);
-});
-// v0: Alice - offline
-// v1: Alice - online
-// v2: Alice Smith - online
-```
-
----
-
-## Atom does NOT help you with this
-
-### Example 1 — Complex business logic
-
-```ts
-// Not Atom's job - use domain objects:
-class BankAccount {
-  constructor(private balance: Atom<number>) {}
-
-  withdraw(amount: number): boolean {
-    // Complex business rules go here
-    if (this.isOverdraftAllowed(amount)) {
-      return this.balance.compareAndSet(/* ... */);
-    }
-    return false;
+    if (balance.compareAndSet(curr, next)) return true;
+    // another flow won the commit; loop and try again
   }
 }
 ```
 
-### Example 2 — Network synchronization
+### Example 3 — Change stream as the observability channel
 
 ```ts
-// Not Atom's job - use distributed systems tools:
-const replica = createCRDT();
-replica.merge(otherReplica);
+const user = createAtom({ name: "Alice", status: "offline" }, clock);
+
+user.watch((change) => {
+  journal.append({
+    kind: "user.changed",
+    from: change.from,
+    to: change.to,
+    version: change.versionTo,
+    at: change.at,
+    cause: change.cause,
+  });
+});
+
+user.swap((u) => ({ ...u, status: "online" }), { cause: "ws.connect" });
 ```
 
-### Example 3 — UI framework integration
+### Example 4 — Deterministic audit in tests
 
 ```ts
-// Not Atom's job - use framework adapters:
-const [state, setState] = useAtom(myAtom); // React integration
+import { createControlledClock, ms } from "@phyxiusjs/clock";
+
+const clock = createControlledClock({ initialTime: 1_000 });
+const atom = createAtom(0, clock, { historySize: 10 });
+
+clock.advanceBy(ms(100));
+atom.swap((n) => n + 1);
+
+clock.advanceBy(ms(250));
+atom.swap((n) => n + 1);
+
+const history = atom.history();
+// [{ value: 0, version: 0, at: { monoMs: 1000, ... } },
+//  { value: 1, version: 1, at: { monoMs: 1100, ... } },
+//  { value: 2, version: 2, at: { monoMs: 1350, ... } }]
 ```
 
 ---
 
-## Why not just use locks?
+## Atom does NOT help you with
 
-Traditional locks solve race conditions but create new problems:
-
-- **Deadlock**: Process A waits for Process B, Process B waits for Process A.
-- **Starvation**: High-priority operations block low-priority ones indefinitely.
-- **Performance**: Lock contention becomes a bottleneck under high load.
-- **Complexity**: Correct lock ordering is hard to get right and maintain.
-
-Atoms use lock-free atomic operations that never block. Compare-and-swap provides consistency without the traditional problems of mutual exclusion.
+- **Complex business logic.** Atom holds state. Domain rules live in the code that calls `swap`.
+- **Distributed or cross-process state.** A single-process value. For replication, CRDTs, or shared memory across processes, use a different tool.
+- **UI reactivity.** Framework adapters wrap Atom; Atom doesn't know about React, Vue, or Solid.
+- **Persistent history.** The ring buffer is a debugging aid. For durable event history, route `watch` into `@phyxiusjs/journal`.
 
 ---
 
-## What this is not
+## API at a glance
 
-Atom is not a database, not a distributed system, not a UI state manager. It does not replace Redux, MobX, or Zustand. It does not handle network synchronization or persistence.
+```ts
+interface Atom<T> {
+  deref(): T;
+  version(): number;
+  snapshot(): AtomSnapshot<T>;
 
-Atom is focused on making single-process shared state safe and observable. It provides the foundation that other systems can build on.
+  swap(updater: (current: T) => T, opts?: { cause?: unknown }): T;
+  reset(next: T, opts?: { cause?: unknown }): T;
+  compareAndSet(expected: T, next: T, opts?: { cause?: unknown }): boolean;
 
-If you want distributed state, use a CRDT library. If you want UI reactivity, use a framework adapter. If you want atomic guarantees for your local state, use Atom.
+  watch(fn: (change: Change<T>) => void): () => void;
+
+  history(): readonly AtomSnapshot<T>[];
+  clearHistory(): void;
+}
+```
+
+`compareAndSet` uses the configured `equals` (defaults to `Object.is`). It prevents the classic "my snapshot is stale across an await" case. It does NOT protect against value-ABA if a concurrent flow round-trips through the expected value — in Clojure-style usage with immutable domain records this is rarely a concern, but if you hold primitives you should be aware of it.
+
+### Options
+
+```ts
+interface AtomOptions<T> {
+  equals?: (a: T, b: T) => boolean;
+  historySize?: number; // default 0 — history() returns [] unless opted in
+  emit?: (event: AtomEvent) => void;
+}
+```
+
+`emit` receives out-of-band events — currently only `atom:subscriber:error` when a watch callback throws. Without `emit`, subscriber errors are silently swallowed. The library does not write to stderr on your behalf.
 
 ---
 
@@ -229,8 +193,9 @@ npm install @phyxiusjs/atom @phyxiusjs/clock
 
 ## What you get
 
-- State that can't race: atomic operations prevent lost updates and inconsistent reads.
-- State with time: every change is versioned and timestamped for perfect audit trails.
-- State you can trust: compare-and-set operations and configurable equality prevent bugs.
+- State whose changes are **values** you can inspect, store, and replay.
+- Commits that are **atomic within a sync block** — the property Node's runtime gives you for free, exposed as a first-class primitive.
+- A **CAS** that earns its keep in the one place Node has real ordering hazards: across `await`.
+- **Deterministic timestamps** when paired with a controlled Clock.
 
-Atom does not fix concurrency. It gives you atomic operations and observable changes to make concurrency explicit and safe. Everything else builds on that foundation.
+Atom is a small primitive. It does one thing: hold a value that changes in a disciplined, observable way. Bigger things — audit trails, distributed consensus, UI binding — compose on top.

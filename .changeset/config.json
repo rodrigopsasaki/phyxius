@@ -7,5 +7,5 @@
   "access": "public",
   "baseBranch": "main",
   "updateInternalDependencies": "patch",
-  "ignore": ["@phyxiusjs/handler", "@phyxiusjs/telemetry", "@phyxiusjs/http"]
+  "ignore": []
 }

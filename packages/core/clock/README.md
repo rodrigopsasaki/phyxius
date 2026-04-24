@@ -111,6 +111,40 @@ await clock.deadline({ wallMs: Date.now() + 1000 });
 // See drift and event logs
 ```
 
+### Example 5 — Bounding an operation with a budget
+
+```ts
+// `timeout` is NOT a sleep. It returns a Budget — a value that carries
+// a deadline and an AbortSignal. You pass it down; operations decide
+// whether to consult it.
+
+const budget = clock.timeout(ms(5_000));
+
+// AbortSignal-aware APIs work out of the box
+const response = await fetch(url, { signal: budget.signal });
+
+// Check inside loops
+while (!budget.expired()) {
+  const next = await pullOne();
+  if (!next) break;
+  await process(next);
+}
+
+// Remaining time can drive sub-budgets
+await innerCall(clock.timeout(budget.remaining()));
+
+// Release the underlying timer when you finish early
+budget.release();
+```
+
+The distinction matters:
+
+- `sleep(ms)` is first-person — "I wait." Use for backoff, pacing, explicit delay.
+- `timeout(ms)` is third-person — "here is a ceiling for something else." Use when time is a bound on a downstream operation, not the operation itself.
+
+A Budget's signal is read-only: early cancellation composes by combining with
+your own AbortController via `AbortSignal.any([budget.signal, ownSignal])`.
+
 ---
 
 ## Clock does NOT help you with this

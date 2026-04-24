@@ -1,445 +1,326 @@
-import { describe, it, expect, beforeEach } from "vitest";
-import { createServer, request } from "node:http";
-import type { IncomingMessage, ServerResponse } from "node:http";
-import { createSystemClock } from "@phyxiusjs/clock";
+import { describe, expect, it } from "vitest";
+import { z } from "zod";
+
+import { createControlledClock, ms } from "@phyxiusjs/clock";
 import { Journal } from "@phyxiusjs/journal";
-import { createHandler, defineHandler, type HandlerEvent } from "@phyxiusjs/handler";
+import { observe } from "@phyxiusjs/observe";
+import {
+  cb,
+  defineHandler,
+  retry,
+  spawn,
+  type HandlerEvent,
+  type HandlerRuntime,
+  type RunningHandler,
+} from "@phyxiusjs/handler";
+
 import { createHttpAdapter } from "../src/index.js";
+import type { HttpRequest, HttpRoute } from "../src/types.js";
 
-// ── Helpers ──────────────────────────────────────────────────────────────────
+// ── Test helpers ────────────────────────────────────────────────────────────
 
-function echoProcessor(input: { message: string }): Promise<{ echo: string }> {
-  return Promise.resolve({ echo: input.message });
+function setup() {
+  const clock = createControlledClock({ initialTime: 0 });
+  const journal = new Journal<HandlerEvent>({ clock, maxEntries: 100 });
+  const runtime: HandlerRuntime = { clock, journal };
+  return { clock, journal, runtime };
 }
 
-function failingProcessor(_input: { message: string }): Promise<{ result: string }> {
-  return Promise.reject(new Error("Deliberate test failure"));
+const orderFields = observe.fields({
+  customerId: observe.field<string>(),
+  amount: observe.number(),
+});
+
+const orderSpec = defineHandler({
+  name: "order.process",
+  input: z.object({ customerId: z.string(), amount: z.number().positive() }),
+  output: z.object({ chargeId: z.string(), amount: z.number() }),
+  fields: orderFields,
+  timeout: ms(1000),
+  concurrency: { max: 4, queueSize: 10, backpressure: "reject" },
+  retry: retry.none(),
+  circuitBreaker: cb.none(),
+  run: async ({ customerId, amount }) => {
+    orderFields.customerId.set(customerId);
+    orderFields.amount.set(amount);
+    return { chargeId: `charge_${customerId}`, amount };
+  },
+});
+
+const echoFields = observe.fields({ echoed: observe.field<string>() });
+
+const echoSpec = defineHandler({
+  name: "echo",
+  input: z.object({ value: z.string() }),
+  output: z.object({ value: z.string() }),
+  fields: echoFields,
+  timeout: ms(1000),
+  concurrency: { max: 2, queueSize: 5, backpressure: "reject" },
+  retry: retry.none(),
+  circuitBreaker: cb.none(),
+  run: async ({ value }) => ({ value }),
+});
+
+function req(partial: Partial<HttpRequest> & { method: HttpRequest["method"]; path: string }): HttpRequest {
+  return {
+    params: {},
+    query: {},
+    headers: {},
+    body: undefined,
+    ...partial,
+  };
 }
 
-function slowProcessor(input: { x: number }): Promise<{ x: number }> {
-  return new Promise((resolve) => setTimeout(() => resolve({ x: input.x }), 300));
-}
+// ── Tests ───────────────────────────────────────────────────────────────────
 
-async function makeRequest(
-  adapter: { handle(req: IncomingMessage, res: ServerResponse): Promise<void> },
-  method: string,
-  path: string,
-  body?: unknown,
-  headers: Record<string, string> = {},
-): Promise<{ status: number; body: unknown; headers: Record<string, string> }> {
-  return new Promise((resolve, reject) => {
-    const server = createServer(async (req, res) => {
-      await adapter.handle(req, res);
+describe("createHttpAdapter", () => {
+  it("routes a POST to the handler and encodes the Ok result", async () => {
+    const { runtime, journal } = setup();
+    const handler = await spawn(orderSpec, runtime);
+
+    const route: HttpRoute<{ customerId: string; amount: number }, { chargeId: string; amount: number }> = {
+      method: "POST",
+      path: "/orders",
+      handler,
+      decode: (r) => r.body as { customerId: string; amount: number },
+    };
+
+    const adapter = createHttpAdapter({ routes: [route as HttpRoute<unknown, unknown>] });
+
+    const response = await adapter.handle(
+      req({
+        method: "POST",
+        path: "/orders",
+        body: { customerId: "alice", amount: 99.99 },
+        headers: { "content-type": "application/json", "x-correlation-id": "req-abc" },
+      }),
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.body).toEqual({ chargeId: "charge_alice", amount: 99.99 });
+
+    // Journal entry was produced with the correlation ID flowing through.
+    const {entries} = journal.getSnapshot();
+    expect(entries).toHaveLength(1);
+    expect(entries[0]?.data.correlationId).toBe("req-abc");
+    expect(entries[0]?.data.source).toBe("http");
+    expect(entries[0]?.data.observed).toMatchObject({ customerId: "alice", amount: 99.99 });
+
+    await handler.stop();
+  });
+
+  it("extracts path params and passes them via params", async () => {
+    const { runtime } = setup();
+    const handler = await spawn(echoSpec, runtime);
+
+    let seenParams: Readonly<Record<string, string>> = {};
+
+    const route: HttpRoute<{ value: string }, { value: string }> = {
+      method: "GET",
+      path: "/echo/:value",
+      handler,
+      decode: (r) => {
+        seenParams = r.params;
+        return { value: r.params["value"] ?? "" };
+      },
+    };
+
+    const adapter = createHttpAdapter({ routes: [route as HttpRoute<unknown, unknown>] });
+
+    const response = await adapter.handle(req({ method: "GET", path: "/echo/hello%20world" }));
+
+    expect(response.status).toBe(200);
+    expect(response.body).toEqual({ value: "hello world" });
+    expect(seenParams["value"]).toBe("hello world");
+
+    await handler.stop();
+  });
+
+  it("returns 404 when no route matches", async () => {
+    const adapter = createHttpAdapter({ routes: [] });
+    const response = await adapter.handle(req({ method: "GET", path: "/nope" }));
+    expect(response.status).toBe(404);
+    expect(response.body).toEqual({ error: "NotFound" });
+  });
+
+  it("returns 405 when the path matches but the method doesn't", async () => {
+    const { runtime } = setup();
+    const handler = await spawn(echoSpec, runtime);
+
+    const adapter = createHttpAdapter({
+      routes: [
+        {
+          method: "GET",
+          path: "/echo/:value",
+          handler: handler as RunningHandler<unknown, unknown>,
+          decode: (r) => ({ value: (r.params["value"] as string) ?? "" }),
+        },
+      ],
     });
 
-    server.listen(0, () => {
-      const address = server.address();
-      if (!address || typeof address === "string") {
-        reject(new Error("Unexpected server address type"));
-        return;
-      }
+    const response = await adapter.handle(req({ method: "POST", path: "/echo/hi" }));
+    expect(response.status).toBe(405);
 
-      const { port } = address;
-      const bodyStr = body !== undefined ? JSON.stringify(body) : undefined;
+    await handler.stop();
+  });
 
-      const reqHeaders: Record<string, string> = {
-        "content-type": "application/json",
-        ...headers,
-      };
-      if (bodyStr) {
-        reqHeaders["content-length"] = String(Buffer.byteLength(bodyStr));
-      }
+  it("applies the default encoder for input validation failures (400)", async () => {
+    const { runtime } = setup();
+    const handler = await spawn(orderSpec, runtime);
 
-      const req2 = request(
+    const adapter = createHttpAdapter({
+      routes: [
         {
-          hostname: "localhost",
-          port,
-          path,
-          method,
-          headers: reqHeaders,
+          method: "POST",
+          path: "/orders",
+          handler: handler as RunningHandler<unknown, unknown>,
+          decode: (r) => r.body,
         },
-        (res2: IncomingMessage) => {
-          const chunks: Buffer[] = [];
-          res2.on("data", (c: Buffer) => chunks.push(c));
-          res2.on("end", () => {
-            server.close();
-            const raw = Buffer.concat(chunks).toString("utf8");
-            let parsedBody: unknown;
-            try {
-              parsedBody = JSON.parse(raw);
-            } catch {
-              parsedBody = raw;
+      ],
+    });
+
+    // amount: -1 violates .positive() → input validation error.
+    const response = await adapter.handle(
+      req({ method: "POST", path: "/orders", body: { customerId: "alice", amount: -1 } }),
+    );
+    expect(response.status).toBe(400);
+    expect(response.body).toMatchObject({ error: "ValidationError" });
+
+    await handler.stop();
+  });
+
+  it("lets the route override encode", async () => {
+    const { runtime } = setup();
+    const handler = await spawn(echoSpec, runtime);
+
+    const adapter = createHttpAdapter({
+      routes: [
+        {
+          method: "GET",
+          path: "/echo/:value",
+          handler: handler as RunningHandler<unknown, unknown>,
+          decode: (r) => ({ value: (r.params["value"] as string) ?? "" }),
+          encode: (result) => {
+            if (result._tag === "Ok") {
+              return {
+                status: 201,
+                headers: { "x-custom": "yes" },
+                body: { wrapped: result.value },
+              };
             }
-            const responseHeaders: Record<string, string> = {};
-            for (const [k, v] of Object.entries(res2.headers)) {
-              if (v !== undefined) {
-                responseHeaders[k] = Array.isArray(v) ? v.join(", ") : v;
-              }
-            }
-            resolve({ status: res2.statusCode ?? 0, body: parsedBody, headers: responseHeaders });
-          });
+            return { status: 500, body: { error: "x" } };
+          },
         },
-      );
-
-      req2.on("error", (e: Error) => {
-        server.close();
-        reject(e);
-      });
-
-      if (bodyStr) {
-        req2.write(bodyStr);
-      }
-      req2.end();
+      ],
     });
-  });
-}
 
-// ── Tests ────────────────────────────────────────────────────────────────────
+    const response = await adapter.handle(req({ method: "GET", path: "/echo/hey" }));
+    expect(response.status).toBe(201);
+    expect(response.headers?.["x-custom"]).toBe("yes");
+    expect(response.body).toEqual({ wrapped: { value: "hey" } });
 
-describe("HTTP Adapter", () => {
-  let clock: ReturnType<typeof createSystemClock>;
-  let journal: Journal<HandlerEvent>;
-
-  beforeEach(() => {
-    clock = createSystemClock();
-    journal = new Journal({ clock });
+    await handler.stop();
   });
 
-  describe("route matching", () => {
-    it("routes to the correct handler based on method and path", async () => {
-      const handler = createHandler(
-        defineHandler({
-          name: "echo",
-          processor: echoProcessor,
-          concurrency: { max: 5, backpressure: "reject", queueSize: 10 },
-        }),
-        { clock, journal },
-      );
+  it("falls back to onInternalError when decode throws", async () => {
+    const { runtime } = setup();
+    const handler = await spawn(echoSpec, runtime);
 
-      await handler.start();
-
-      const adapter = createHttpAdapter({
-        routes: [
-          {
-            method: "POST",
-            path: "/echo",
-            handler,
-            transform: (_params, body) => {
-              const b = body as { message: string };
-              return { message: b.message };
-            },
-          },
-        ],
-      });
-
-      const response = await makeRequest(adapter, "POST", "/echo", { message: "hello" });
-      expect(response.status).toBe(200);
-      expect((response.body as { echo: string }).echo).toBe("hello");
-
-      await handler.stop();
-    });
-
-    it("returns 404 for unmatched routes", async () => {
-      const handler = createHandler(
-        defineHandler({
-          name: "echo",
-          processor: echoProcessor,
-          concurrency: { max: 5, backpressure: "reject", queueSize: 10 },
-        }),
-        { clock, journal },
-      );
-
-      await handler.start();
-
-      const adapter = createHttpAdapter({
-        routes: [
-          {
-            method: "GET",
-            path: "/known",
-            handler,
-            transform: () => ({ message: "test" }),
-          },
-        ],
-      });
-
-      const response = await makeRequest(adapter, "GET", "/unknown");
-      expect(response.status).toBe(404);
-
-      await handler.stop();
-    });
-
-    it("returns 405 when path matches but method does not", async () => {
-      const handler = createHandler(
-        defineHandler({
-          name: "echo",
-          processor: echoProcessor,
-          concurrency: { max: 5, backpressure: "reject", queueSize: 10 },
-        }),
-        { clock, journal },
-      );
-
-      await handler.start();
-
-      const adapter = createHttpAdapter({
-        routes: [
-          {
-            method: "POST",
-            path: "/data",
-            handler,
-            transform: () => ({ message: "test" }),
-          },
-        ],
-      });
-
-      const response = await makeRequest(adapter, "GET", "/data");
-      expect(response.status).toBe(405);
-
-      await handler.stop();
-    });
-
-    it("static route wins over parameterized when path matches both", async () => {
-      const staticHandler = createHandler(
-        defineHandler({
-          name: "static",
-          processor: echoProcessor,
-          concurrency: { max: 5, backpressure: "reject", queueSize: 10 },
-        }),
-        { clock, journal },
-      );
-
-      const paramHandler = createHandler(
-        defineHandler({
-          name: "param",
-          processor: echoProcessor,
-          concurrency: { max: 5, backpressure: "reject", queueSize: 10 },
-        }),
-        { clock, journal },
-      );
-
-      await staticHandler.start();
-      await paramHandler.start();
-
-      const adapter = createHttpAdapter({
-        routes: [
-          {
-            method: "GET",
-            path: "/users/:id",
-            handler: paramHandler,
-            transform: (params) => ({ message: `user:${params["id"]}` }),
-          },
-          {
-            method: "GET",
-            path: "/users/me",
-            handler: staticHandler,
-            transform: () => ({ message: "static-me" }),
-          },
-        ],
-      });
-
-      const response = await makeRequest(adapter, "GET", "/users/me");
-      expect(response.status).toBe(200);
-      expect((response.body as { echo: string }).echo).toBe("static-me");
-
-      await staticHandler.stop();
-      await paramHandler.stop();
-    });
-
-    it("extracts path params and passes them to transform", async () => {
-      const handler = createHandler(
-        defineHandler({
-          name: "param-echo",
-          processor: echoProcessor,
-          concurrency: { max: 5, backpressure: "reject", queueSize: 10 },
-        }),
-        { clock, journal },
-      );
-
-      await handler.start();
-
-      const adapter = createHttpAdapter({
-        routes: [
-          {
-            method: "GET",
-            path: "/greet/:name",
-            handler,
-            transform: (params) => ({ message: `Hello, ${params["name"]}!` }),
-          },
-        ],
-      });
-
-      const response = await makeRequest(adapter, "GET", "/greet/Alice");
-      expect(response.status).toBe(200);
-      expect((response.body as { echo: string }).echo).toBe("Hello, Alice!");
-
-      await handler.stop();
-    });
-  });
-
-  describe("response mapping", () => {
-    it("returns 500 when handler execution fails", async () => {
-      const handler = createHandler(
-        defineHandler({
-          name: "failing",
-          processor: failingProcessor,
-          concurrency: { max: 5, backpressure: "reject", queueSize: 10 },
-        }),
-        { clock, journal },
-      );
-
-      await handler.start();
-
-      const adapter = createHttpAdapter({
-        routes: [
-          {
-            method: "POST",
-            path: "/fail",
-            handler,
-            transform: (_params, body) => {
-              const b = body as { message: string };
-              return { message: b.message };
-            },
-          },
-        ],
-      });
-
-      const response = await makeRequest(adapter, "POST", "/fail", { message: "break" });
-      expect(response.status).toBe(500);
-
-      await handler.stop();
-    });
-
-    it("returns 503 via custom on503 handler when backpressure triggers", async () => {
-      const handler = createHandler(
-        defineHandler({
-          name: "slow",
-          processor: slowProcessor,
-          concurrency: { max: 1, backpressure: "reject", queueSize: 0 },
-        }),
-        { clock, journal },
-      );
-
-      await handler.start();
-
-      const adapter = createHttpAdapter({
-        routes: [
-          {
-            method: "GET",
-            path: "/slow",
-            handler: handler as unknown as import("@phyxiusjs/handler").Handler<unknown, unknown>,
-            transform: () => ({ x: 1 }),
-          },
-        ],
-        on503: () => ({
-          status: 503,
-          headers: { "content-type": "application/json", "retry-after": "1" },
-          body: { error: "Overloaded" },
-        }),
-      });
-
-      const first = makeRequest(adapter, "GET", "/slow");
-      await new Promise((r) => setTimeout(r, 20));
-      const second = makeRequest(adapter, "GET", "/slow");
-
-      const [r1, r2] = await Promise.all([first, second]);
-
-      const statuses = [r1.status, r2.status].sort();
-      expect(statuses).toContain(200);
-      expect(statuses).toContain(503);
-
-      await handler.stop();
-    });
-
-    it("sets x-correlation-id on successful responses", async () => {
-      const handler = createHandler(
-        defineHandler({
-          name: "corr",
-          processor: echoProcessor,
-          concurrency: { max: 5, backpressure: "reject", queueSize: 10 },
-        }),
-        { clock, journal },
-      );
-
-      await handler.start();
-
-      const adapter = createHttpAdapter({
-        routes: [
-          {
-            method: "POST",
-            path: "/corr",
-            handler,
-            transform: (_p, body) => ({ message: (body as { message: string }).message }),
-          },
-        ],
-      });
-
-      const response = await makeRequest(
-        adapter,
-        "POST",
-        "/corr",
-        { message: "hi" },
+    const adapter = createHttpAdapter({
+      routes: [
         {
-          "x-correlation-id": "my-corr-id",
+          method: "POST",
+          path: "/boom",
+          handler: handler as RunningHandler<unknown, unknown>,
+          decode: () => {
+            throw new Error("decode exploded");
+          },
         },
-      );
-      expect(response.status).toBe(200);
-      expect(response.headers["x-correlation-id"]).toBe("my-corr-id");
-
-      await handler.stop();
+      ],
+      onInternalError: (error, _req) => ({
+        status: 500,
+        headers: { "content-type": "application/json" },
+        body: { error: "InternalError", message: (error as Error).message },
+      }),
     });
+
+    const response = await adapter.handle(req({ method: "POST", path: "/boom", body: {} }));
+    expect(response.status).toBe(500);
+    expect(response.body).toEqual({ error: "InternalError", message: "decode exploded" });
+
+    await handler.stop();
   });
 
-  describe("integration smoke test", () => {
-    it("HTTP request → Handler → Journal entry with correct source and correlationId", async () => {
-      const handler = createHandler(
-        defineHandler({
-          name: "http.echo",
-          processor: echoProcessor,
-          concurrency: { max: 5, backpressure: "reject", queueSize: 10 },
-        }),
-        { clock, journal },
-      );
+  it("picks up a custom correlation-id header when configured", async () => {
+    const { runtime, journal } = setup();
+    const handler = await spawn(echoSpec, runtime);
 
-      await handler.start();
-
-      const adapter = createHttpAdapter({
-        routes: [
-          {
-            method: "POST",
-            path: "/smoke",
-            handler,
-            transform: (_p, body) => ({ message: (body as { message: string }).message }),
-          },
-        ],
-      });
-
-      await makeRequest(
-        adapter,
-        "POST",
-        "/smoke",
-        { message: "integration" },
+    const adapter = createHttpAdapter({
+      routes: [
         {
-          "x-correlation-id": "smoke-test-id",
+          method: "POST",
+          path: "/echo",
+          handler: handler as RunningHandler<unknown, unknown>,
+          decode: (r) => r.body,
         },
-      );
-
-      const snapshot = journal.getSnapshot();
-      expect(snapshot.totalCount).toBe(1);
-
-      const event = snapshot.entries[0]?.data;
-      expect(event).toBeDefined();
-      if (!event) return;
-
-      expect(event.source).toBe("http");
-      expect(event.correlationId).toBe("smoke-test-id");
-      expect(event.outcome).toBe("success");
-      expect(event.handlerName).toBe("http.echo");
-      expect(event.durationMs).toBeGreaterThanOrEqual(0);
-
-      // Verify HTTP metadata flows through to observed data
-      expect(event.observed["method"]).toBe("POST");
-      expect(event.observed["path"]).toBe("/smoke");
-
-      await handler.stop();
+      ],
+      correlationIdHeaders: ["x-trace-id"],
     });
+
+    await adapter.handle(
+      req({
+        method: "POST",
+        path: "/echo",
+        headers: { "x-trace-id": "trace-123", "x-correlation-id": "ignored" },
+        body: { value: "hi" },
+      }),
+    );
+
+    const {entries} = journal.getSnapshot();
+    expect(entries[0]?.data.correlationId).toBe("trace-123");
+
+    await handler.stop();
+  });
+
+  it("routes to the more-specific path when overlapping routes exist", async () => {
+    const { runtime } = setup();
+    const handler = await spawn(echoSpec, runtime);
+
+    const calls: string[] = [];
+
+    const adapter = createHttpAdapter({
+      routes: [
+        {
+          method: "GET",
+          path: "/items/:id",
+          handler: handler as RunningHandler<unknown, unknown>,
+          decode: (r) => {
+            calls.push(`by-id:${r.params["id"]}`);
+            return { value: `id:${r.params["id"]}` };
+          },
+        },
+        {
+          method: "GET",
+          path: "/items/new",
+          handler: handler as RunningHandler<unknown, unknown>,
+          decode: () => {
+            calls.push("new");
+            return { value: "new" };
+          },
+        },
+      ],
+    });
+
+    const newResp = await adapter.handle(req({ method: "GET", path: "/items/new" }));
+    expect(newResp.status).toBe(200);
+    expect(newResp.body).toEqual({ value: "new" });
+
+    const byIdResp = await adapter.handle(req({ method: "GET", path: "/items/42" }));
+    expect(byIdResp.status).toBe(200);
+    expect(byIdResp.body).toEqual({ value: "id:42" });
+
+    expect(calls).toEqual(["new", "by-id:42"]);
+
+    await handler.stop();
   });
 });

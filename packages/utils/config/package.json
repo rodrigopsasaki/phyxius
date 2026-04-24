@@ -1,6 +1,6 @@
 {
   "name": "@phyxiusjs/config",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "type": "module",
   "description": "Type-safe configuration management with hot reloading, multiple sources, and observability",
   "main": "./dist/index.js",
@@ -50,7 +50,8 @@
     "@phyxiusjs/atom": "workspace:*",
     "@phyxiusjs/clock": "workspace:*",
     "@phyxiusjs/fp": "workspace:*",
-    "@phyxiusjs/journal": "workspace:*"
+    "@phyxiusjs/journal": "workspace:*",
+    "@phyxiusjs/temporal": "workspace:*"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",

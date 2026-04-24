@@ -70,6 +70,18 @@ describe("Pattern Matching", () => {
           .run();
       }).toThrow("Non-exhaustive pattern match");
     });
+
+    it("should treat undefined as a valid handler result (not 'miss')", () => {
+      // Regression: older impl used `undefined` as the miss sentinel, which
+      // swallowed a legitimately-undefined handler result and let later
+      // patterns hijack the match.
+      const result = match<number, undefined | string>(1)
+        .when(1, () => undefined)
+        .when(2, () => "two")
+        .otherwise(() => "other");
+
+      expect(result).toBeUndefined();
+    });
   });
 
   describe("matchValue", () => {

@@ -45,7 +45,7 @@ export {
   fromNullable,
   tryCatch,
   fromPromise,
-  toOption,
+  toUndefined as resultToUndefined,
   // Advanced
   bimap,
   tap,
@@ -92,7 +92,6 @@ export {
   all as allOptions,
   compact,
   any as anyOption,
-  partition as partitionOptions,
   // Utilities
   filter as filterOption,
   tap as tapOption,
@@ -154,12 +153,14 @@ export {
   converge,
   fork,
   join,
-  composeK,
+  chainNullable,
   either,
+  tryOrElse,
   both,
   all as allFns,
   any as anyFn,
 } from "./combinators.js";
+export type { MemoizeOptions } from "./combinators.js";
 
 // Validation combinators
 export type { ValidationError, ValidationResult, Validator, PredicateValidator } from "./validation.js";

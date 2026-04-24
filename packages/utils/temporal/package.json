@@ -1,6 +1,6 @@
 {
   "name": "@phyxiusjs/temporal",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Temporal utilities for controlling function execution timing",
   "type": "module",
   "main": "./dist/index.js",

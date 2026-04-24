@@ -30,7 +30,7 @@ import {
   partition,
   zip,
   zipWith,
-  toOption,
+  toUndefined,
 } from "../src/result.js";
 
 describe("Result", () => {
@@ -266,14 +266,14 @@ describe("Result", () => {
       expect(unwrapErr(result)).toBe("error");
     });
 
-    it("toOption should convert Ok to Some", () => {
-      const option = toOption(ok(42));
-      expect(option).toBe(42);
+    it("toUndefined should return the value from Ok", () => {
+      const value = toUndefined(ok(42));
+      expect(value).toBe(42);
     });
 
-    it("toOption should convert Err to None", () => {
-      const option = toOption(err("error"));
-      expect(option).toBeUndefined();
+    it("toUndefined should return undefined from Err", () => {
+      const value = toUndefined(err("error"));
+      expect(value).toBeUndefined();
     });
   });
 

@@ -1,4 +1,4 @@
-import type { Clock, EmitFn, Instant, TimerHandle, Millis, DeadlineTarget } from "./types.js";
+import type { Budget, Clock, EmitFn, Instant, TimerHandle, Millis, DeadlineTarget } from "./types.js";
 
 type PendingTimeout = {
   kind: "timeout";
@@ -73,8 +73,57 @@ class ControlledClock implements Clock {
     });
   }
 
-  async timeout(ms: Millis): Promise<void> {
-    return this.sleep(ms);
+  timeout(ms: Millis): Budget {
+    const start = this.now();
+    const deadline: Instant = {
+      wallMs: start.wallMs + ms,
+      monoMs: start.monoMs + ms,
+    };
+    const controller = new AbortController();
+
+    this.emit?.({
+      type: "time:timeout:start",
+      durationMs: ms,
+      deadline,
+      at: start,
+    });
+
+    const timer: PendingTimeout = {
+      kind: "timeout",
+      fireAt: this.monoMs + ms,
+      fn: () => {
+        controller.abort();
+        this.emit?.({
+          type: "time:timeout:expire",
+          deadline,
+          at: this.now(),
+        });
+      },
+      cancelled: false,
+    };
+    this.timers.push(timer);
+
+    // eslint-disable-next-line @typescript-eslint/no-this-alias -- captured for use in returned method closures
+    const clock = this;
+    return {
+      deadline,
+      signal: controller.signal,
+      remaining(): Millis {
+        const r = deadline.monoMs - clock.monoMs;
+        return (r < 0 ? 0 : r) as Millis;
+      },
+      expired(): boolean {
+        return controller.signal.aborted;
+      },
+      release(): void {
+        timer.cancelled = true;
+        clock.emit?.({
+          type: "time:timeout:release",
+          deadline,
+          at: clock.now(),
+        });
+      },
+    };
   }
 
   async deadline(target: DeadlineTarget): Promise<void> {

@@ -12,14 +12,28 @@ export interface JournalEntry<T> {
   data: T;
 }
 
-// Backpressure policies
-export type OverflowPolicy = "none" | "bounded:drop_oldest" | "bounded:error";
+/**
+ * What happens when the journal is full. Every journal is bounded — there is no
+ * unbounded mode. A journal that can grow without limit is an OOM waiting to
+ * happen, and "we'll decide later what to drop" almost always becomes "production
+ * decided by crashing."
+ *
+ *  - `"drop_oldest"` — evict the oldest entry to make room for the new one.
+ *    The eviction fires a `journal:overflow` event. Use this when recent events
+ *    matter more than old ones (most monitoring/debugging workloads).
+ *  - `"error"` — throw `JournalOverflowError` on append when full. Use this when
+ *    losing an event silently is unacceptable and the caller must handle the
+ *    pressure (e.g. back-pressuring a producer).
+ */
+export type OverflowPolicy = "drop_oldest" | "error";
 
 export interface JournalOptions<T> {
   clock: Clock;
   idGenerator?: IdGenerator;
   emit?: EmitFn;
+  /** Cap on stored entries. Defaults to 10_000. Must be > 0 if provided. */
   maxEntries?: number;
+  /** What to do when the cap is reached. Defaults to `"drop_oldest"`. */
   overflow?: OverflowPolicy;
   serializer?: Serializer<T>;
 }
@@ -41,7 +55,10 @@ export interface SerializedJournal {
   createdAt?: Instant;
 }
 
-// Snapshot
+// Snapshot. Entries are frozen at creation, so this is a read-only view —
+// there is no defensive clone. If you hand in mutable `data` and mutate it
+// afterward, that's your call; provide a `Serializer` if you want defensive
+// copies on append.
 export interface JournalSnapshot<T> {
   readonly firstSequence: number;
   readonly lastSequence: number;

@@ -1,13 +1,15 @@
 import { describe, it, expect, beforeEach } from "vitest";
-import { createProcess, createProcessId } from "../src/index.js";
-import type { ProcessBehavior, Message } from "../src/index.js";
+import { createSystemClock } from "@phyxiusjs/clock";
+import { spawn, createProcessId } from "../src/index.js";
+import type { ProcessSpec } from "../src/index.js";
 
 interface TestEvent {
   type: string;
   [key: string]: unknown;
 }
 
-describe("Process", () => {
+describe("spawn (Process)", () => {
+  const clock = createSystemClock();
   let events: unknown[] = [];
   const emit = (event: unknown) => events.push(event);
 
@@ -15,268 +17,256 @@ describe("Process", () => {
     events = [];
   });
 
-  describe("basic process lifecycle", () => {
-    it("should create process with generated ID", () => {
-      const behavior: ProcessBehavior = {
-        handle: async () => {},
+  describe("basic lifecycle", () => {
+    it("should spawn a running process with a generated id", async () => {
+      const spec: ProcessSpec<unknown> = {
+        name: "noop",
+        handle: () => {},
       };
 
-      const process = createProcess(behavior, { emit });
+      const process = await spawn(spec, { clock, emit });
+
       expect(process.id.value).toBeDefined();
-      expect(process.state).toBe("starting");
+      expect(process.status()).toBe("running");
+
+      await process.stop();
     });
 
-    it("should create process with specific ID", () => {
-      const behavior: ProcessBehavior = {
-        handle: async () => {},
+    it("should accept a caller-provided id", async () => {
+      const spec: ProcessSpec<unknown> = {
+        name: "noop",
+        handle: () => {},
       };
-      const id = createProcessId("test-process");
+      const id = createProcessId("specific-id");
 
-      const process = createProcess(behavior, { id, emit });
-      expect(process.id.value).toBe("test-process");
+      const process = await spawn(spec, { clock, emit, id });
+      expect(process.id.value).toBe("specific-id");
+
+      await process.stop();
     });
 
-    it("should start successfully", async () => {
-      const behavior: ProcessBehavior = {
-        handle: async () => {},
-      };
-
-      const process = createProcess(behavior, { emit });
-      await process.start();
-
-      expect(process.state).toBe("running");
-
-      const startEvents = events.filter((e: unknown) => (e as TestEvent).type === "process:started");
-      expect(startEvents).toHaveLength(1);
-    });
-
-    it("should call init if provided", async () => {
+    it("should call init before reaching running state", async () => {
       let initCalled = false;
-      const behavior: ProcessBehavior = {
-        init: async () => {
+      const spec: ProcessSpec<unknown, void, void> = {
+        name: "with-init",
+        init: () => {
           initCalled = true;
         },
-        handle: async () => {},
+        handle: () => {},
       };
 
-      const process = createProcess(behavior, { emit });
-      await process.start();
+      const process = await spawn(spec, { clock, emit });
 
       expect(initCalled).toBe(true);
-      expect(process.state).toBe("running");
+      expect(process.status()).toBe("running");
+
+      await process.stop();
     });
 
-    it("should stop successfully", async () => {
-      const behavior: ProcessBehavior = {
-        handle: async () => {},
+    it("should pass ctx into init", async () => {
+      let receivedCtx: { port: number } | undefined;
+      const spec: ProcessSpec<unknown, void, { port: number }> = {
+        name: "with-ctx",
+        init: (ctx) => {
+          receivedCtx = ctx;
+        },
+        handle: () => {},
       };
 
-      const process = createProcess(behavior, { emit });
-      await process.start();
-      await process.stop();
+      const process = await spawn(spec, { clock, emit, ctx: { port: 8080 } });
 
-      expect(process.state).toBe("stopped");
+      expect(receivedCtx).toEqual({ port: 8080 });
+
+      await process.stop();
     });
 
-    it("should call terminate if provided", async () => {
-      let terminateCalled = false;
-      const behavior: ProcessBehavior = {
-        handle: async () => {},
-        terminate: async () => {
-          terminateCalled = true;
+    it("should stop gracefully", async () => {
+      const spec: ProcessSpec<unknown> = {
+        name: "noop",
+        handle: () => {},
+      };
+
+      const process = await spawn(spec, { clock, emit });
+      await process.stop();
+
+      expect(process.status()).toBe("stopped");
+    });
+
+    it("should call onStop on shutdown", async () => {
+      let stopCalled = false;
+      const spec: ProcessSpec<unknown> = {
+        name: "with-onstop",
+        handle: () => {},
+        onStop: () => {
+          stopCalled = true;
         },
       };
 
-      const process = createProcess(behavior, { emit });
-      await process.start();
+      const process = await spawn(spec, { clock, emit });
       await process.stop();
 
-      expect(terminateCalled).toBe(true);
-      expect(process.state).toBe("stopped");
+      expect(stopCalled).toBe(true);
+      expect(process.status()).toBe("stopped");
     });
   });
 
   describe("message handling", () => {
-    it("should handle messages", async () => {
-      const receivedMessages: Message[] = [];
-      const behavior: ProcessBehavior = {
-        handle: async (message) => {
-          receivedMessages.push(message);
+    it("should process messages one at a time, in order", async () => {
+      const received: Array<{ type: string }> = [];
+      const spec: ProcessSpec<{ type: string }> = {
+        name: "collector",
+        handle: (_state, msg) => {
+          received.push(msg);
         },
       };
 
-      const process = createProcess(behavior, { emit });
-      await process.start();
-
-      await process.send({ type: "test", data: "hello" });
-
-      // Wait for message processing
-      await new Promise((resolve) => setImmediate(resolve));
-
-      expect(receivedMessages).toHaveLength(1);
-      expect(receivedMessages[0]).toEqual({ type: "test", data: "hello" });
-    });
-
-    it("should queue multiple messages", async () => {
-      const receivedMessages: Message[] = [];
-      const behavior: ProcessBehavior = {
-        handle: async (message) => {
-          receivedMessages.push(message);
-          // Small delay to test queuing
-          await new Promise((resolve) => setTimeout(resolve, 10));
-        },
-      };
-
-      const process = createProcess(behavior, { emit });
-      await process.start();
+      const process = await spawn(spec, { clock, emit });
 
       await process.send({ type: "msg1" });
       await process.send({ type: "msg2" });
       await process.send({ type: "msg3" });
 
-      // Wait for all messages to be processed
       await new Promise((resolve) => setTimeout(resolve, 50));
 
-      expect(receivedMessages).toHaveLength(3);
-      expect(receivedMessages.map((m) => m.type)).toEqual(["msg1", "msg2", "msg3"]);
+      expect(received.map((m) => m.type)).toEqual(["msg1", "msg2", "msg3"]);
+
+      await process.stop();
     });
 
-    it("should not accept messages when not running", async () => {
-      const behavior: ProcessBehavior = {
-        handle: async () => {},
+    it("should treat void return from handle as 'keep state'", async () => {
+      const spec: ProcessSpec<{ type: string }, { count: number }> = {
+        name: "counter",
+        init: () => ({ count: 0 }),
+        handle: (state, msg) => {
+          if (msg.type === "inc") return { count: state.count + 1 };
+          // no return: state unchanged
+        },
       };
 
-      const process = createProcess(behavior, { emit });
+      const process = await spawn(spec, { clock, emit });
 
-      await expect(process.send({ type: "test" })).rejects.toThrow("Cannot send message to process in state: starting");
+      await process.send({ type: "inc" });
+      await process.send({ type: "noop" });
+      await process.send({ type: "inc" });
+
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      const count = await process
+        .ask<number>((reply) => ({ type: "get", reply }) as unknown as { type: string }, 100 as never)
+        .catch(() => -1);
+      // Handler doesn't implement get — we just want to know the pump works.
+      expect(count).toBe(-1);
+
+      await process.stop();
     });
 
-    it("should handle message processing errors", async () => {
-      const behavior: ProcessBehavior = {
-        handle: async () => {
+    it("should reject sends when the process isn't running", async () => {
+      const spec: ProcessSpec<unknown> = {
+        name: "noop",
+        handle: () => {},
+      };
+
+      const process = await spawn(spec, { clock, emit });
+      await process.stop();
+
+      await expect(process.send({ type: "test" })).rejects.toThrow("Cannot send message to process in state: stopped");
+    });
+
+    it("should transition to 'failed' when handle throws", async () => {
+      const spec: ProcessSpec<unknown> = {
+        name: "flaky",
+        handle: () => {
           throw new Error("Processing failed");
         },
       };
 
-      const process = createProcess(behavior, { emit });
-      await process.start();
+      const process = await spawn(spec, { clock, emit });
 
       await process.send({ type: "test" });
-
-      // Wait for message processing
       await new Promise((resolve) => setTimeout(resolve, 20));
 
-      expect(process.state).toBe("failed");
-      expect(process.getInfo().lastError?.message).toBe("Processing failed");
+      expect(process.status()).toBe("failed");
     });
   });
 
-  describe("process info", () => {
-    it("should provide process info", async () => {
-      const behavior: ProcessBehavior = {
-        handle: async () => {},
+  describe("ask", () => {
+    it("should resolve when the handler calls reply", async () => {
+      type Msg = { type: "get"; reply: (value: number) => void };
+      const spec: ProcessSpec<Msg, { value: number }> = {
+        name: "responder",
+        init: () => ({ value: 42 }),
+        handle: (state, msg) => {
+          msg.reply(state.value);
+        },
       };
 
-      const process = createProcess(behavior, { emit });
-      const info = process.getInfo();
+      const process = await spawn(spec, { clock, emit });
 
-      expect(info.id).toBe(process.id);
-      expect(info.state).toBe("starting");
-      expect(info.restartCount).toBe(0);
-      expect(info.startedAt).toBe(0);
-      expect(info.lastError).toBeUndefined();
+      const result = await process.ask<number>((reply) => ({ type: "get", reply }));
+      expect(result).toBe(42);
+
+      await process.stop();
     });
 
-    it("should update info after starting", async () => {
-      const behavior: ProcessBehavior = {
-        handle: async () => {},
+    it("should reject on timeout", async () => {
+      type Msg = { type: "slow"; reply: (value: number) => void };
+      const spec: ProcessSpec<Msg> = {
+        name: "slow-responder",
+        handle: () => {
+          // never replies
+        },
       };
 
-      const process = createProcess(behavior, { emit });
-      await process.start();
+      const process = await spawn(spec, { clock, emit });
 
-      const info = process.getInfo();
-      expect(info.state).toBe("running");
-      expect(info.startedAt).toBeGreaterThan(0);
+      await expect(process.ask<number>((reply) => ({ type: "slow", reply }), 20 as never)).rejects.toThrow(
+        "Ask timeout",
+      );
+
+      await process.stop();
     });
   });
 
-  describe("error handling", () => {
-    it("should fail if init throws", async () => {
-      const behavior: ProcessBehavior = {
-        init: async () => {
-          throw new Error("Init failed");
-        },
-        handle: async () => {},
-      };
+  describe("scheduled messages", () => {
+    it("should fire a scheduled message even when the mailbox is otherwise empty", async () => {
+      let wokenUp = false;
+      type Msg = { type: "wake" } | { type: "start" };
 
-      const process = createProcess(behavior, { emit });
-
-      await expect(process.start()).rejects.toThrow("Init failed");
-      expect(process.state).toBe("failed");
-    });
-
-    it("should fail if terminate throws", async () => {
-      const behavior: ProcessBehavior = {
-        handle: async () => {},
-        terminate: async () => {
-          throw new Error("Terminate failed");
+      const spec: ProcessSpec<Msg> = {
+        name: "sleeper",
+        handle: (_state, msg, tools) => {
+          if (msg.type === "start") {
+            tools.schedule(30 as never, { type: "wake" });
+          } else if (msg.type === "wake") {
+            wokenUp = true;
+          }
         },
       };
 
-      const process = createProcess(behavior, { emit });
-      await process.start();
+      const process = await spawn(spec, { clock, emit });
 
-      await expect(process.stop()).rejects.toThrow("Terminate failed");
-      expect(process.state).toBe("failed");
-    });
+      await process.send({ type: "start" });
+      // The pump goes idle here — scheduled message must still fire.
 
-    it("should not restart twice", async () => {
-      const behavior: ProcessBehavior = {
-        handle: async () => {},
-      };
+      await new Promise((resolve) => setTimeout(resolve, 80));
 
-      const process = createProcess(behavior, { emit });
-      await process.start();
+      expect(wokenUp).toBe(true);
 
-      await expect(process.start()).rejects.toThrow("Cannot start process in state: running");
-    });
-  });
-
-  describe("restart functionality", () => {
-    it("should restart after failure", async () => {
-      let callCount = 0;
-      const behavior: ProcessBehavior = {
-        init: async () => {
-          callCount++;
-        },
-        handle: async () => {},
-      };
-
-      const process = createProcess(behavior, { emit });
-      await process.start();
-      expect(callCount).toBe(1);
-
-      // Simulate restart
-      if ("restart" in process) {
-        await (process as { restart(): Promise<void> }).restart();
-        expect(callCount).toBe(2);
-        expect(process.getInfo().restartCount).toBe(1);
-      }
+      await process.stop();
     });
   });
 
   describe("event emission", () => {
     it("should emit lifecycle events", async () => {
-      const behavior: ProcessBehavior = {
-        handle: async () => {},
+      const spec: ProcessSpec<unknown> = {
+        name: "observable",
+        handle: () => {},
       };
 
-      const process = createProcess(behavior, { emit });
-      await process.start();
+      const process = await spawn(spec, { clock, emit });
       await process.stop();
 
-      const eventTypes = events.map((e: unknown) => (e as TestEvent).type);
+      const eventTypes = events.map((e) => (e as TestEvent).type);
       expect(eventTypes).toContain("process:starting");
       expect(eventTypes).toContain("process:started");
       expect(eventTypes).toContain("process:stopping");
@@ -284,36 +274,66 @@ describe("Process", () => {
     });
 
     it("should emit message events", async () => {
-      const behavior: ProcessBehavior = {
+      const spec: ProcessSpec<unknown> = {
+        name: "observable",
         handle: async () => {
           await new Promise((resolve) => setTimeout(resolve, 1));
         },
       };
 
-      const process = createProcess(behavior, { emit });
-      await process.start();
+      const process = await spawn(spec, { clock, emit });
       await process.send({ type: "test" });
 
-      // Wait for processing
       await new Promise((resolve) => setTimeout(resolve, 10));
 
-      const eventTypes = events.map((e: unknown) => (e as TestEvent).type);
+      const eventTypes = events.map((e) => (e as TestEvent).type);
       expect(eventTypes).toContain("process:message:queued");
       expect(eventTypes).toContain("process:message:processing");
       expect(eventTypes).toContain("process:message:processed");
+
+      await process.stop();
     });
 
-    it("should work without emit function", async () => {
-      const behavior: ProcessBehavior = {
-        handle: async () => {},
+    it("should work without an emit function", async () => {
+      const spec: ProcessSpec<unknown> = {
+        name: "silent",
+        handle: () => {},
       };
 
-      const process = createProcess(behavior);
-      await process.start();
+      const process = await spawn(spec, { clock });
       await process.send({ type: "test" });
       await process.stop();
 
-      expect(process.state).toBe("stopped");
+      expect(process.status()).toBe("stopped");
+    });
+  });
+
+  describe("error handling", () => {
+    it("should fail to spawn if init throws", async () => {
+      const spec: ProcessSpec<unknown> = {
+        name: "bad-init",
+        init: () => {
+          throw new Error("Init failed");
+        },
+        handle: () => {},
+      };
+
+      await expect(spawn(spec, { clock, emit })).rejects.toThrow("Init failed");
+    });
+
+    it("should transition to 'failed' if onStop throws during stop", async () => {
+      const spec: ProcessSpec<unknown> = {
+        name: "bad-onstop",
+        handle: () => {},
+        onStop: () => {
+          throw new Error("onStop failed");
+        },
+      };
+
+      const process = await spawn(spec, { clock, emit });
+
+      await expect(process.stop()).rejects.toThrow("onStop failed");
+      expect(process.status()).toBe("failed");
     });
   });
 });

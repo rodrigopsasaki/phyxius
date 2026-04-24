@@ -5,92 +5,63 @@ import type { ConfigError, FileLoaderOptions } from "../types.js";
 import { parseEnv } from "./env.js";
 
 /**
- * Load and parse configuration from file
+ * Load and parse configuration from a file.
+ *
+ * Supported formats:
+ *   - **json** — valid JSON object at the root
+ *   - **env** — KEY=VALUE lines (same parser as `parseEnv`)
+ *
+ * YAML is NOT supported: a correct YAML implementation is beyond the scope
+ * of a config primitive. If you need YAML, pre-process with `js-yaml` and
+ * pass the result as `{ type: "object", data: ... }`.
  */
 export function loadFile(path: string, options: FileLoaderOptions = {}): Result<Record<string, unknown>, ConfigError> {
   const { format, encoding = "utf-8" } = options;
 
-  // Check if file exists
   if (!existsSync(path)) {
-    return err({
-      type: "FILE_NOT_FOUND",
-      path,
-    });
+    return err({ type: "FILE_NOT_FOUND", path });
   }
 
+  let content: string;
   try {
-    const content = readFileSync(path, encoding);
-    const detectedFormat = format || detectFormat(path);
-
-    switch (detectedFormat) {
-      case "json":
-        return parseJSON(content);
-      case "yaml":
-        return parseYAML(content);
-      case "env":
-        return parseDotEnv(content);
-      default:
-        return err({
-          type: "PARSE_ERROR",
-          source: path,
-          message: `Unsupported file format: ${detectedFormat}`,
-        });
-    }
+    content = readFileSync(path, encoding);
   } catch (error) {
     return err({
       type: "SOURCE_ERROR",
       source: path,
-      message: error instanceof Error ? error.message : "Failed to load file",
+      message: error instanceof Error ? error.message : "Failed to read file",
       cause: error,
     });
   }
-}
 
-/**
- * Detect file format from extension
- */
-function detectFormat(path: string): "json" | "yaml" | "env" | "unknown" {
-  const ext = extname(path).toLowerCase();
-
-  switch (ext) {
-    case ".json":
-      return "json";
-    case ".yaml":
-    case ".yml":
-      return "yaml";
-    case ".env":
-      return "env";
+  const detected = format ?? detectFormat(path);
+  switch (detected) {
+    case "json":
+      return parseJSON(content);
+    case "env":
+      return parseDotEnv(content);
     default:
-      // Try to detect from filename
-      if (path.includes(".env")) {
-        return "env";
-      }
-      return "unknown";
+      return err({
+        type: "PARSE_ERROR",
+        source: path,
+        message: `Unsupported file format: ${detected}. Use .json or .env, or preprocess other formats and pass as { type: "object" }.`,
+      });
   }
 }
 
-/**
- * Parse JSON content
- */
+function detectFormat(path: string): "json" | "env" | "unknown" {
+  const ext = extname(path).toLowerCase();
+  if (ext === ".json") return "json";
+  if (ext === ".env") return "env";
+  // Allow filenames like ".env.production"
+  if (path.includes(".env")) return "env";
+  return "unknown";
+}
+
 function parseJSON(content: string): Result<Record<string, unknown>, ConfigError> {
+  let data: unknown;
   try {
-    const data = JSON.parse(content);
-
-    if (typeof data !== "object" || data === null || Array.isArray(data)) {
-      return err({
-        type: "PARSE_ERROR",
-        source: "json",
-        message: "JSON must be an object",
-      });
-    }
-
-    // Check for circular references
-    const checkResult = checkCircularReferences(data);
-    if (checkResult._tag === "Err") {
-      return checkResult;
-    }
-
-    return ok(data as Record<string, unknown>);
+    data = JSON.parse(content);
   } catch (error) {
     return err({
       type: "PARSE_ERROR",
@@ -98,171 +69,32 @@ function parseJSON(content: string): Result<Record<string, unknown>, ConfigError
       message: error instanceof Error ? error.message : "Invalid JSON",
     });
   }
-}
 
-/**
- * Parse YAML content
- */
-function parseYAML(content: string): Result<Record<string, unknown>, ConfigError> {
-  // Simple YAML parser for basic use cases
-  // For production, you'd want to use a proper YAML library
-  try {
-    const lines = content.split("\n");
-    const result: Record<string, unknown> = {};
-
-    interface StackEntry {
-      obj: Record<string, unknown>;
-      indent: number;
-      /** Key in parentObj that holds this entry's obj (for array conversion) */
-      ownKey?: string;
-      /** Parent object so we can replace this entry's value with an array */
-      parentObj?: Record<string, unknown>;
-      /** Set once this entry's value is converted to an array */
-      arrayMode?: unknown[];
-    }
-
-    const stack: [StackEntry, ...StackEntry[]] = [{ obj: result, indent: -1 }];
-
-    function peekStack(): StackEntry {
-      return stack[stack.length - 1] as StackEntry;
-    }
-
-    function popToIndent(indent: number): void {
-      while (stack.length > 1) {
-        const top = peekStack();
-        if (top.indent < indent) break;
-        stack.pop();
-      }
-    }
-
-    for (const line of lines) {
-      // Skip empty lines and full-line comments
-      if (!line.trim() || line.trim().startsWith("#")) {
-        continue;
-      }
-
-      const indent = line.length - line.trimStart().length;
-      const trimmed = line.trim();
-
-      // Handle dash-style array items (e.g. "  - value")
-      if (trimmed.startsWith("- ")) {
-        const itemValue = trimmed.slice(2).trim();
-
-        popToIndent(indent);
-        const top = peekStack();
-
-        // On the first dash item, convert the placeholder object to an array
-        if (!top.arrayMode && top.ownKey && top.parentObj) {
-          const arr: unknown[] = [];
-          top.parentObj[top.ownKey] = arr;
-          top.arrayMode = arr;
-        }
-
-        if (top.arrayMode) {
-          top.arrayMode.push(parseYAMLValue(itemValue));
-        }
-
-        continue;
-      }
-
-      // Handle key-value pairs
-      const colonIndex = trimmed.indexOf(":");
-      if (colonIndex === -1) continue;
-
-      const key = trimmed.slice(0, colonIndex).trim();
-      const value = trimmed.slice(colonIndex + 1).trim();
-
-      popToIndent(indent);
-      const current = peekStack().obj;
-
-      if (value) {
-        // Simple value
-        current[key] = parseYAMLValue(value);
-      } else {
-        // Nested object (may become an array when dash items follow)
-        const nested: Record<string, unknown> = {};
-        current[key] = nested;
-        stack.push({ obj: nested, indent, ownKey: key, parentObj: current });
-      }
-    }
-
-    return ok(result);
-  } catch (error) {
+  if (typeof data !== "object" || data === null || Array.isArray(data)) {
     return err({
       type: "PARSE_ERROR",
-      source: "yaml",
-      message: error instanceof Error ? error.message : "Invalid YAML",
+      source: "json",
+      message: "JSON root must be an object",
     });
   }
+
+  return ok(data as Record<string, unknown>);
 }
 
-/**
- * Parse YAML value
- */
-function parseYAMLValue(rawValue: string): unknown {
-  // Strip inline comments from unquoted values (e.g. "3000  # port" → "3000")
-  let value = rawValue;
-  if (!(value.startsWith('"') || value.startsWith("'"))) {
-    const commentIdx = value.indexOf(" #");
-    if (commentIdx !== -1) {
-      value = value.slice(0, commentIdx).trim();
-    }
-  }
-
-  // Remove quotes if present
-  if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
-    return value.slice(1, -1);
-  }
-
-  // Boolean
-  if (value === "true") return true;
-  if (value === "false") return false;
-
-  // Null
-  if (value === "null" || value === "~") return null;
-
-  // Number
-  if (/^-?\d+(\.\d+)?$/.test(value)) {
-    const num = Number(value);
-    if (!Number.isNaN(num) && Number.isFinite(num)) {
-      return num;
-    }
-  }
-
-  // Array (simple case)
-  if (value.startsWith("[") && value.endsWith("]")) {
-    const items = value
-      .slice(1, -1)
-      .split(",")
-      .map((item) => parseYAMLValue(item.trim()));
-    return items;
-  }
-
-  return value;
-}
-
-/**
- * Parse .env file content
- */
 function parseDotEnv(content: string): Result<Record<string, unknown>, ConfigError> {
-  const lines = content.split("\n");
   const envVars: Record<string, string> = {};
 
-  for (const line of lines) {
-    // Skip empty lines and comments
+  for (const line of content.split("\n")) {
     const trimmed = line.trim();
-    if (!trimmed || trimmed.startsWith("#")) {
-      continue;
-    }
+    if (!trimmed || trimmed.startsWith("#")) continue;
 
-    // Parse KEY=VALUE format
     const equalsIndex = trimmed.indexOf("=");
     if (equalsIndex === -1) continue;
 
     const key = trimmed.slice(0, equalsIndex).trim();
     let value = trimmed.slice(equalsIndex + 1).trim();
 
-    // Remove quotes if present
+    // Strip surrounding quotes if both ends match
     if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
       value = value.slice(1, -1);
     }
@@ -270,38 +102,7 @@ function parseDotEnv(content: string): Result<Record<string, unknown>, ConfigErr
     envVars[key] = value;
   }
 
-  // Use env parser with dbt convention for .env files
+  // Delegate to env parser with dbt convention — treats DOUBLE__UNDERSCORES
+  // as nesting and coerces "true"/"false"/numbers.
   return parseEnv(envVars as NodeJS.ProcessEnv, { convention: "dbt" });
-}
-
-/**
- * Check for circular references in object
- */
-function checkCircularReferences(obj: unknown, seen = new WeakSet()): Result<void, ConfigError> {
-  if (obj === null || typeof obj !== "object") {
-    return ok(undefined);
-  }
-
-  if (seen.has(obj)) {
-    return err({
-      type: "CIRCULAR_REFERENCE",
-      path: "unknown",
-    });
-  }
-
-  seen.add(obj);
-
-  if (Array.isArray(obj)) {
-    for (const item of obj) {
-      const result = checkCircularReferences(item, seen);
-      if (result._tag === "Err") return result;
-    }
-  } else {
-    for (const value of Object.values(obj)) {
-      const result = checkCircularReferences(value, seen);
-      if (result._tag === "Err") return result;
-    }
-  }
-
-  return ok(undefined);
 }

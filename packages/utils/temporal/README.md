@@ -14,7 +14,8 @@ npm install @phyxiusjs/temporal @phyxiusjs/clock
 
 - **debounce**: Execute function after delay with no new calls
 - **throttle**: Execute function at most once per interval
-- Uses Clock abstraction instead of setTimeout for testable timing
+- Uses Clock abstraction instead of `setTimeout` for testable timing
+- **At most one pending timer** per wrapped function, regardless of input rate. A burst of 10,000 calls produces exactly one pending timer — previous ones are released via `Clock.Budget`, not left to accumulate and no-op.
 
 ## Quick Example
 

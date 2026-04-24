@@ -1,313 +1,284 @@
 # Process
 
-Units that restart on failure. Systems that heal themselves. Concurrency without chaos.
-
-Every system failure you've debugged starts with the same pattern: one component fails, takes down its neighbor, which takes down its neighbor, until the whole system is dead. Cascading failures, resource leaks, deadlocks, race conditions.
-
-Process fixes this. Isolated units, supervised execution, let it crash and restart.
-
-Two implementations, one interface:
-
-- In-memory processes for single-node actor systems with message passing.
-- Distributed processes for multi-node systems with location transparency.
+Long-lived stateful actors with mailbox serialization and supervision. For the moments in Node where "just use a class" silently interleaves state, and "just wrap in try/catch" silently crashes the whole runtime.
 
 ---
 
-## Why shared state is broken
+## What this really is
 
-### Cascading failures and resource leaks
+Node is single-threaded, but that doesn't solve concurrency — it moves it to async boundaries. The moment you `await` in the middle of a state mutation, another flow can read or write the same state. A plain JS class with `async` methods has no serialization guarantee; methods interleave freely across awaits.
 
-```js
-// This is broken. One failure kills everything.
-class UserService {
-  private connections = new Map();
-  private cache = new Map();
+Process gives you three things that Node's runtime and standard library do not:
 
-  async handleRequest(req: Request) {
-    // If this throws, the whole service dies
-    const user = await this.database.getUser(req.userId);
+1. **Mailbox serialization.** Messages to the same actor are processed **one at a time**, even when they arrive concurrently. The handler for message N completes before the handler for message N+1 starts. Across async boundaries, across concurrent senders. No shared-state interleaving.
+2. **Supervision.** "Let it crash" as a design pattern. When a handler throws, the actor transitions to `failed` and the supervisor decides what to do — restart with fresh state, stop, or escalate. One bad message doesn't take the Node process down.
+3. **Message-passing discipline.** State is never touched from outside — only through messages. Tests become trivial; state transitions become discrete values you can assert on.
 
-    // Shared state, race conditions waiting to happen
-    this.cache.set(req.userId, user);
+None of those are available from `Promise.all`, `EventEmitter`, `AbortSignal`, or a plain class.
 
-    // If this fails, the connection leaks
-    const connection = await this.createConnection(user);
-    this.connections.set(req.userId, connection);
+---
 
-    return user;
-  }
-}
+## Mailbox is the point
 
-// One bad request can kill the entire service
-const service = new UserService();
-```
+The primitive you can't easily hand-roll:
 
-### Race conditions in concurrent access
-
-```js
-// Multiple threads/promises accessing shared state
+```ts
+// Broken: two callers, one interleaved mutation
 class Counter {
   private value = 0;
-
   async increment() {
-    const current = this.value; // Race condition here
-    await someAsyncWork();
-    this.value = current + 1; // Lost updates
-  }
-}
-
-// Two concurrent increments might only increase counter by 1
-counter.increment();
-counter.increment();
-```
-
-Object-oriented programming gives you shared mutable state, which gives you race conditions, which give you bugs that only happen in production under load.
-
----
-
-## The Problem
-
-Traditional concurrency models share state between threads or async operations, leading to race conditions, deadlocks, and system-wide failures when one component crashes.
-
-```ts
-// No isolation - everything shares the same fate
-class OrderSystem {
-  private orders = new Map();
-  private payments = new Map();
-  private inventory = new Map();
-
-  async processOrder(order: Order) {
-    // Any failure here brings down the entire system
-    await this.validateInventory(order);
-    await this.processPayment(order);
-    await this.updateInventory(order);
-    await this.sendConfirmation(order);
-
-    // If sendConfirmation fails, what happens to inventory?
-    // What about the payment? No way to roll back cleanly.
+    const current = this.value;
+    await recordAudit(current); // yields
+    this.value = current + 1; // stale if another increment landed
   }
 }
 ```
 
----
-
-## Process helps you with this
-
-### Example 1 — Isolated state with message passing
-
 ```ts
-import { createRootSupervisor } from "@phyxiusjs/process";
-import { createSystemClock } from "@phyxiusjs/clock";
-
-const clock = createSystemClock();
-const supervisor = createRootSupervisor({ clock });
-
-// Counter process with isolated state
-const counter = supervisor.spawn(
+// Process: mailbox guarantees serialization
+const counter = await spawn(
   {
     name: "counter",
-    init: () => ({ count: 0 }),
-    handle: (state, message) => {
-      switch (message.type) {
-        case "increment":
-          return { count: state.count + 1 };
-        case "get":
-          message.reply(state.count);
-          return state;
-        default:
-          return state;
-      }
-    },
-  },
-  {},
-);
-
-// Send messages - never blocks, never races
-counter.send({ type: "increment" });
-counter.send({ type: "increment" });
-
-const count = await counter.ask((reply) => ({ type: "get", reply }));
-console.log(count); // Always 2, never race condition
-```
-
-### Example 2 — Crash and restart with clean state
-
-```ts
-const flakyWorker = supervisor.spawn(
-  {
-    name: "flaky-worker",
-    init: () => ({ processed: 0 }),
-    handle: (state, message) => {
-      if (message.type === "work") {
-        // Randomly crash 10% of the time
-        if (Math.random() < 0.1) {
-          throw new Error("Random failure!");
-        }
-
-        console.log(`Processed item ${state.processed + 1}`);
-        return { processed: state.processed + 1 };
+    init: () => ({ value: 0 }),
+    handle: async (state, msg) => {
+      if (msg.type === "increment") {
+        await recordAudit(state.value);
+        return { value: state.value + 1 };
       }
       return state;
     },
   },
-  {},
+  { clock },
 );
 
-// Send work - even if it crashes, it restarts with fresh state
-for (let i = 0; i < 100; i++) {
-  flakyWorker.send({ type: "work", item: i });
-}
+counter.send({ type: "increment" });
+counter.send({ type: "increment" });
+// Exactly two increments. No interleaving. Ever.
 ```
 
-### Example 3 — Request-reply with timeouts
-
-```ts
-const database = supervisor.spawn(
-  {
-    name: "database",
-    init: () => ({
-      users: new Map([
-        ["alice", { name: "Alice", email: "alice@example.com" }],
-        ["bob", { name: "Bob", email: "bob@example.com" }],
-      ]),
-    }),
-    handle: (state, message) => {
-      switch (message.type) {
-        case "get-user":
-          const user = state.users.get(message.userId);
-          message.reply(user || null);
-          return state;
-        case "create-user":
-          state.users.set(message.user.id, message.user);
-          message.reply({ success: true });
-          return state;
-        default:
-          return state;
-      }
-    },
-  },
-  {},
-);
-
-// Request with automatic timeout
-try {
-  const user = await database.ask(
-    (reply) => ({ type: "get-user", userId: "alice", reply }),
-    1000, // Timeout after 1 second
-  );
-  console.log("Found user:", user);
-} catch (error) {
-  console.log("Request timed out or failed");
-}
-```
-
-### Example 4 — Hierarchical supervision
-
-```ts
-const taskManager = supervisor.spawn(
-  {
-    name: "task-manager",
-    init: () => ({ workers: new Map(), nextId: 0 }),
-    handle: (state, message, tools) => {
-      switch (message.type) {
-        case "spawn-worker":
-          const workerId = state.nextId++;
-
-          // Spawn child worker process
-          const worker = tools.spawn(
-            {
-              name: `worker-${workerId}`,
-              init: () => ({ tasksCompleted: 0 }),
-              handle: (workerState, workerMessage) => {
-                if (workerMessage.type === "task") {
-                  console.log(`Worker ${workerId} processing task`);
-                  return { tasksCompleted: workerState.tasksCompleted + 1 };
-                }
-                return workerState;
-              },
-            },
-            {},
-          );
-
-          state.workers.set(workerId, worker);
-          message.reply(workerId);
-          return { ...state, nextId: workerId + 1 };
-
-        case "distribute-task":
-          // Send task to all workers
-          for (const worker of state.workers.values()) {
-            worker.send({ type: "task", data: message.data });
-          }
-          return state;
-
-        default:
-          return state;
-      }
-    },
-  },
-  {},
-);
-
-// Create worker pool dynamically
-await taskManager.ask((reply) => ({ type: "spawn-worker", reply }));
-await taskManager.ask((reply) => ({ type: "spawn-worker", reply }));
-await taskManager.ask((reply) => ({ type: "spawn-worker", reply }));
-
-// Distribute work across pool
-taskManager.send({ type: "distribute-task", data: "some work" });
-```
+Process doesn't make your code faster. It makes it **correct under concurrent access** without locks, CAS, or defensive copies.
 
 ---
 
-## Process does NOT help you with this
+## Examples
 
-### Example 1 — CPU-intensive computations
+### Example 1 — Plain spawn, no supervision
 
 ```ts
-// Not Process's job - use worker threads:
-const { Worker } = require("worker_threads");
-const worker = new Worker("./cpu-intensive-task.js");
+import { spawn } from "@phyxiusjs/process";
+import { createSystemClock } from "@phyxiusjs/clock";
+
+const clock = createSystemClock();
+
+type Msg = { type: "increment" } | { type: "get"; reply: (n: number) => void };
+
+const counter = await spawn<Msg, { value: number }>(
+  {
+    name: "counter",
+    init: () => ({ value: 0 }),
+    handle: (state, msg) => {
+      switch (msg.type) {
+        case "increment":
+          return { value: state.value + 1 };
+        case "get":
+          msg.reply(state.value);
+          return state;
+      }
+    },
+  },
+  { clock },
+);
+
+counter.send({ type: "increment" });
+counter.send({ type: "increment" });
+
+const value = await counter.ask<number>((reply) => ({ type: "get", reply }));
+console.log(value); // 2
 ```
 
-### Example 2 — Database transactions
+### Example 2 — Passing context into init
 
 ```ts
-// Not Process's job - use database transactions:
-await db.transaction(async (trx) => {
-  await trx("orders").insert(order);
-  await trx("inventory").decrement("count", order.quantity);
+type Msg = { type: "query"; sql: string; reply: (rows: Row[]) => void };
+
+const db = await spawn<Msg, Connection, { url: string }>(
+  {
+    name: "db",
+    init: async (ctx) => connectDb(ctx.url),
+    handle: async (conn, msg) => {
+      const rows = await conn.query(msg.sql);
+      msg.reply(rows);
+      return conn; // keep connection as state
+    },
+    onStop: async (conn) => {
+      await conn.close();
+    },
+  },
+  { clock, ctx: { url: "postgres://..." } },
+);
+```
+
+### Example 3 — Supervision and restart
+
+```ts
+import { Supervisor, spawn } from "@phyxiusjs/process";
+
+const supervisor = new Supervisor({
+  clock,
+  emit: logger.info,
+  strategy: {
+    type: "one-for-one",
+    maxRestarts: { count: 3, within: 10_000 as never },
+    backoff: { initial: 1_000 as never, max: 30_000 as never, factor: 2 },
+  },
 });
+
+const worker = await supervisor.spawn({
+  name: "flaky-worker",
+  init: () => ({ processed: 0 }),
+  handle: (state, msg) => {
+    if (Math.random() < 0.1) throw new Error("Random failure");
+    return { processed: state.processed + 1 };
+  },
+});
+
+// If handle throws, the supervisor restarts with fresh state.
+// If it crashes 3 times within 10s, the supervisor gives up and emits
+// a 'supervisor:giveup' event — you can subscribe and alert.
+
+worker.send({ type: "work" });
 ```
 
-### Example 3 — UI event handling
+### Example 4 — Self-scheduled messages (timers that survive pump idling)
 
 ```ts
-// Not Process's job - use framework primitives:
-button.addEventListener("click", handleClick);
+type Msg = { type: "tick" } | { type: "start" };
+
+const heartbeat = await spawn<Msg>(
+  {
+    name: "heartbeat",
+    handle: (_state, msg, tools) => {
+      if (msg.type === "start") {
+        tools.schedule(1_000 as never, { type: "tick" });
+      } else if (msg.type === "tick") {
+        console.log("beat", clock.now().wallMs);
+        tools.schedule(1_000 as never, { type: "tick" });
+      }
+    },
+  },
+  { clock },
+);
+
+await heartbeat.send({ type: "start" });
+// Ticks continue firing every second even though no external sender is
+// driving the mailbox. Each scheduled message has its own Clock-backed timer.
+```
+
+### Example 5 — Request/reply with timeout
+
+```ts
+type Msg = { type: "slow-op"; reply: (result: string) => void };
+
+const worker = await spawn<Msg>(
+  {
+    name: "worker",
+    handle: async (_state, msg) => {
+      const result = await doExpensiveWork();
+      msg.reply(result);
+    },
+  },
+  { clock },
+);
+
+try {
+  const result = await worker.ask<string>((reply) => ({ type: "slow-op", reply }), 5_000 as never);
+  console.log(result);
+} catch (err) {
+  if (err instanceof TimeoutError) {
+    // Work exceeded the budget — handle it
+  }
+}
 ```
 
 ---
 
-## Why not just use classes and async/await?
+## Process does NOT help you with
 
-Traditional object-oriented concurrent programming has fundamental problems:
-
-- **Shared state**: Multiple operations can modify the same data simultaneously.
-- **Race conditions**: The order of operations becomes unpredictable under load.
-- **Cascading failures**: One component's failure brings down the entire system.
-- **Resource leaks**: Failed operations can leave resources in inconsistent states.
-
-Processes use isolated state and message passing to eliminate these problems entirely.
+- **CPU-bound work.** Node is single-threaded; the actor runs on the same event loop. For CPU work, use Worker threads.
+- **Cross-process state.** This is in-memory. For distributed state, replicate via an external system.
+- **Transport concerns.** Process is protocol-agnostic — it doesn't know about HTTP, WebSockets, Kafka. Adapters live one layer up.
+- **UI reactivity.** Framework adapters wrap Process; Process doesn't know about React or Vue.
 
 ---
 
-## What this is not
+## API at a glance
 
-Process is not a web framework, not a database, not a thread pool. It does not replace Express, Fastify, or HTTP servers. It does not handle network protocols or persistence.
+### Spawning
 
-Process is focused on safe concurrent programming with isolated state and supervision. It provides the actor model for building resilient systems that other libraries can integrate with.
+```ts
+spawn<TMsg, TState, TCtx>(
+  spec: ProcessSpec<TMsg, TState, TCtx>,
+  options: { clock: Clock; ctx?: TCtx; emit?: EmitFn; id?: ProcessId },
+): Promise<ProcessRef<TMsg>>;
+```
 
-If you want HTTP APIs, use a web framework built on Process. If you want database access, use libraries that work with Process. If you want concurrency without chaos, use Process.
+`spawn` is the only entry point. There is no separate `createProcess` — construction, init, and start are one step. Init failures bubble up; if the promise resolves, the returned ref is in state `running`.
+
+### The spec
+
+```ts
+interface ProcessSpec<TMsg, TState = void, TCtx = void> {
+  readonly name: string;
+  init?(ctx: TCtx): TState | Promise<TState>;
+  handle(state: TState, msg: TMsg, tools: Tools<TMsg>): TState | void | Promise<TState | void>;
+  onStop?(state: TState, reason: StopReason, ctx: TCtx): void | Promise<void>;
+  maxInbox?: number; // default 1024
+  mailboxPolicy?: "reject" | "drop-oldest"; // default "reject"
+}
+```
+
+The `handle` signature is fixed. `void`/`undefined` return means "state unchanged." No arity-dispatch magic.
+
+### Tools (inside a handler)
+
+```ts
+interface Tools<TMsg> {
+  readonly clock: Clock;
+  readonly emit?: EmitFn;
+  schedule(after: Millis, msg: TMsg): void;
+}
+```
+
+Deliberately narrow. Nested spawning is **not** here — supervision is flat, and hierarchy is expressed by creating nested `Supervisor` instances explicitly. That keeps the failure and restart surfaces legible instead of implicit.
+
+### The ref (outside the handler)
+
+```ts
+interface ProcessRef<TMsg> {
+  readonly id: ProcessId;
+  status(): ProcessStatus;
+  send(msg: TMsg): Promise<boolean>;
+  ask<TResp>(build: (reply: (r: TResp) => void) => TMsg, timeout?: Millis): Promise<TResp>;
+  stop(reason?: StopReason): Promise<void>;
+}
+```
+
+`ask` is the single request/response surface. From inside the handler you still use `ask` via a separate ref if you're talking to a sibling; there is no duplicate `tools.ask` helper.
+
+### Supervisor
+
+```ts
+class Supervisor {
+  constructor(options: { clock: Clock; id?: ProcessId; emit?: EmitFn; strategy?: SupervisionStrategy });
+  spawn<TMsg, TState, TCtx>(spec: ProcessSpec<TMsg, TState, TCtx>, ctx?: TCtx): Promise<ProcessRef<TMsg>>;
+  supervise<TMsg>(ref: ProcessRef<TMsg>, action: "restart" | "stop" | "escalate"): void;
+  getChildren(): ProcessRef<unknown>[];
+  getRestartCount(id: ProcessId): number;
+  stop(): Promise<void>;
+}
+```
+
+`restartCount` lives on the Supervisor, not on individual `ProcessRef`s — it's bookkeeping that only the supervisor can honestly track.
 
 ---
 
@@ -321,8 +292,9 @@ npm install @phyxiusjs/process @phyxiusjs/clock
 
 ## What you get
 
-- Units that restart on failure: isolated processes with automatic recovery.
-- Systems that heal themselves: supervision strategies control restart behavior.
-- Concurrency without chaos: message passing eliminates race conditions and shared state bugs.
+- **Mailbox-serialized state.** Concurrent senders, no interleaving. The guarantee Node can't give you with classes and methods.
+- **Supervised restarts.** "Let it crash" as a first-class pattern. One bad handler doesn't crash the runtime.
+- **Clock-bound lifecycle.** Every timestamp, every scheduled message, every restart delay is driven by the injected Clock. Deterministic in tests.
+- **Observable by default.** Every state transition emits a structured event. Pair with Journal for a replayable audit.
 
-Process does not fix concurrency. It gives you the actor model and supervision trees to make concurrent systems safe and resilient. Everything else builds on that foundation.
+Process is a small primitive. It holds long-lived state that changes in a disciplined, supervised, observable way. Bigger things — request handlers, connection pools, rate limiters, session managers — compose on top.

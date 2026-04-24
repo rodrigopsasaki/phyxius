@@ -30,28 +30,43 @@ export type DefaultPattern<T, R> = {
 /** Combined pattern types */
 export type MatchPattern<T, R> = Pattern<T, R> | ValuePattern<T, R> | GuardPattern<T, T, R> | DefaultPattern<T, R>;
 
+/**
+ * Internal hit type — using a unique tagged wrapper so we can distinguish
+ * "matched and returned undefined" from "didn't match." Using `undefined` as
+ * the sentinel would swallow legitimately-undefined handler results.
+ */
+interface MatchHit<R> {
+  readonly __hit: true;
+  readonly value: R;
+}
+const MISS: unique symbol = Symbol("match.miss");
+type MatchAttempt<R> = MatchHit<R> | typeof MISS;
+function hit<R>(value: R): MatchHit<R> {
+  return { __hit: true, value };
+}
+
 /** Builder class for fluent pattern matching */
 export class Matcher<T, R = never> {
-  private patterns: Array<(value: T) => R | undefined> = [];
+  private patterns: Array<(value: T) => MatchAttempt<R>> = [];
   private defaultHandler?: (value: T) => R;
 
   constructor(private value: T) {}
 
   /** Match exact value */
   when(value: T, handler: (value: T) => R): Matcher<T, R> {
-    this.patterns.push((v) => (v === value ? handler(v) : undefined));
+    this.patterns.push((v) => (v === value ? hit(handler(v)) : MISS));
     return this as Matcher<T, R>;
   }
 
   /** Match with predicate */
   whenPredicate(predicate: (value: T) => boolean, handler: (value: T) => R): Matcher<T, R> {
-    this.patterns.push((v) => (predicate(v) ? handler(v) : undefined));
+    this.patterns.push((v) => (predicate(v) ? hit(handler(v)) : MISS));
     return this as Matcher<T, R>;
   }
 
   /** Match with type guard */
   whenGuard<S extends T>(guard: (value: T) => value is S, handler: (value: S) => R): Matcher<T, R> {
-    this.patterns.push((v) => (guard(v) ? handler(v) : undefined));
+    this.patterns.push((v) => (guard(v) ? hit(handler(v)) : MISS));
     return this as Matcher<T, R>;
   }
 
@@ -65,7 +80,7 @@ export class Matcher<T, R = never> {
   run(): R {
     for (const pattern of this.patterns) {
       const result = pattern(this.value);
-      if (result !== undefined) return result;
+      if (result !== MISS) return result.value;
     }
     if (this.defaultHandler) {
       return this.defaultHandler(this.value);
@@ -152,32 +167,32 @@ export function matchNullable<T, R>(
 
 /** Pattern matching for numbers with ranges */
 export class NumberMatcher<R = never> {
-  private patterns: Array<(value: number) => R | undefined> = [];
+  private patterns: Array<(value: number) => MatchAttempt<R>> = [];
   private defaultHandler?: (value: number) => R;
 
   constructor(private value: number) {}
 
   /** Match exact number */
   when(num: number, handler: (value: number) => R): NumberMatcher<R> {
-    this.patterns.push((v) => (v === num ? handler(v) : undefined));
+    this.patterns.push((v) => (v === num ? hit(handler(v)) : MISS));
     return this;
   }
 
   /** Match range (inclusive) */
   whenRange(min: number, max: number, handler: (value: number) => R): NumberMatcher<R> {
-    this.patterns.push((v) => (v >= min && v <= max ? handler(v) : undefined));
+    this.patterns.push((v) => (v >= min && v <= max ? hit(handler(v)) : MISS));
     return this;
   }
 
   /** Match less than */
   whenLt(threshold: number, handler: (value: number) => R): NumberMatcher<R> {
-    this.patterns.push((v) => (v < threshold ? handler(v) : undefined));
+    this.patterns.push((v) => (v < threshold ? hit(handler(v)) : MISS));
     return this;
   }
 
   /** Match greater than */
   whenGt(threshold: number, handler: (value: number) => R): NumberMatcher<R> {
-    this.patterns.push((v) => (v > threshold ? handler(v) : undefined));
+    this.patterns.push((v) => (v > threshold ? hit(handler(v)) : MISS));
     return this;
   }
 
@@ -191,7 +206,7 @@ export class NumberMatcher<R = never> {
   run(): R {
     for (const pattern of this.patterns) {
       const result = pattern(this.value);
-      if (result !== undefined) return result;
+      if (result !== MISS) return result.value;
     }
     if (this.defaultHandler) {
       return this.defaultHandler(this.value);
@@ -207,14 +222,14 @@ export function matchNumber(value: number): NumberMatcher {
 
 /** Pattern matching for strings with regex */
 export class StringMatcher<R = never> {
-  private patterns: Array<(value: string) => R | undefined> = [];
+  private patterns: Array<(value: string) => MatchAttempt<R>> = [];
   private defaultHandler?: (value: string) => R;
 
   constructor(private value: string) {}
 
   /** Match exact string */
   when(str: string, handler: (value: string) => R): StringMatcher<R> {
-    this.patterns.push((v) => (v === str ? handler(v) : undefined));
+    this.patterns.push((v) => (v === str ? hit(handler(v)) : MISS));
     return this;
   }
 
@@ -222,26 +237,26 @@ export class StringMatcher<R = never> {
   whenRegex(regex: RegExp, handler: (value: string, matches: RegExpMatchArray) => R): StringMatcher<R> {
     this.patterns.push((v) => {
       const matches = v.match(regex);
-      return matches ? handler(v, matches) : undefined;
+      return matches ? hit(handler(v, matches)) : MISS;
     });
     return this;
   }
 
   /** Match prefix */
   whenPrefix(prefix: string, handler: (value: string) => R): StringMatcher<R> {
-    this.patterns.push((v) => (v.startsWith(prefix) ? handler(v) : undefined));
+    this.patterns.push((v) => (v.startsWith(prefix) ? hit(handler(v)) : MISS));
     return this;
   }
 
   /** Match suffix */
   whenSuffix(suffix: string, handler: (value: string) => R): StringMatcher<R> {
-    this.patterns.push((v) => (v.endsWith(suffix) ? handler(v) : undefined));
+    this.patterns.push((v) => (v.endsWith(suffix) ? hit(handler(v)) : MISS));
     return this;
   }
 
   /** Match contains */
   whenContains(substring: string, handler: (value: string) => R): StringMatcher<R> {
-    this.patterns.push((v) => (v.includes(substring) ? handler(v) : undefined));
+    this.patterns.push((v) => (v.includes(substring) ? hit(handler(v)) : MISS));
     return this;
   }
 
@@ -255,7 +270,7 @@ export class StringMatcher<R = never> {
   run(): R {
     for (const pattern of this.patterns) {
       const result = pattern(this.value);
-      if (result !== undefined) return result;
+      if (result !== MISS) return result.value;
     }
     if (this.defaultHandler) {
       return this.defaultHandler(this.value);

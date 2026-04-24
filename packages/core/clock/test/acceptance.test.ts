@@ -171,19 +171,36 @@ describe("Acceptance Gate Tests", () => {
       expect(resolvedAt).toBeGreaterThanOrEqual(target);
     });
 
-    it("should have timeout equivalent to sleep", async () => {
+    it("should return a budget that aborts its signal when time advances past the deadline", async () => {
       const clock = createControlledClock({ initialTime: 0 });
-      const results: string[] = [];
 
-      clock.timeout(ms(100)).then(() => results.push("timeout"));
-      clock.sleep(ms(100)).then(() => results.push("sleep"));
+      const budget = clock.timeout(ms(100));
+      expect(budget.expired()).toBe(false);
+      expect(budget.remaining()).toBe(100);
 
-      clock.advanceBy(ms(100));
+      clock.advanceBy(ms(50));
+      expect(budget.expired()).toBe(false);
+      expect(budget.remaining()).toBe(50);
+
+      clock.advanceBy(ms(50));
       await clock.flush();
 
-      expect(results).toContain("timeout");
-      expect(results).toContain("sleep");
-      expect(results.length).toBe(2);
+      expect(budget.expired()).toBe(true);
+      expect(budget.signal.aborted).toBe(true);
+      expect(budget.remaining()).toBe(0);
+    });
+
+    it("should not abort a released budget even after the deadline passes", async () => {
+      const clock = createControlledClock({ initialTime: 0 });
+
+      const budget = clock.timeout(ms(100));
+      budget.release();
+
+      clock.advanceBy(ms(200));
+      await clock.flush();
+
+      expect(budget.signal.aborted).toBe(false);
+      expect(budget.expired()).toBe(false);
     });
 
     it("should always stop further ticks when interval cancelled", async () => {

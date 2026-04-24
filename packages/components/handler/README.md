@@ -1,319 +1,299 @@
-# @phyxiusjs/handler
+# Handler
 
-Process external work with explicit reliability decisions.
+The universal work-unit primitive. Every API call, every message consumer, every scheduled job is the same shape underneath: a typed piece of work with declared stability and observability. Handler is that shape.
 
-## What This Is
+---
 
-Handler is a boundary between your code and external systems. It makes you choose how to handle the things that will go wrong: timeouts, failures, overload. No magic, just explicit decisions.
+## What this really is
 
-## The Decisions You Make
+One primitive, many transports. HTTP adapters, queue consumers, cron schedulers, internal invocations — they all call `handler.invoke(input)`. The work itself, the retry policy, the circuit breaker, the timeout, the observability fields — all declared once, on the handler.
 
-When processing external work, you're making choices whether you realize it or not:
+The discipline: **no stability decision can be defaulted**. A handler that doesn't declare its timeout, its retry policy, its circuit breaker, its concurrency shape — doesn't compile. "No retry" is an explicit value (`retry.none()`), not an absence. "No circuit breaker" is `cb.none()`. Silence is not a valid answer.
 
-- How long before timeout?
-- What happens on failure?
-- How many retries?
-- What about overload?
-- How do you shut down cleanly?
+This is the "every failure mode must be directly assertable" invariant, expressed at the type level.
 
-Handler makes these decisions explicit and configurable.
+---
 
 ## Installation
 
 ```bash
-npm install @phyxiusjs/handler @phyxiusjs/clock @phyxiusjs/journal
+npm install @phyxiusjs/handler @phyxiusjs/clock @phyxiusjs/journal @phyxiusjs/observe @phyxiusjs/validate @phyxiusjs/fp
 ```
 
-## Basic Example
+The handler re-exports `retry` and `cb` helpers, so you don't need to install `@phyxiusjs/retry` and `@phyxiusjs/circuit-breaker` separately.
 
-```typescript
-import { createHandler, DEFAULT_HANDLER_CONFIG } from "@phyxiusjs/handler";
-import { createSystemClock } from "@phyxiusjs/clock";
+---
+
+## Quick start
+
+```ts
+import { defineHandler, spawn, retry, cb } from "@phyxiusjs/handler";
+import { createSystemClock, ms } from "@phyxiusjs/clock";
 import { Journal } from "@phyxiusjs/journal";
-import { succeed } from "@phyxiusjs/effect";
+import { observe } from "@phyxiusjs/observe";
+import { z } from "zod";
 
-const handler = createHandler({
-  name: "my-handler",
-  processor: {
-    process: (input, context) => {
-      // Your business logic
-      const result = doWork(input);
-      return succeed(result);
-    },
-  },
-  config: DEFAULT_HANDLER_CONFIG,
-  clock: createSystemClock(),
-  journal: new Journal({
-    clock: createSystemClock(),
-    maxEntries: 10000,
-    overflow: "bounded:drop_oldest",
+// 1. Declare what this handler observes (the sidecar schema).
+const orderFields = observe.fields({
+  customerId: observe.field<string>(),
+  chargedAmount: observe.number(),
+  idempotencyKey: observe.field<string>(),
+});
+
+// 2. Define the handler. Every stability field is required.
+const orderHandler = defineHandler({
+  name: "order.process",
+
+  input: z.object({
+    customerId: z.string(),
+    amount: z.number().positive(),
   }),
-});
+  output: z.object({
+    chargeId: z.string(),
+    amount: z.number(),
+  }),
+  fields: orderFields,
 
-// Start with your adapter
-await handler.start(adapter).unsafeRunPromise();
+  // Stability decisions — all required, no defaults.
+  timeout: ms(5_000),
+  concurrency: { max: 20, queueSize: 100, backpressure: "reject" },
+  retry: retry.exponential({ maxAttempts: 3, initialDelay: ms(200) }),
+  circuitBreaker: cb.policy({ failureThreshold: 10, resetTimeout: ms(30_000) }),
 
-// Check metrics
-const metrics = handler.getMetrics();
-console.log(`Active: ${metrics.activeCount}, Queued: ${metrics.queueSize}`);
-
-// Stop gracefully
-await handler.stop().unsafeRunPromise();
-```
-
-## HTTP Example
-
-```typescript
-import { createHandler, createHttpAdapter } from "@phyxiusjs/handler";
-import { succeed, effect } from "@phyxiusjs/effect";
-
-const handler = createHandler<HttpRequest, HttpResponse>({
-  name: "http-api",
-
-  processor: {
-    process: (request, context) => {
-      if (request.method === "GET") {
-        return succeed({
-          statusCode: 200,
-          headers: { "content-type": "application/json" },
-          body: { message: "Hello" },
-        });
-      }
-
-      if (request.method === "POST") {
-        return effect(async () => {
-          const result = await processData(request.body);
-          return {
-            _tag: "Ok",
-            value: {
-              statusCode: 201,
-              headers: { "content-type": "application/json" },
-              body: result,
-            },
-          };
-        });
-      }
-
-      return succeed({
-        statusCode: 405,
-        headers: { allow: "GET, POST" },
-        body: { error: "Method not allowed" },
-      });
-    },
-  },
-
-  config: {
-    maxConcurrency: 20, // Process 20 at once
-    timeoutMs: 30000, // 30 second timeout
-    shutdownTimeoutMs: 10000, // 10 seconds to shut down
-
-    circuitBreaker: {
-      failureThreshold: 10, // Open after 10 failures
-      windowMs: 60000, // In 60 seconds
-      cooldownMs: 30000, // Wait 30 seconds before retry
-    },
-
-    backpressure: {
-      maxQueueSize: 1000,
-      overflowStrategy: "reject", // Your choice: reject, drop-oldest, drop-newest
-    },
-  },
-
-  clock: createSystemClock(),
-  journal: new Journal({ clock, maxEntries: 100000 }),
-});
-
-const httpAdapter = createHttpAdapter(clock);
-await handler.start(httpAdapter).unsafeRunPromise();
-```
-
-## Architecture
-
-```
-External System
-      ↓
-   Adapter (Transport-specific)
-      ↓
-   Handler
-      ├── Backpressure Queue (configurable limits)
-      ├── Circuit Breaker (fail fast when broken)
-      ├── Timeout Guard (nothing hangs forever)
-      └── Process Supervision (restart on crash)
-      ↓
-Your Business Logic
-```
-
-## Observability
-
-Handler emits events for everything that happens:
-
-```typescript
-const handler = createHandler({
-  // ... config
-  emit: (event) => {
-    console.log(event);
-    // Examples:
-    // { type: "work:received", correlationId: "xyz", queueSize: 10 }
-    // { type: "work:completed", correlationId: "xyz", durationMs: 145, success: true }
-    // { type: "circuit:opened", errorCount: 10, windowMs: 60000 }
-    // { type: "backpressure:triggered", queueSize: 1000 }
+  // The work.
+  run: async (input, { budget, signal }) => {
+    orderFields.customerId.set(input.customerId);
+    const charge = await chargeCard(input, { signal });
+    orderFields.chargedAmount.set(charge.amount);
+    return { chargeId: charge.id, amount: charge.amount };
   },
 });
+
+// 3. Materialize a running, supervised instance.
+const clock = createSystemClock();
+const journal = new Journal({ clock });
+const running = await spawn(orderHandler, { clock, journal });
+
+// 4. Invoke. Returns Result<TOutput, HandlerError> — never throws.
+const result = await running.invoke(
+  { customerId: "alice", amount: 99.99 },
+  { correlationId: "req-abc", source: "http" },
+);
+
+if (isOk(result)) console.log("charged:", result.value);
+// else result.error is a typed HandlerError — inspect .type for the failure mode.
 ```
 
-Get metrics anytime:
+---
 
-```typescript
-const metrics = handler.getMetrics();
-// {
-//   state: "running",
-//   activeCount: 15,
-//   queueSize: 234,
-//   successCount: 10523,
-//   errorCount: 47,
-//   errorRate: 0.12,
-//   throughputPerSecond: 89.3,
-//   avgProcessingTimeMs: 124,
-//   p95ProcessingTimeMs: 451
-// }
+## The "no non-decision" rule
+
+Every `HandlerSpec` field below is **required** at the type level. Leave any of them off and `defineHandler` is a compile error:
+
+```ts
+interface HandlerSpec<TInput, TOutput, TFields> {
+  name: string;
+  input: Validator<TInput>;
+  output: Validator<TOutput>;
+  fields: TFields; // observe.fields(...) bag
+  timeout: Millis;
+  concurrency: {
+    max: number;
+    queueSize: number;
+    backpressure: "reject" | "drop-oldest";
+  };
+  retry: RetryPolicy; // retry.none() to declare no retry
+  circuitBreaker: CircuitBreakerPolicy; // cb.none() to declare no breaker
+  run: (input: TInput, tools: HandlerTools) => Promise<TOutput>;
+}
 ```
+
+This is the opposite of frameworks that hide decisions in defaults. You can't forget a timeout. You can't "add retries later." The primitive demands an answer, and the answer can be "none" — but you have to _say_ it.
+
+---
+
+## Failure modes are typed values
+
+```ts
+type HandlerError =
+  | { type: "VALIDATION_ERROR"; target: "input" | "output"; error: ValidationError }
+  | { type: "TIMEOUT"; timeoutMs: number }
+  | { type: "HANDLER_ERROR"; cause: unknown }
+  | { type: "RETRY_EXHAUSTED"; attempts: number; lastCause: unknown }
+  | { type: "CIRCUIT_OPEN"; openedAt: number; willRetryAfter: number }
+  | { type: "BACKPRESSURE_REJECT" }
+  | { type: "DROPPED" }
+  | { type: "HANDLER_NOT_RUNNING" };
+```
+
+Every possible outcome is a named, inspectable, assertable value. Pattern-match on `error.type` to handle them. No generic `Error` catch-all.
+
+---
+
+## The composition underneath
+
+```
+invoke(input)
+  → queue check (concurrency + backpressure)
+  → dispatch (activeCount < max)
+  → context.scope open
+    → validate input
+    → clock.timeout(spec.timeout) → Budget
+    → runWithRetry(
+        breaker.execute(
+          spec.run(input, { budget, signal })
+        ),
+        policy,
+        { signal: budget.signal }
+      )
+    → validate output
+    → snapshot observe fields
+  → context.scope close
+  → journal.append(HandlerEvent)
+  → resolve invoke() promise with Result
+```
+
+Every layer is an injected, composable primitive. Clock drives timeouts and retry waits. The breaker is an Atom-backed state machine. Retry is a policy value. Validation is a `{ parse }` contract. The journal gets exactly one entry per invocation — same shape regardless of transport.
+
+---
+
+## Observability: one entry per invocation, transport-stable
+
+```ts
+interface HandlerEvent {
+  name: string;
+  invocationId: string;
+  correlationId?: string;
+  source: string; // "http" | "queue" | "cron" | "internal" | ...
+  startedAt: Instant;
+  completedAt: Instant;
+  durationMs: number;
+  attempts: number;
+  outcome: "success" | "failure";
+  observed: Readonly<Record<string, unknown>>; // your typed fields snapshot
+  error?: { type: HandlerError["type"]; message: string; stack?: string };
+  meta?: Record<string, unknown>;
+}
+```
+
+HTTP invocations produce this shape. Queue consumers produce this shape. Scheduled jobs produce this shape. Same dashboards, same queries, same alerts — regardless of transport. That's the framework-replacement payoff.
+
+Pair with `@phyxiusjs/drain` to ship the journal to any sink (stdout, file, OTLP, custom).
+
+---
 
 ## Testing
 
-Use controlled time for deterministic tests:
+Handlers are fully testable without any transport. Inject a `ControlledClock` and time-travel through timeouts, retries, and circuit resets deterministically.
 
-```typescript
-import { createControlledClock } from "@phyxiusjs/clock";
+```ts
+import { createControlledClock, ms } from "@phyxiusjs/clock";
+import { Journal } from "@phyxiusjs/journal";
 
-test("timeout behavior", async () => {
-  const clock = createControlledClock();
+const clock = createControlledClock({ initialTime: 0 });
+const journal = new Journal({ clock });
 
-  const handler = createHandler({
-    processor: {
-      process: async (input) => {
-        await clock.sleep(1000);
-        return succeed({ processed: input });
-      },
+const running = await spawn(myHandler, { clock, journal });
+
+// Invoke
+const result = await running.invoke({ ... });
+
+// Check journal
+const entries = journal.getSnapshot().entries;
+expect(entries[0].data.outcome).toBe("success");
+expect(entries[0].data.observed).toMatchObject({ customerId: "alice" });
+
+// Time-travel past retry delays
+clock.advanceBy(ms(500));
+await clock.flush();
+```
+
+Every test is deterministic. No real timers, no flaky backoff.
+
+---
+
+## The running handler
+
+```ts
+interface RunningHandler<TInput, TOutput> {
+  id: ProcessId;
+  name: string;
+
+  invoke(input: TInput, meta?: InvocationMeta): Promise<Result<TOutput, HandlerError>>;
+
+  getMetrics(): HandlerMetrics;
+  getStatus(): HandlerStatus;
+
+  stop(options?: { drainTimeoutMs?: Millis }): Promise<void>;
+}
+```
+
+`invoke` never throws. `stop` is graceful — active invocations drain up to `drainTimeoutMs` (default 10s); queued work that hasn't started is rejected with `HANDLER_NOT_RUNNING`.
+
+Metrics are a snapshot of current state:
+
+```ts
+interface HandlerMetrics {
+  status: "idle" | "running" | "stopping" | "stopped" | "failed";
+  activeCount: number;
+  queuedCount: number;
+  totalInvocations: number;
+  totalSuccesses: number;
+  totalFailures: number;
+  circuitState: "closed" | "open" | "half-open" | "disabled";
+}
+```
+
+---
+
+## Where adapters fit
+
+Adapters are small translators. Each one turns a transport's native event into a handler invocation and its result back into a transport response. They know nothing about stability or observability — the handler owns those.
+
+```ts
+// HTTP (future @phyxiusjs/http)
+createHttpAdapter({
+  routes: [
+    {
+      method: "POST",
+      path: "/orders",
+      handler: orderHandler,
+      decode: (req) => parseOrder(req.body),
+      encode: (res, result) => res.json(result),
     },
-    config: {
-      ...DEFAULT_HANDLER_CONFIG,
-      timeoutMs: 500,
-    },
-    clock,
-  });
-
-  await handler.start(adapter).unsafeRunPromise();
-
-  // Trigger timeout
-  clock.advance(600);
-
-  // Verify timeout happened
+  ],
 });
+
+// Queue (future @phyxiusjs/queue)
+createConsumer({
+  topic: "orders.created",
+  handler: orderHandler,
+  decode: (msg) => JSON.parse(msg.body),
+  onResult: (msg, r) => (r._tag === "Ok" ? msg.ack() : msg.nack()),
+});
+
+// Scheduler (future @phyxiusjs/scheduler)
+createScheduler({ clock, jobs: [{ cron: "*/5 * * * *", handler: cleanupHandler, input: () => ({}) }] });
 ```
 
-## Custom Adapters
+Every adapter is ~100 lines. The hard parts — queueing, retries, observability, validation — live in the handler, once.
 
-Create adapters for any transport:
+---
 
-```typescript
-class MyAdapter implements Adapter<Input, Output> {
-  async *receive() {
-    // Yield work units as they arrive
-    while (this.isActive) {
-      const work = await this.getWork();
-      yield {
-        correlationId: generateId(),
-        input: work,
-        receivedAt: this.clock.now(),
-      };
-    }
-  }
+## What this does NOT do
 
-  respond(correlationId, result) {
-    // Send response back
-    if (result._tag === "Ok") {
-      return this.sendSuccess(correlationId, result.value);
-    } else {
-      return this.sendError(correlationId, result.error);
-    }
-  }
+- **No transport-specific behavior.** Handler doesn't know about HTTP, queues, or cron. Adapters handle that layer.
+- **No distributed coordination.** A running handler is single-process. Scaling across nodes is a transport concern.
+- **No auto-instrumentation.** The `observe` schema is declarative — you decide what gets captured. Nothing is implicit.
+- **No shared state between invocations.** Each invocation gets its own context scope. Persistent state belongs in an `Atom` or external store that the `run` function references.
 
-  close() {
-    // Cleanup
-    return this.disconnect();
-  }
+---
 
-  isHealthy() {
-    return this.connection.isAlive();
-  }
-}
-```
+## What you get
 
-## Configuration Choices
+- **Every failure mode typed and assertable.** No generic errors, no magic catch-alls.
+- **Every timing deterministic.** Clock drives it all — ControlledClock makes tests reproducible.
+- **Every invocation one journal entry.** Same shape across transports. Unified observability surface.
+- **Every stability decision required.** You can't ship a handler without deciding how it handles load, failure, and overload. "None" is a valid answer — but an explicit one.
 
-Every config option is a decision you're making explicitly:
-
-```typescript
-{
-  maxConcurrency: 10,        // How much parallel work?
-  timeoutMs: 30000,          // How long is too long?
-  shutdownTimeoutMs: 10000,  // How long to wait for graceful shutdown?
-
-  circuitBreaker: {
-    failureThreshold: 10,    // How many failures before giving up?
-    windowMs: 60000,         // Over what time period?
-    cooldownMs: 30000        // How long before trying again?
-  },
-
-  backpressure: {
-    maxQueueSize: 100,       // How much to buffer?
-    overflowStrategy: "reject" // What to do when full?
-  }
-}
-```
-
-## What Handler Doesn't Do
-
-- Doesn't prevent all failures (they still happen)
-- Doesn't make async code synchronous
-- Doesn't hide complexity (it exposes it)
-- Doesn't work without configuration (you must choose)
-
-## What Handler Does Do
-
-- Makes timeout/retry/backpressure decisions explicit
-- Provides metrics and events for everything
-- Cleans up resources properly
-- Shuts down gracefully
-- Works with any transport via adapters
-- Tests deterministically with controlled time
-
-## Using with Phyxius
-
-Handler uses these Phyxius primitives:
-
-- **Clock**: All time operations
-- **Atom**: State management without races
-- **Effect**: Structured async with cleanup
-- **Process**: Supervised execution
-- **Journal**: Event history
-- **FP Utils**: Explicit error handling
-
-## Production Notes
-
-Things to consider:
-
-- Set timeouts based on your SLAs
-- Choose backpressure strategy based on your workload
-- Monitor circuit breaker opens
-- Watch queue sizes
-- Configure graceful shutdown timeout
-- Test with controlled clock for edge cases
-
-## Status
-
-We use this in production. It works for us. Your mileage may vary.
-
-## License
-
-MIT
+Handler is the invariant unit. Everything above — adapters, schedulers, consumers — composes around it.

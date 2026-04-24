@@ -1,618 +1,552 @@
-import { randomUUID } from "node:crypto";
-import { createAtom } from "@phyxiusjs/atom";
-import { createProcess } from "@phyxiusjs/process";
+import type { Budget, Millis } from "@phyxiusjs/clock";
+import { createAtom, type Atom } from "@phyxiusjs/atom";
 import { context } from "@phyxiusjs/context";
 import { observe } from "@phyxiusjs/observe";
-import { ok, err } from "@phyxiusjs/fp";
-import type { Result } from "@phyxiusjs/fp";
-import type { Millis } from "@phyxiusjs/clock";
+import { ok, err, type Result } from "@phyxiusjs/fp";
+import { validate } from "@phyxiusjs/validate";
+import { runWithRetry } from "@phyxiusjs/retry";
+import { createCircuitBreaker, type CircuitBreaker } from "@phyxiusjs/circuit-breaker";
+import { spawn as spawnProcess } from "@phyxiusjs/process";
 import type {
-  Handler,
-  HandlerDefinition,
-  HandlerConfig,
-  HandlerState,
+  HandlerSpec,
+  HandlerRuntime,
+  HandlerTools,
+  RunningHandler,
+  HandlerStatus,
   HandlerMetrics,
-  HandlerInternalState,
+  InvocationMeta,
+  HandlerError,
   HandlerEvent,
-  WorkMeta,
-  HandlerMsg,
-  CircuitBreakerInternalState,
 } from "./types.js";
-import { HandlerError } from "./types.js";
-
-// ── Internal types ──────────────────────────────────────────────────────────
-
-/**
- * A pending work item holding the input and its settlement callback.
- * Lives in the mutable work queue, which is only accessed from within
- * the Process message pump (single-threaded — no races).
- */
-interface QueuedWork<TInput, TOutput> {
-  readonly correlationId: string;
-  readonly input: TInput;
-  readonly meta: WorkMeta;
-  readonly resolve: (result: Result<TOutput, HandlerError>) => void;
-}
 
 // ── defineHandler ───────────────────────────────────────────────────────────
 
 /**
- * Declare a handler definition.
- * Nothing runs — this is pure configuration.
- * Call `createHandler()` to materialize it into a running process.
+ * Declare a handler as pure data. Nothing is running yet — `spawn` materializes
+ * the spec into a supervised, dispatching instance.
  *
- * @example
- * const myHandler = defineHandler({
- *   name: "user.processor",
- *   processor: async (input) => processUser(input),
- *   concurrency: { max: 10, backpressure: "reject", queueSize: 100 },
- *   timeout: 5_000 as Millis,
- *   retry: { maxAttempts: 3, backoff: "exponential" },
- * });
+ * All stability fields on `HandlerSpec` are required. A missing `timeout`,
+ * `retry`, `circuitBreaker`, or `concurrency` is a compile error. Use
+ * `retry.none()` / `cb.none()` to declare "no retry / no breaker" as
+ * explicit values — silence is not a valid answer.
  */
-export function defineHandler<TInput, TOutput>(
-  definition: HandlerDefinition<TInput, TOutput>,
-): HandlerDefinition<TInput, TOutput> {
-  return definition;
+export function defineHandler<TInput, TOutput, TFields>(
+  spec: HandlerSpec<TInput, TOutput, TFields>,
+): HandlerSpec<TInput, TOutput, TFields> {
+  if (spec.concurrency.max < 1) {
+    throw new Error(`handler "${spec.name}": concurrency.max must be >= 1`);
+  }
+  if (spec.concurrency.queueSize < 0) {
+    throw new Error(`handler "${spec.name}": concurrency.queueSize must be >= 0`);
+  }
+  if (spec.timeout < 0) {
+    throw new Error(`handler "${spec.name}": timeout must be >= 0`);
+  }
+  return spec;
 }
 
-// ── createHandler ───────────────────────────────────────────────────────────
+// ── spawn ───────────────────────────────────────────────────────────────────
 
 /**
- * Materialize a HandlerDefinition into a running supervised Process.
+ * Materialize a handler spec into a supervised, running instance.
  *
- * The Handler is fully self-contained:
- * - Process lifecycle (start, stop, supervision/restart)
- * - Concurrency cap (at most `concurrency.max` simultaneous executions)
- * - Backpressure (what happens when the work queue is full)
- * - Timeout, retry, circuit-breaker (built-in, not delegated)
- * - Context scope + Observe per execution (captured into Journal event)
- * - One mandatory Journal entry per completed work unit
- *
- * @example
- * const handler = createHandler(myDefinition, { clock, journal });
- * await handler.start();
- * const result = await handler.submit(input, { source: "http" });
+ * The instance is backed by a Process (per the authored invariant: "Handler
+ * lifecycles must be supervised by Process"). Dispatch of invocations uses
+ * atom-managed state for concurrency accounting + a simple work queue. The
+ * work body composes circuit-breaker → retry → budget timeout → the user's
+ * `run` function, wrapped in a context scope that captures every typed field
+ * into one journal entry per invocation.
  */
-export function createHandler<TInput, TOutput>(
-  definition: HandlerDefinition<TInput, TOutput>,
-  config: HandlerConfig,
-): Handler<TInput, TOutput> {
-  const { clock, journal } = config;
-  const { processor, concurrency, name: handlerName } = definition;
+export async function spawn<TInput, TOutput, TFields>(
+  spec: HandlerSpec<TInput, TOutput, TFields>,
+  runtime: HandlerRuntime,
+): Promise<RunningHandler<TInput, TOutput>> {
+  const { clock, journal } = runtime;
 
-  // ── Resilience defaults ─────────────────────────────────────────────────
-  const retryConfig = definition.retry;
-  const timeoutMs = definition.timeout;
-  const cbConfig = definition.circuitBreaker;
-
-  // ── Circuit breaker state ───────────────────────────────────────────────
-  const circuitBreaker = cbConfig
-    ? createAtom<CircuitBreakerInternalState>(
-        { state: "closed", consecutiveFailures: 0, openedAt: 0 },
-        clock,
-      )
-    : undefined;
-
-  // ── Handler state ───────────────────────────────────────────────────────
-  const initialState: HandlerInternalState = {
-    status: "idle",
-    activeCount: 0,
-    queuedCount: 0,
-    pendingCount: 0,
-    totalProcessed: 0,
-    totalSucceeded: 0,
-    totalFailed: 0,
-  };
-
-  const stateAtom = createAtom(initialState, clock);
-
-  // Work queue — mutable but only accessed from within the Process message pump.
-  const workQueue: QueuedWork<TInput, TOutput>[] = [];
-
-  // ── Resilience: timeout wrapper ─────────────────────────────────────────
-
-  async function withTimeout<T>(fn: () => Promise<T>, ms: Millis): Promise<T> {
-    return new Promise<T>((resolve, reject) => {
-      let settled = false;
-
-      const timer = setTimeout(() => {
-        if (!settled) {
-          settled = true;
-          reject(new HandlerError(`Execution timed out after ${ms}ms`, "EXECUTION_TIMEOUT"));
-        }
-      }, ms);
-
-      fn()
-        .then((value) => {
-          if (!settled) {
-            settled = true;
-            clearTimeout(timer);
-            resolve(value);
-          }
-        })
-        .catch((error: unknown) => {
-          if (!settled) {
-            settled = true;
-            clearTimeout(timer);
-            reject(error);
-          }
-        });
-    });
-  }
-
-  // ── Resilience: retry wrapper ───────────────────────────────────────────
-
-  async function withRetry(
-    fn: () => Promise<TOutput>,
-    config: NonNullable<HandlerDefinition<TInput, TOutput>["retry"]>,
-  ): Promise<{ value: TOutput; attempts: number }> {
-    const { maxAttempts, backoff } = config;
-    const initialDelay = config.initialDelay ?? (100 as Millis);
-    const maxDelay = config.maxDelay ?? (30_000 as Millis);
-
-    let lastError: unknown;
-
-    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-      try {
-        const value = await fn();
-        return { value, attempts: attempt };
-      } catch (error: unknown) {
-        lastError = error;
-        if (attempt < maxAttempts) {
-          const delay =
-            backoff === "exponential"
-              ? Math.min(initialDelay * 2 ** (attempt - 1), maxDelay)
-              : initialDelay;
-          await clock.sleep(delay as Millis);
-        }
-      }
-    }
-
-    throw lastError;
-  }
-
-  // ── Resilience: circuit breaker ─────────────────────────────────────────
-
-  function checkCircuitBreaker(): void {
-    if (!circuitBreaker || !cbConfig) return;
-
-    const cb = circuitBreaker.deref();
-
-    if (cb.state === "open") {
-      const elapsed = clock.now().monoMs - cb.openedAt;
-      if (elapsed >= cbConfig.resetTimeout) {
-        // Transition to half-open — allow one probe
-        circuitBreaker.swap((s) => ({ ...s, state: "half-open" }));
-      } else {
-        throw new HandlerError("Circuit breaker is open", "CIRCUIT_OPEN");
-      }
-    }
-    // "closed" and "half-open" allow execution
-  }
-
-  function recordCircuitSuccess(): void {
-    if (!circuitBreaker) return;
-    circuitBreaker.swap(() => ({ state: "closed", consecutiveFailures: 0, openedAt: 0 }));
-  }
-
-  function recordCircuitFailure(): void {
-    if (!circuitBreaker || !cbConfig) return;
-
-    circuitBreaker.swap((s) => {
-      const failures = s.consecutiveFailures + 1;
-      if (failures >= cbConfig.failureThreshold) {
-        return { state: "open", consecutiveFailures: failures, openedAt: clock.now().monoMs };
-      }
-      return { ...s, consecutiveFailures: failures };
-    });
-  }
-
-  // ── Work execution ────────────────────────────────────────────────────────
-
-  /**
-   * Execute a work unit with full resilience and observability wiring.
-   * Establishes a Context scope, captures observe data, applies timeout/retry/CB,
-   * and appends a mandatory Journal event on completion.
-   */
-  async function executeWork(
-    work: QueuedWork<TInput, TOutput>,
-    executionId: string,
-    startedAt: ReturnType<typeof clock.now>,
-  ): Promise<void> {
-    // Check circuit breaker before executing
-    try {
-      checkCircuitBreaker();
-    } catch (cbError: unknown) {
-      const completedAt = clock.now();
-      const durationMs = completedAt.monoMs - startedAt.monoMs;
-
-      const journalEvent: HandlerEvent = {
-        handlerName,
-        executionId,
-        startedAt,
-        completedAt,
-        durationMs,
-        attempts: 0,
-        outcome: "failure",
-        source: work.meta.source ?? "unknown",
-        correlationId: work.meta.correlationId ?? executionId,
-        observed: {},
-        error:
-          cbError instanceof Error
-            ? { message: cbError.message }
-            : { message: String(cbError) },
-        meta: work.meta,
-      };
-      journal.append(journalEvent);
-
-      stateAtom.swap((s) => ({
-        ...s,
-        activeCount: s.activeCount - 1,
-        totalProcessed: s.totalProcessed + 1,
-        totalFailed: s.totalFailed + 1,
-      }));
-
-      work.resolve(
-        err(
-          cbError instanceof HandlerError
-            ? cbError
-            : new HandlerError("Circuit breaker error", "CIRCUIT_OPEN", cbError),
-        ),
-      );
-
-      notifyWorkDone();
-      return;
-    }
-
-    // Execute within Context scope to capture observe data
-    type ExecutionOutcome =
-      | {
-          readonly success: true;
-          readonly value: TOutput;
-          readonly attempts: number;
-          readonly observed: Readonly<Record<string, unknown>>;
-        }
-      | {
-          readonly success: false;
-          readonly error: { readonly message: string; readonly stack?: string };
-          readonly attempts: number;
-          readonly observed: Readonly<Record<string, unknown>>;
-        };
-
-    const outcome = await context.scope<Record<string, unknown>, ExecutionOutcome>(async () => {
-      // Seed observe context with handler metadata
-      observe.set("handler", handlerName);
-      observe.set("executionId", executionId);
-      observe.set("source", work.meta.source ?? "unknown");
-
-      // Copy adapter-provided context (e.g., HTTP method, path, query) into observe
-      if (work.meta.context) {
-        for (const [key, value] of Object.entries(work.meta.context)) {
-          observe.set(key, value);
-        }
-      }
-
-      let attempts = 1;
-
-      try {
-        function makeExecutor(): () => Promise<TOutput> {
-          if (timeoutMs !== undefined) {
-            return () => withTimeout(() => processor(work.input), timeoutMs);
-          }
-          return () => processor(work.input);
-        }
-
-        const executor = makeExecutor();
-
-        let value: TOutput;
-        if (retryConfig) {
-          const retryResult = await withRetry(executor, retryConfig);
-          ({ attempts } = retryResult);
-          ({ value } = retryResult);
-        } else {
-          value = await executor();
-        }
-
-        observe.set("attempts", attempts);
-        const observed = { ...observe.all() };
-        return { success: true as const, value, attempts, observed };
-      } catch (error: unknown) {
-        observe.set("attempts", attempts);
-        const observed = { ...observe.all() };
-
-        if (error instanceof Error) {
-          const errorDetail: { readonly message: string; readonly stack?: string } = error.stack
-            ? { message: error.message, stack: error.stack }
-            : { message: error.message };
-          return {
-            success: false as const,
-            error: errorDetail,
-            attempts,
-            observed,
-          };
-        }
-        return {
-          success: false as const,
-          error: { message: String(error) },
-          attempts,
-          observed,
-        };
-      }
+  // Per-factory invocation counter — avoid module-global state.
+  let invocationCounter = 0;
+  const nextInvocationId =
+    runtime.idGenerator ??
+    ((): string => {
+      invocationCounter += 1;
+      return `inv-${clock.now().wallMs.toString(36)}-${invocationCounter.toString(36)}`;
     });
 
-    const completedAt = clock.now();
-    const durationMs = completedAt.monoMs - startedAt.monoMs;
+  // ── Internal state ──────────────────────────────────────────────────────
 
-    // Record circuit breaker result
-    if (outcome.success) {
-      recordCircuitSuccess();
-    } else {
-      recordCircuitFailure();
-    }
-
-    // Mandatory Journal event
-    const baseEvent = {
-      handlerName,
-      executionId,
-      startedAt,
-      completedAt,
-      durationMs,
-      attempts: outcome.attempts,
-      source: work.meta.source ?? "unknown",
-      correlationId: work.meta.correlationId ?? executionId,
-      observed: outcome.observed,
-      meta: work.meta,
-    } as const;
-
-    const journalEvent: HandlerEvent = outcome.success
-      ? { ...baseEvent, outcome: "success" }
-      : { ...baseEvent, outcome: "failure", error: outcome.error };
-    journal.append(journalEvent);
-
-    // Update counters
-    stateAtom.swap((s) => ({
-      ...s,
-      activeCount: s.activeCount - 1,
-      totalProcessed: s.totalProcessed + 1,
-      totalSucceeded: s.totalSucceeded + (outcome.success ? 1 : 0),
-      totalFailed: s.totalFailed + (outcome.success ? 0 : 1),
-    }));
-
-    // Settle the submit() promise
-    if (outcome.success) {
-      work.resolve(ok(outcome.value as TOutput));
-    } else {
-      work.resolve(
-        err(
-          new HandlerError(
-            outcome.error?.message ?? "Execution failed",
-            "EXECUTION_FAILED",
-            outcome.error,
-          ),
-        ),
-      );
-    }
-
-    notifyWorkDone();
+  interface InternalState {
+    readonly status: HandlerStatus;
+    readonly activeCount: number;
+    readonly queuedCount: number;
+    readonly totalInvocations: number;
+    readonly totalSuccesses: number;
+    readonly totalFailures: number;
   }
 
-  function notifyWorkDone(): void {
-    void processRef.send({ type: "work-done" }).catch(() => {
-      // Process has already stopped — ignore
-    });
-  }
-
-  // ── Queue management ──────────────────────────────────────────────────────
-
-  /**
-   * Pick the next queued work item (if any) and begin executing it.
-   * Only called from within the Process message pump.
-   */
-  function tryDequeueAndExecute(): void {
-    const current = stateAtom.deref();
-    if (current.status !== "running") return;
-    if (workQueue.length > 0 && current.activeCount < concurrency.max) {
-      const work = workQueue.shift()!;
-      stateAtom.swap((s) => ({
-        ...s,
-        activeCount: s.activeCount + 1,
-        queuedCount: s.queuedCount - 1,
-      }));
-      void executeWork(work, work.correlationId, clock.now());
-    }
-  }
-
-  // ── Process ───────────────────────────────────────────────────────────────
-
-  // eslint-disable-next-line prefer-const
-  let processRef = createProcess<HandlerMsg<TInput, TOutput>, HandlerInternalState>(
+  const state: Atom<InternalState> = createAtom<InternalState>(
     {
-      init: () => stateAtom.deref(),
+      status: "idle",
+      activeCount: 0,
+      queuedCount: 0,
+      totalInvocations: 0,
+      totalSuccesses: 0,
+      totalFailures: 0,
+    },
+    clock,
+  );
 
-      handle: (_state, msg) => {
-        if (msg === undefined) {
-          return stateAtom.deref();
-        }
+  // Circuit breaker — shared across all invocations, per the handler spec.
+  const breaker: CircuitBreaker = createCircuitBreaker({
+    policy: spec.circuitBreaker,
+    clock,
+  });
 
-        if (msg.type === "work-done") {
-          tryDequeueAndExecute();
-          return stateAtom.deref();
-        }
+  // Work queue — mutated only from sync dispatch paths, no cross-thread
+  // concerns in Node single-threaded execution.
+  interface QueuedWork {
+    readonly invocationId: string;
+    readonly input: TInput;
+    readonly meta: InvocationMeta;
+    readonly resolve: (result: Result<TOutput, HandlerError>) => void;
+  }
+  const queue: QueuedWork[] = [];
 
-        const submitMsg = msg;
+  // ── Internal schema for the journal entry's structured fields ───────────
+  //
+  // The handler's infrastructure fields are stamped via these typed handles
+  // inside each invocation's context scope. The caller's `spec.fields` bag
+  // accumulates domain data in the same scope; everything merges into one
+  // journal event at completion.
 
-        // Move out of pending
-        stateAtom.swap((s) => ({ ...s, pendingCount: s.pendingCount - 1 }));
-        const current = stateAtom.deref();
+  const infraFields = observe.fields({
+    __handlerName: observe.field<string>(),
+    __invocationId: observe.field<string>(),
+    __correlationId: observe.field<string>(),
+    __source: observe.field<string>(),
+    __startedAtWallMs: observe.field<number>(),
+  });
 
-        // Slot available and queue is empty — execute immediately
-        if (current.activeCount < concurrency.max && workQueue.length === 0) {
-          stateAtom.swap((s) => ({ ...s, activeCount: s.activeCount + 1 }));
-          void executeWork(
-            {
-              correlationId: submitMsg.correlationId,
-              input: submitMsg.input,
-              meta: submitMsg.meta,
-              resolve: submitMsg.resolve,
-            },
-            submitMsg.correlationId,
-            clock.now(),
-          );
-          return stateAtom.deref();
-        }
+  // ── Process for lifecycle supervision ───────────────────────────────────
 
-        // Queue has capacity — enqueue
-        if (workQueue.length < concurrency.queueSize) {
-          workQueue.push({
-            correlationId: submitMsg.correlationId,
-            input: submitMsg.input,
-            meta: submitMsg.meta,
-            resolve: submitMsg.resolve,
-          });
-          stateAtom.swap((s) => ({ ...s, queuedCount: s.queuedCount + 1 }));
-          return stateAtom.deref();
-        }
+  interface HandlerProcessMsg {
+    readonly type: "__noop";
+  }
 
-        // Queue is full — apply backpressure
-        if (concurrency.backpressure === "reject") {
-          submitMsg.resolve(
-            err(new HandlerError("Queue is full — backpressure: reject", "BACKPRESSURE_REJECT")),
-          );
-          return stateAtom.deref();
-        }
-
-        // "drop-oldest": evict the oldest queued item and enqueue the new one
-        const dropped = workQueue.shift();
-        if (dropped) {
-          dropped.resolve(
-            err(
-              new HandlerError(
-                "Dropped by drop-oldest backpressure policy",
-                "BACKPRESSURE_REJECT",
-              ),
-            ),
-          );
-          stateAtom.swap((s) => ({ ...s, queuedCount: s.queuedCount - 1 }));
-        }
-        workQueue.push({
-          correlationId: submitMsg.correlationId,
-          input: submitMsg.input,
-          meta: submitMsg.meta,
-          resolve: submitMsg.resolve,
-        });
-        stateAtom.swap((s) => ({ ...s, queuedCount: s.queuedCount + 1 }));
-        return stateAtom.deref();
+  const process = await spawnProcess<HandlerProcessMsg, void>(
+    {
+      name: `handler:${spec.name}`,
+      handle: () => {
+        // The handler's work dispatch happens outside the process loop —
+        // this process exists to satisfy the "supervised lifecycle"
+        // invariant, hold start/stop semantics, and emit lifecycle events.
       },
-
-      terminate: () => {
-        for (const work of workQueue.splice(0)) {
-          work.resolve(err(new HandlerError("Handler stopped", "HANDLER_NOT_RUNNING")));
-        }
+      onStop: async () => {
+        // Cleanup hook — the outer `stop()` has already drained/rejected.
       },
     },
     { clock },
   );
 
-  // ── Public Handler ────────────────────────────────────────────────────────
+  state.swap((s) => ({ ...s, status: "running" }));
 
-  const handler: Handler<TInput, TOutput> = {
-    async start(): Promise<void> {
-      const current = stateAtom.deref();
-      if (current.status === "running") {
-        throw new HandlerError("Handler is already running", "HANDLER_ALREADY_RUNNING");
-      }
-      if (current.status === "stopping" || current.status === "stopped") {
-        throw new HandlerError(
-          "Handler cannot be restarted once stopped",
-          "HANDLER_ALREADY_RUNNING",
-        );
-      }
-      stateAtom.swap((s) => ({ ...s, status: "running" }));
-      await processRef.start();
-    },
+  // ── Dispatch loop ───────────────────────────────────────────────────────
 
-    async stop(): Promise<void> {
-      const current = stateAtom.deref();
-      if (current.status !== "running") {
-        return;
-      }
+  function tryDispatch(): void {
+    const s = state.deref();
+    if (s.status !== "running" && s.status !== "stopping") return;
+    if (s.activeCount >= spec.concurrency.max) return;
+    if (queue.length === 0) return;
 
-      stateAtom.swap((s) => ({ ...s, status: "stopping" }));
+    const work = queue.shift();
+    if (!work) return;
 
-      // Drain active work with a timeout
-      const shutdownTimeoutMs = 10_000;
-      const deadline = clock.now().monoMs + shutdownTimeoutMs;
+    state.swap((prev) => ({
+      ...prev,
+      activeCount: prev.activeCount + 1,
+      queuedCount: prev.queuedCount - 1,
+    }));
 
-      while (stateAtom.deref().activeCount > 0 || stateAtom.deref().pendingCount > 0) {
-        if (clock.now().monoMs > deadline) {
-          throw new HandlerError("Graceful shutdown timeout exceeded", "SHUTDOWN_TIMEOUT");
+    void executeWork(work).finally(() => {
+      state.swap((prev) => ({ ...prev, activeCount: prev.activeCount - 1 }));
+      tryDispatch();
+    });
+  }
+
+  // ── Single-invocation execution ─────────────────────────────────────────
+  //
+  // Everything runs inside a single `context.scope` so:
+  //   - infra fields + caller's observe fields accumulate in one bag
+  //   - the observed snapshot can be captured before the scope exits
+  //
+  // The outcome returned from the scope carries both the Result and the
+  // observed data we want on the journal event.
+
+  interface InvocationOutcome {
+    readonly result: Result<TOutput, HandlerError>;
+    readonly attempts: number;
+    readonly observed: Record<string, unknown>;
+  }
+
+  async function executeWork(work: QueuedWork): Promise<void> {
+    const { invocationId, input, meta } = work;
+    const startedAt = clock.now();
+
+    const outcome: InvocationOutcome = await context.scope<Record<string, unknown>, InvocationOutcome>(
+      async () => {
+        // Stamp infra fields into the scope.
+        infraFields.__handlerName.set(spec.name);
+        infraFields.__invocationId.set(invocationId);
+        infraFields.__source.set(meta.source ?? "internal");
+        infraFields.__startedAtWallMs.set(startedAt.wallMs);
+        if (meta.correlationId) {
+          infraFields.__correlationId.set(meta.correlationId);
         }
-        await clock.sleep(10 as Millis);
+
+        const result = await runInvocation(input, meta);
+        return {
+          result: result.result,
+          attempts: result.attempts,
+          observed: snapshotObservedFromCurrentScope(),
+        };
+      },
+      { initial: { ...(meta.context ?? {}) } },
+    );
+
+    const completedAt = clock.now();
+    const durationMs = completedAt.monoMs - startedAt.monoMs;
+
+    const baseEvent = {
+      name: spec.name,
+      invocationId,
+      source: meta.source ?? "internal",
+      startedAt,
+      completedAt,
+      durationMs,
+      attempts: outcome.attempts,
+      observed: outcome.observed,
+      ...(meta.correlationId ? { correlationId: meta.correlationId } : {}),
+      ...(meta.context ? { meta: { ...meta.context } } : {}),
+    } as const;
+
+    const event: HandlerEvent =
+      outcome.result._tag === "Ok"
+        ? { ...baseEvent, outcome: "success" as const }
+        : {
+            ...baseEvent,
+            outcome: "failure" as const,
+            error: describeError(outcome.result.error),
+          };
+
+    journal.append(event);
+
+    state.swap((s) => ({
+      ...s,
+      totalInvocations: s.totalInvocations + 1,
+      totalSuccesses: s.totalSuccesses + (outcome.result._tag === "Ok" ? 1 : 0),
+      totalFailures: s.totalFailures + (outcome.result._tag === "Ok" ? 0 : 1),
+    }));
+
+    work.resolve(outcome.result);
+  }
+
+  /**
+   * Run the validate → breaker → retry → run → validate pipeline. Returns the
+   * Result and the number of attempts made (1 for "no retry," N for N
+   * attempts when retries were configured).
+   */
+  async function runInvocation(
+    input: TInput,
+    _meta: InvocationMeta,
+  ): Promise<{ result: Result<TOutput, HandlerError>; attempts: number }> {
+    const parsedInput = validate(spec.input, input);
+    if (parsedInput._tag === "Err") {
+      return {
+        result: err({
+          type: "VALIDATION_ERROR" as const,
+          target: "input" as const,
+          error: parsedInput.error,
+        }),
+        attempts: 0,
+      };
+    }
+
+    // One Budget per invocation; retries SHARE it. The budget bounds the
+    // entire operation — if it expires during a retry wait or mid-attempt,
+    // we surface TIMEOUT.
+    const budget: Budget = clock.timeout(spec.timeout);
+
+    const tools: HandlerTools = {
+      clock,
+      budget,
+      signal: budget.signal,
+    };
+
+    // Count attempts by incrementing before each `spec.run` call.
+    let attempts = 0;
+
+    const attemptOnce = async (): Promise<TOutput> => {
+      attempts += 1;
+      const breakerResult = await breaker.execute(() => spec.run(parsedInput.value, tools));
+      if (breakerResult._tag === "Err") {
+        throw new CircuitOpenThrown(breakerResult.error);
+      }
+      return breakerResult.value;
+    };
+
+    let retryResult: Awaited<ReturnType<typeof runWithRetry<TOutput>>>;
+    try {
+      retryResult = await runWithRetry(attemptOnce, spec.retry, clock, {
+        signal: budget.signal,
+      });
+    } catch (thrown) {
+      budget.release();
+      return {
+        result: err({ type: "HANDLER_ERROR" as const, cause: thrown }),
+        attempts: attempts || 1,
+      };
+    }
+
+    budget.release();
+
+    if (retryResult._tag === "Err") {
+      switch (retryResult.error.type) {
+        case "ABORTED":
+          return {
+            result: err({ type: "TIMEOUT" as const, timeoutMs: spec.timeout }),
+            attempts: attempts || retryResult.error.attempts,
+          };
+        case "REJECTED": {
+          const e = retryResult.error.error;
+          if (e instanceof CircuitOpenThrown) {
+            return { result: err(e.asHandlerError()), attempts: attempts || 1 };
+          }
+          return {
+            result: err({ type: "HANDLER_ERROR" as const, cause: e }),
+            attempts: attempts || 1,
+          };
+        }
+        case "EXHAUSTED": {
+          const last = retryResult.error.lastError;
+          if (last instanceof CircuitOpenThrown) {
+            return { result: err(last.asHandlerError()), attempts: attempts || 1 };
+          }
+          if (spec.retry.maxAttempts === 1) {
+            // retry.none() — single attempt, plain handler error.
+            return {
+              result: err({ type: "HANDLER_ERROR" as const, cause: last }),
+              attempts: 1,
+            };
+          }
+          return {
+            result: err({
+              type: "RETRY_EXHAUSTED" as const,
+              attempts: retryResult.error.attempts,
+              lastCause: last,
+            }),
+            attempts: retryResult.error.attempts,
+          };
+        }
+      }
+    }
+
+    // Success path — validate output.
+    const validated = validate(spec.output, retryResult.value);
+    if (validated._tag === "Err") {
+      return {
+        result: err({
+          type: "VALIDATION_ERROR" as const,
+          target: "output" as const,
+          error: validated.error,
+        }),
+        attempts,
+      };
+    }
+
+    return { result: ok(validated.value), attempts };
+  }
+
+  /**
+   * Snapshot the current context scope's data, stripping handler-internal
+   * infra keys (`__handlerName`, etc.) so the `observed` field on the
+   * journal entry holds only caller-written observations.
+   */
+  function snapshotObservedFromCurrentScope(): Record<string, unknown> {
+    const ctx = context.current();
+    if (!ctx) return {};
+    const data = ctx.data as Record<string, unknown>;
+    const copy: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(data)) {
+      if (!k.startsWith("__")) copy[k] = v;
+    }
+    return copy;
+  }
+
+  // ── Public handle ───────────────────────────────────────────────────────
+
+  function currentCircuitState(): HandlerMetrics["circuitState"] {
+    if (!spec.circuitBreaker.enabled) return "disabled";
+    return breaker.snapshot().state;
+  }
+
+  const handler: RunningHandler<TInput, TOutput> = {
+    id: process.id,
+    name: spec.name,
+
+    async invoke(input: TInput, meta: InvocationMeta = {}): Promise<Result<TOutput, HandlerError>> {
+      const s = state.deref();
+      if (s.status !== "running") {
+        return err({ type: "HANDLER_NOT_RUNNING" });
       }
 
-      // Reject remaining queued items that haven't started
-      for (const work of workQueue.splice(0)) {
-        work.resolve(err(new HandlerError("Handler stopped", "HANDLER_NOT_RUNNING")));
+      // Admission control: combined active + queued against queueSize.
+      const totalInFlight = s.activeCount + s.queuedCount;
+      const capacity = spec.concurrency.max + spec.concurrency.queueSize;
+
+      if (totalInFlight >= capacity) {
+        if (spec.concurrency.backpressure === "reject") {
+          return err({ type: "BACKPRESSURE_REJECT" });
+        }
+        // drop-oldest: evict the front of the queue.
+        const dropped = queue.shift();
+        if (dropped) {
+          dropped.resolve(err({ type: "DROPPED" }));
+          state.swap((prev) => ({ ...prev, queuedCount: prev.queuedCount - 1 }));
+        }
       }
 
-      stateAtom.swap((s) => ({ ...s, status: "stopped", queuedCount: 0 }));
-      await processRef.stop();
-    },
-
-    async submit(input: TInput, meta: WorkMeta = {}): Promise<Result<TOutput, HandlerError>> {
-      const current = stateAtom.deref();
-      if (current.status !== "running") {
-        return err(new HandlerError("Handler is not running", "HANDLER_NOT_RUNNING"));
-      }
-
-      stateAtom.swap((s) => ({ ...s, pendingCount: s.pendingCount + 1 }));
-
-      return new Promise((resolve) => {
-        const correlationId = meta.correlationId ?? randomUUID();
-        const msg: HandlerMsg<TInput, TOutput> = {
-          type: "submit",
-          correlationId,
+      return new Promise<Result<TOutput, HandlerError>>((resolve) => {
+        const work: QueuedWork = {
+          invocationId: nextInvocationId(),
           input,
           meta,
           resolve,
         };
 
-        processRef
-          .send(msg)
-          .then((sent) => {
-            if (!sent) {
-              stateAtom.swap((s) => ({ ...s, pendingCount: s.pendingCount - 1 }));
-              resolve(
-                err(new HandlerError("Process mailbox full", "BACKPRESSURE_REJECT")),
-              );
-            }
-          })
-          .catch(() => {
-            stateAtom.swap((s) => ({ ...s, pendingCount: s.pendingCount - 1 }));
-            resolve(
-              err(new HandlerError("Handler is not running", "HANDLER_NOT_RUNNING")),
-            );
-          });
+        queue.push(work);
+        state.swap((prev) => ({ ...prev, queuedCount: prev.queuedCount + 1 }));
+
+        tryDispatch();
       });
     },
 
     getMetrics(): HandlerMetrics {
-      const s = stateAtom.deref();
+      const s = state.deref();
       return {
-        state: s.status,
+        status: s.status,
         activeCount: s.activeCount,
         queuedCount: s.queuedCount,
-        totalProcessed: s.totalProcessed,
-        totalSucceeded: s.totalSucceeded,
-        totalFailed: s.totalFailed,
+        totalInvocations: s.totalInvocations,
+        totalSuccesses: s.totalSuccesses,
+        totalFailures: s.totalFailures,
+        circuitState: currentCircuitState(),
       };
     },
 
-    getState(): HandlerState {
-      return stateAtom.deref().status;
+    getStatus(): HandlerStatus {
+      return state.deref().status;
+    },
+
+    async stop(options?: { drainTimeoutMs?: Millis }): Promise<void> {
+      const current = state.deref();
+      if (current.status !== "running") return;
+
+      state.swap((s) => ({ ...s, status: "stopping" }));
+
+      const drainTimeoutMs = options?.drainTimeoutMs ?? (10_000 as Millis);
+      const deadline = clock.now().monoMs + drainTimeoutMs;
+
+      // Wait for active invocations to drain.
+      while (state.deref().activeCount > 0) {
+        if (clock.now().monoMs > deadline) break;
+        await clock.sleep(10 as Millis);
+      }
+
+      // Reject any remaining queued work — they never started.
+      while (queue.length > 0) {
+        const work = queue.shift();
+        if (work) {
+          work.resolve(err({ type: "HANDLER_NOT_RUNNING" }));
+          state.swap((s) => ({ ...s, queuedCount: s.queuedCount - 1 }));
+        }
+      }
+
+      state.swap((s) => ({ ...s, status: "stopped" }));
+      await process.stop();
     },
   };
 
   return handler;
+}
+
+// ── Internals ───────────────────────────────────────────────────────────────
+
+/** Lets the retry loop distinguish breaker-open failures from generic throws. */
+class CircuitOpenThrown extends Error {
+  readonly openedAt: number;
+  readonly willRetryAfter: number;
+
+  constructor(info: { openedAt: number; willRetryAfter: number }) {
+    super("Circuit breaker is open");
+    this.name = "CircuitOpenThrown";
+    this.openedAt = info.openedAt;
+    this.willRetryAfter = info.willRetryAfter;
+  }
+
+  asHandlerError(): HandlerError {
+    return {
+      type: "CIRCUIT_OPEN",
+      openedAt: this.openedAt,
+      willRetryAfter: this.willRetryAfter,
+    };
+  }
+}
+
+function describeError(error: HandlerError): {
+  type: HandlerError["type"];
+  message: string;
+  stack?: string;
+} {
+  switch (error.type) {
+    case "VALIDATION_ERROR": {
+      const firstIssue = error.error.issues[0];
+      const path = firstIssue?.path.length ? ` at ${firstIssue.path.join(".")}` : "";
+      return {
+        type: error.type,
+        message: `Validation failed on ${error.target}${path}: ${firstIssue?.message ?? "unknown"}`,
+      };
+    }
+    case "TIMEOUT":
+      return { type: error.type, message: `Timed out after ${error.timeoutMs}ms` };
+    case "HANDLER_ERROR": {
+      const {cause} = error;
+      if (cause instanceof Error) {
+        const base: { type: HandlerError["type"]; message: string; stack?: string } = {
+          type: error.type,
+          message: cause.message,
+        };
+        if (cause.stack) base.stack = cause.stack;
+        return base;
+      }
+      return { type: error.type, message: String(cause) };
+    }
+    case "RETRY_EXHAUSTED": {
+      const cause = error.lastCause;
+      const causeMsg = cause instanceof Error ? cause.message : String(cause);
+      return {
+        type: error.type,
+        message: `Retries exhausted after ${error.attempts} attempts: ${causeMsg}`,
+      };
+    }
+    case "CIRCUIT_OPEN":
+      return {
+        type: error.type,
+        message: `Circuit breaker is open (opened at ${error.openedAt})`,
+      };
+    case "BACKPRESSURE_REJECT":
+      return { type: error.type, message: "Queue is full — rejected" };
+    case "DROPPED":
+      return { type: error.type, message: "Dropped by backpressure: drop-oldest" };
+    case "HANDLER_NOT_RUNNING":
+      return { type: error.type, message: "Handler is not running" };
+  }
 }

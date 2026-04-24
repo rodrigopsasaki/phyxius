@@ -1,5 +1,5 @@
 import type { Clock } from "@phyxiusjs/clock";
-import type { Atom, AtomSnapshot, AtomOptions, Change } from "./types.js";
+import type { Atom, AtomSnapshot, AtomOptions, Change, EmitFn } from "./types.js";
 
 export class AtomImpl<T> implements Atom<T> {
   private value: T;
@@ -9,22 +9,25 @@ export class AtomImpl<T> implements Atom<T> {
   private readonly historyBuffer: AtomSnapshot<T>[] = [];
   private readonly historySize: number;
   private readonly subscribers: Set<(change: Change<T>) => void> = new Set();
+  private readonly emit: EmitFn | undefined;
   private inNotification = false;
 
   constructor(initialValue: T, clock: Clock, options: AtomOptions<T> = {}) {
     this.value = initialValue;
-    this._version = options.baseVersion ?? 0;
+    this._version = 0;
     this.clock = clock;
     this.equals = options.equals ?? Object.is;
-    this.historySize = Math.max(1, options.historySize ?? 1);
+    this.historySize = Math.max(0, options.historySize ?? 0);
+    this.emit = options.emit;
 
-    // Store initial snapshot
-    const initialSnapshot: AtomSnapshot<T> = {
-      value: initialValue,
-      version: this._version,
-      at: clock.now(),
-    };
-    this.historyBuffer.push(initialSnapshot);
+    // Seed history only if the caller opted in
+    if (this.historySize > 0) {
+      this.historyBuffer.push({
+        value: initialValue,
+        version: this._version,
+        at: clock.now(),
+      });
+    }
   }
 
   deref(): T {
@@ -59,10 +62,12 @@ export class AtomImpl<T> implements Atom<T> {
       at: this.clock.now(),
     };
 
-    // Add to history ring buffer
-    this.historyBuffer.push(snapshot);
-    if (this.historyBuffer.length > this.historySize) {
-      this.historyBuffer.shift();
+    // Add to history ring buffer (skip entirely if caller didn't opt in)
+    if (this.historySize > 0) {
+      this.historyBuffer.push(snapshot);
+      if (this.historyBuffer.length > this.historySize) {
+        this.historyBuffer.shift();
+      }
     }
 
     // Notify subscribers
@@ -112,12 +117,9 @@ export class AtomImpl<T> implements Atom<T> {
   }
 
   clearHistory(): void {
-    // Keep only the current snapshot
-    const current = this.historyBuffer[this.historyBuffer.length - 1];
+    // Actually clear. Callers that want the current value should use
+    // `deref()` or `snapshot()`, not `history()`.
     this.historyBuffer.length = 0;
-    if (current) {
-      this.historyBuffer.push(current);
-    }
   }
 
   private notifyChange(change: Change<T>): void {
@@ -131,9 +133,17 @@ export class AtomImpl<T> implements Atom<T> {
         try {
           subscriber(change);
         } catch (error) {
-          // Swallow subscriber errors to prevent cascade failures
-          // In a real implementation, you might want to log this
-          console.error("Atom subscriber error:", error);
+          // Subscriber errors don't cascade into other subscribers or the
+          // caller. Consumers that care route through `emit`; consumers
+          // that don't get silent swallowing — the library never writes
+          // to stderr.
+          this.emit?.({
+            type: "atom:subscriber:error",
+            error,
+            versionFrom: change.versionFrom,
+            versionTo: change.versionTo,
+            at: change.at,
+          });
         }
       }
     } finally {

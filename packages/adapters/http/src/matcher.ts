@@ -1,147 +1,140 @@
-import type { HttpMethod, RoutePattern, RouteParams, MatchResult, HttpRoute } from "./types.js";
+import type { HttpMethod, HttpRoute, MatchResult } from "./types.js";
+
+// ── Pattern compilation ────────────────────────────────────────────────────
 
 /**
- * Parse a path string into a compiled RoutePattern.
- * Supports:
- *   - Static segments: `/users/profile`
- *   - Named parameters: `/users/:id`
- *   - Wildcards: `/files/*rest`
+ * Compiled route pattern. Segments are either literal strings or `:param`
+ * placeholders; params are extracted into a name map at match time.
  *
- * Specificity ordering: static (+100/segment) > parameterized (-50/param) > wildcard (-1000)
- *
- * @throws Never — returns null on invalid paths; callers should validate paths upfront.
+ * No wildcards, no regex, no optional segments — deliberate minimalism. If a
+ * route needs richer matching, decode it from a broader pattern and inspect
+ * inside the handler.
  */
-export function parseRoutePattern(method: HttpMethod, path: string): RoutePattern | null {
+export interface CompiledPattern {
+  readonly method: HttpMethod;
+  readonly segments: ReadonlyArray<Segment>;
+  /** Static segment count — higher = more specific, used for sort ordering. */
+  readonly staticCount: number;
+}
+
+export type Segment =
+  | { readonly kind: "literal"; readonly value: string }
+  | { readonly kind: "param"; readonly name: string };
+
+export function compilePattern(method: HttpMethod, path: string): CompiledPattern {
   if (!path.startsWith("/")) {
-    return null;
+    throw new Error(`HTTP route path must start with "/" (got ${JSON.stringify(path)})`);
   }
 
-  const segments = path.split("/").filter(Boolean);
-  const paramNames: string[] = [];
-  const seenNames = new Set<string>();
-  const regexParts: string[] = ["^"];
+  const raw = path.slice(1); // drop leading /
+  const parts = raw === "" ? [] : raw.split("/");
+  const segments: Segment[] = [];
+  let staticCount = 0;
 
-  let specificity = 0;
-
-  // Handle root path
-  if (path === "/") {
-    regexParts.push("/?$");
-    return {
-      method,
-      path,
-      specificity,
-      paramNames: Object.freeze(paramNames),
-      pathRegex: new RegExp(regexParts.join("")),
-    };
-  }
-
-  for (let i = 0; i < segments.length; i++) {
-    regexParts.push("/");
-    const segment = segments[i]!;
-
-    if (segment.startsWith(":")) {
-      const paramName = segment.slice(1);
-      if (!paramName || seenNames.has(paramName)) {
-        return null;
+  for (const part of parts) {
+    if (part.startsWith(":")) {
+      const name = part.slice(1);
+      if (name.length === 0) {
+        throw new Error(`Empty param name in path "${path}"`);
       }
-      seenNames.add(paramName);
-      paramNames.push(paramName);
-      regexParts.push("([^/]+)");
-      // Parameterized segments reduce specificity
-    } else if (segment.startsWith("*")) {
-      const paramName = segment.slice(1) || "wildcard";
-      if (seenNames.has(paramName)) {
-        return null;
-      }
-      seenNames.add(paramName);
-      paramNames.push(paramName);
-      regexParts.push("(.*)");
-      specificity -= 1000;
-      break; // Wildcard must be last
+      segments.push({ kind: "param", name });
     } else {
-      regexParts.push(escapeRegex(segment));
-      specificity += 100;
+      segments.push({ kind: "literal", value: part });
+      staticCount += 1;
     }
   }
 
-  regexParts.push("$");
-
-  // Apply segment count bonus and param penalty
-  specificity += segments.length * 10;
-  specificity -= paramNames.length * 50;
-
-  return {
-    method,
-    path,
-    specificity,
-    paramNames: Object.freeze(paramNames),
-    pathRegex: new RegExp(regexParts.join("")),
-  };
+  return { method, segments, staticCount };
 }
 
-/**
- * Match a request method + path against a compiled RoutePattern.
- * Returns extracted params on match, null on miss.
- */
-export function matchPattern(pattern: RoutePattern, method: HttpMethod, path: string): RouteParams | null {
-  if (pattern.method !== method) {
-    return null;
-  }
-
-  const match = pattern.pathRegex.exec(path);
-  if (!match) {
-    return null;
-  }
-
-  const params: Record<string, string> = {};
-  for (let i = 0; i < pattern.paramNames.length; i++) {
-    const name = pattern.paramNames[i]!;
-    const value = match[i + 1];
-    if (value !== undefined) {
-      params[name] = decodeURIComponent(value);
-    }
-  }
-
-  return Object.freeze(params);
-}
+// ── Matching ───────────────────────────────────────────────────────────────
 
 /**
- * Compare two RoutePatterns for specificity-descending sort.
- * Higher specificity routes are matched first.
+ * Match a method+path against a compiled pattern. Returns the extracted
+ * params on success, or `null` on mismatch.
  */
-export function compareSpecificity(a: RoutePattern, b: RoutePattern): number {
-  return b.specificity - a.specificity;
-}
-
-/**
- * Match an incoming method + path against a sorted list of compiled routes.
- * Returns the match result — found with params, 404, or 405.
- */
-export function matchRoutes(
-  sortedRoutes: ReadonlyArray<{ pattern: RoutePattern; route: HttpRoute }>,
+export function matchPattern(
+  pattern: CompiledPattern,
   method: HttpMethod,
   path: string,
-): MatchResult {
-  let pathMatchedOnDifferentMethod = false;
+): Record<string, string> | null {
+  if (pattern.method !== method) return null;
 
-  for (const { pattern, route } of sortedRoutes) {
-    // Check if path matches ignoring method first (for 405 detection)
-    const pathOnlyMatch = pattern.pathRegex.exec(path);
-    if (pathOnlyMatch) {
-      pathMatchedOnDifferentMethod = true;
-      const params = matchPattern(pattern, method, path);
-      if (params !== null) {
-        return { found: true, route, params };
+  const parts = path.startsWith("/") ? path.slice(1).split("/") : path.split("/");
+  // Handle leading / edge case: "/" produces parts = [""]; normalize.
+  const normalized = parts.length === 1 && parts[0] === "" ? [] : parts;
+
+  if (normalized.length !== pattern.segments.length) return null;
+
+  const params: Record<string, string> = {};
+  for (let i = 0; i < pattern.segments.length; i++) {
+    const segment = pattern.segments[i];
+    const part = normalized[i];
+    if (!segment || part === undefined) return null;
+
+    if (segment.kind === "literal") {
+      if (segment.value !== part) return null;
+    } else {
+      params[segment.name] = decodeURIComponent(part);
+    }
+  }
+
+  return params;
+}
+
+// ── Route table ────────────────────────────────────────────────────────────
+
+/**
+ * Pairs compiled patterns with their routes. Sorted by specificity so that
+ * more specific routes (more literal segments) match first.
+ */
+export interface CompiledRoutes {
+  readonly entries: ReadonlyArray<{
+    readonly pattern: CompiledPattern;
+    readonly route: HttpRoute<unknown, unknown>;
+  }>;
+}
+
+export function compileRoutes(routes: ReadonlyArray<HttpRoute<unknown, unknown>>): CompiledRoutes {
+  const entries = routes.map((route) => ({
+    pattern: compilePattern(route.method, route.path),
+    route,
+  }));
+
+  // Sort: more specific first. Tiebreak by longer paths first.
+  entries.sort((a, b) => {
+    if (b.pattern.staticCount !== a.pattern.staticCount) {
+      return b.pattern.staticCount - a.pattern.staticCount;
+    }
+    return b.pattern.segments.length - a.pattern.segments.length;
+  });
+
+  return { entries };
+}
+
+export function matchRoute(compiled: CompiledRoutes, method: HttpMethod, path: string): MatchResult {
+  let pathMatchedAnyMethod = false;
+
+  for (const entry of compiled.entries) {
+    // Check path first (ignoring method) to detect method-not-allowed.
+    const pathOnly = matchPattern({ ...entry.pattern, method }, method, path);
+    if (pathOnly) {
+      return { found: true, route: entry.route, params: pathOnly };
+    }
+
+    // Does the path match if we ignore method?
+    if (!pathMatchedAnyMethod) {
+      const ignoreMethod: CompiledPattern = { ...entry.pattern, method };
+      const result = matchPattern(ignoreMethod, method, path);
+      if (result === null) {
+        // Try with the pattern's actual method to see if the path matched.
+        const asOriginal = matchPattern(entry.pattern, entry.pattern.method, path);
+        if (asOriginal !== null && entry.pattern.method !== method) {
+          pathMatchedAnyMethod = true;
+        }
       }
     }
   }
 
-  return {
-    found: false,
-    reason: pathMatchedOnDifferentMethod ? "method_not_allowed" : "not_found",
-  };
-}
-
-function escapeRegex(str: string): string {
-  return str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return pathMatchedAnyMethod ? { found: false, reason: "method_not_allowed" } : { found: false, reason: "not_found" };
 }

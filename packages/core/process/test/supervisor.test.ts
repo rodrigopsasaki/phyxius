@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach } from "vitest";
-import { createSupervisor, createProcessId } from "../src/index.js";
-import type { ProcessBehavior } from "../src/index.js";
+import { createSystemClock } from "@phyxiusjs/clock";
+import { Supervisor, createProcessId } from "../src/index.js";
+import type { ProcessSpec } from "../src/index.js";
 
 interface TestEvent {
   type: string;
@@ -8,6 +9,7 @@ interface TestEvent {
 }
 
 describe("Supervisor", () => {
+  const clock = createSystemClock();
   let events: unknown[] = [];
   const emit = (event: unknown) => events.push(event);
 
@@ -15,96 +17,148 @@ describe("Supervisor", () => {
     events = [];
   });
 
-  describe("supervisor lifecycle", () => {
-    it("should create supervisor with generated ID", () => {
-      const supervisor = createSupervisor({ emit });
+  describe("lifecycle", () => {
+    it("should create a supervisor with a generated id", () => {
+      const supervisor = new Supervisor({ clock, emit });
       expect(supervisor.id.value).toBeDefined();
       expect(supervisor.getChildren()).toHaveLength(0);
     });
 
-    it("should create supervisor with specific ID", () => {
+    it("should accept a caller-provided id", () => {
       const id = createProcessId("test-supervisor");
-      const supervisor = createSupervisor({ id, emit });
+      const supervisor = new Supervisor({ clock, id, emit });
       expect(supervisor.id.value).toBe("test-supervisor");
     });
   });
 
-  describe("process spawning", () => {
-    it("should spawn and start process", async () => {
-      const behavior: ProcessBehavior = {
-        handle: async () => {},
+  describe("spawning", () => {
+    it("should spawn and start a supervised process", async () => {
+      const spec: ProcessSpec<unknown> = {
+        name: "child",
+        handle: () => {},
       };
 
-      const supervisor = createSupervisor({ emit });
-      const process = await supervisor.spawn(behavior);
+      const supervisor = new Supervisor({ clock, emit });
+      const process = await supervisor.spawn(spec);
 
-      expect(process.state).toBe("running");
+      expect(process.status()).toBe("running");
       expect(supervisor.getChildren()).toHaveLength(1);
       expect(supervisor.getChildren()[0]).toBe(process);
+
+      await supervisor.stop();
     });
 
     it("should emit spawning events", async () => {
-      const behavior: ProcessBehavior = {
-        handle: async () => {},
+      const spec: ProcessSpec<unknown> = {
+        name: "child",
+        handle: () => {},
       };
 
-      const supervisor = createSupervisor({ emit });
-      await supervisor.spawn(behavior);
+      const supervisor = new Supervisor({ clock, emit });
+      await supervisor.spawn(spec);
 
       const spawnEvents = events.filter(
-        (e: unknown) =>
-          (e as TestEvent).type === "supervisor:spawning" || (e as TestEvent).type === "supervisor:spawned",
+        (e) => (e as TestEvent).type === "supervisor:spawning" || (e as TestEvent).type === "supervisor:spawned",
       );
       expect(spawnEvents).toHaveLength(2);
+
+      await supervisor.stop();
     });
 
     it("should fail to spawn when stopped", async () => {
-      const behavior: ProcessBehavior = {
-        handle: async () => {},
+      const spec: ProcessSpec<unknown> = {
+        name: "child",
+        handle: () => {},
       };
 
-      const supervisor = createSupervisor({ emit });
+      const supervisor = new Supervisor({ clock, emit });
       await supervisor.stop();
 
-      await expect(supervisor.spawn(behavior)).rejects.toThrow("Cannot spawn process: supervisor is stopped");
+      await expect(supervisor.spawn(spec)).rejects.toThrow("Cannot spawn process: supervisor is stopped");
     });
 
-    it("should handle spawn failures", async () => {
-      const behavior: ProcessBehavior = {
-        init: async () => {
+    it("should surface spawn failures", async () => {
+      const spec: ProcessSpec<unknown> = {
+        name: "bad-child",
+        init: () => {
           throw new Error("Spawn failed");
         },
-        handle: async () => {},
+        handle: () => {},
       };
 
-      const supervisor = createSupervisor({ emit });
+      const supervisor = new Supervisor({ clock, emit });
 
-      await expect(supervisor.spawn(behavior)).rejects.toThrow("Spawn failed");
+      await expect(supervisor.spawn(spec)).rejects.toThrow("Spawn failed");
 
-      const failEvents = events.filter((e: unknown) => (e as TestEvent).type === "supervisor:spawn:failed");
+      const failEvents = events.filter((e) => (e as TestEvent).type === "supervisor:spawn:failed");
       expect(failEvents).toHaveLength(1);
+
+      await supervisor.stop();
+    });
+
+    it("should pass ctx through to the child's init", async () => {
+      let received: { port: number } | undefined;
+      const spec: ProcessSpec<unknown, void, { port: number }> = {
+        name: "with-ctx",
+        init: (ctx) => {
+          received = ctx;
+        },
+        handle: () => {},
+      };
+
+      const supervisor = new Supervisor({ clock, emit });
+      await supervisor.spawn(spec, { port: 8080 });
+
+      expect(received).toEqual({ port: 8080 });
+
+      await supervisor.stop();
     });
   });
 
   describe("supervision strategies", () => {
-    it("should supervise with custom strategy", async () => {
-      const behavior: ProcessBehavior = {
-        handle: async () => {},
+    it("should apply stop strategy", async () => {
+      const spec: ProcessSpec<unknown> = {
+        name: "child",
+        handle: () => {},
       };
 
-      const supervisor = createSupervisor({ emit });
-      const process = await supervisor.spawn(behavior);
+      const supervisor = new Supervisor({ clock, emit });
+      const process = await supervisor.spawn(spec);
 
       supervisor.supervise(process, "stop");
 
-      const supervisionEvents = events.filter((e: unknown) => (e as TestEvent).type === "supervisor:supervising");
-      expect(supervisionEvents).toHaveLength(2); // Default + custom
+      const supervisionEvents = events.filter(
+        (e) => (e as TestEvent).type === "supervisor:supervising" && (e as TestEvent).strategy === "stop",
+      );
+      expect(supervisionEvents).toHaveLength(1);
+
+      await supervisor.stop();
     });
 
-    it("should restart failed processes with restart strategy", async () => {
+    it("should apply escalate strategy", async () => {
+      const spec: ProcessSpec<unknown> = {
+        name: "child",
+        handle: () => {},
+      };
+
+      const supervisor = new Supervisor({ clock, emit });
+      const process = await supervisor.spawn(spec);
+
+      supervisor.supervise(process, "escalate");
+
+      const supervisionEvents = events.filter(
+        (e) => (e as TestEvent).type === "supervisor:supervising" && (e as TestEvent).strategy === "escalate",
+      );
+      expect(supervisionEvents).toHaveLength(1);
+
+      await supervisor.stop();
+    });
+
+    it("should restart failed processes and track the restart count", async () => {
       let failCount = 0;
-      const behavior: ProcessBehavior = {
-        handle: async () => {
+      const spec: ProcessSpec<unknown> = {
+        name: "flaky",
+        handle: () => {
           failCount++;
           if (failCount === 1) {
             throw new Error("First failure");
@@ -112,227 +166,144 @@ describe("Supervisor", () => {
         },
       };
 
-      // Use supervisor with no restart delay to make test faster
-      const supervisor = createSupervisor({
+      const supervisor = new Supervisor({
+        clock,
         emit,
         strategy: {
           type: "one-for-one",
-          maxRestarts: { count: 3, within: 10000 },
-          backoff: { initial: 0, max: 100, factor: 1 }, // No delay for testing
+          maxRestarts: { count: 3, within: 10_000 as never },
+          backoff: { initial: 0 as never, max: 100 as never, factor: 1 },
         },
       });
-      const process = await supervisor.spawn(behavior);
+      const process = await supervisor.spawn(spec);
+      const originalId = process.id;
 
-      // Send message that will cause failure
       await process.send({ type: "test" });
 
-      // Wait for failure and restart
       await new Promise((resolve) => setTimeout(resolve, 100));
 
-      // Process should be restarted
-      const restartEvents = events.filter((e: unknown) => (e as TestEvent).type === "supervisor:child:restarted");
+      const restartEvents = events.filter((e) => (e as TestEvent).type === "supervisor:child:restarted");
       expect(restartEvents.length).toBeGreaterThan(0);
-    });
+      expect(supervisor.getRestartCount(originalId)).toBeGreaterThan(0);
 
-    it("should apply stop strategy supervision", async () => {
-      const behavior: ProcessBehavior = {
-        handle: async () => {},
-      };
-
-      const supervisor = createSupervisor({ emit });
-      const process = await supervisor.spawn(behavior);
-
-      // Test that we can apply stop strategy
-      supervisor.supervise(process, "stop");
-
-      const supervisionEvents = events.filter(
-        (e: unknown) => (e as TestEvent).type === "supervisor:supervising" && (e as TestEvent).strategy === "stop",
-      );
-      expect(supervisionEvents).toHaveLength(1);
-    });
-
-    it("should apply escalate strategy supervision", async () => {
-      const behavior: ProcessBehavior = {
-        handle: async () => {},
-      };
-
-      const supervisor = createSupervisor({ emit });
-      const process = await supervisor.spawn(behavior);
-
-      // Test that we can apply escalate strategy
-      supervisor.supervise(process, "escalate");
-
-      const supervisionEvents = events.filter(
-        (e: unknown) => (e as TestEvent).type === "supervisor:supervising" && (e as TestEvent).strategy === "escalate",
-      );
-      expect(supervisionEvents).toHaveLength(1);
+      await supervisor.stop();
     });
   });
 
-  describe("supervisor shutdown", () => {
-    it("should stop all children when stopping", async () => {
-      const behavior: ProcessBehavior = {
-        handle: async () => {},
+  describe("shutdown", () => {
+    it("should stop all children on supervisor stop", async () => {
+      const spec: ProcessSpec<unknown> = {
+        name: "child",
+        handle: () => {},
       };
 
-      const supervisor = createSupervisor({ emit });
-      const process1 = await supervisor.spawn(behavior);
-      const process2 = await supervisor.spawn(behavior);
+      const supervisor = new Supervisor({ clock, emit });
+      const p1 = await supervisor.spawn(spec);
+      const p2 = await supervisor.spawn(spec);
 
       expect(supervisor.getChildren()).toHaveLength(2);
 
       await supervisor.stop();
 
-      expect(process1.state).toBe("stopped");
-      expect(process2.state).toBe("stopped");
+      expect(p1.status()).toBe("stopped");
+      expect(p2.status()).toBe("stopped");
       expect(supervisor.getChildren()).toHaveLength(0);
     });
 
     it("should emit stop events", async () => {
-      const behavior: ProcessBehavior = {
-        handle: async () => {},
+      const spec: ProcessSpec<unknown> = {
+        name: "child",
+        handle: () => {},
       };
 
-      const supervisor = createSupervisor({ emit });
-      await supervisor.spawn(behavior);
+      const supervisor = new Supervisor({ clock, emit });
+      await supervisor.spawn(spec);
       await supervisor.stop();
 
       const stopEvents = events.filter(
-        (e: unknown) =>
-          (e as TestEvent).type === "supervisor:stopping" || (e as TestEvent).type === "supervisor:stopped",
+        (e) => (e as TestEvent).type === "supervisor:stopping" || (e as TestEvent).type === "supervisor:stopped",
       );
       expect(stopEvents).toHaveLength(2);
     });
 
     it("should handle child stop errors gracefully", async () => {
-      const behavior: ProcessBehavior = {
-        handle: async () => {},
-        terminate: async () => {
+      const spec: ProcessSpec<unknown> = {
+        name: "child",
+        handle: () => {},
+        onStop: () => {
           throw new Error("Stop failed");
         },
       };
 
-      const supervisor = createSupervisor({ emit });
-      await supervisor.spawn(behavior);
+      const supervisor = new Supervisor({ clock, emit });
+      await supervisor.spawn(spec);
 
-      // Should not throw despite child stop error
       await expect(supervisor.stop()).resolves.not.toThrow();
 
-      const errorEvents = events.filter((e: unknown) => (e as TestEvent).type === "supervisor:child:stop:error");
+      const errorEvents = events.filter((e) => (e as TestEvent).type === "supervisor:child:stop:error");
       expect(errorEvents).toHaveLength(1);
     });
 
     it("should be idempotent", async () => {
-      const supervisor = createSupervisor({ emit });
+      const supervisor = new Supervisor({ clock, emit });
       await supervisor.stop();
-      await supervisor.stop(); // Should not throw
+      await supervisor.stop(); // no throw
 
       expect(supervisor.getChildren()).toHaveLength(0);
     });
   });
 
-  describe("complex scenarios", () => {
-    it("should handle multiple failures and restarts", async () => {
-      let attempts = 0;
-      const behavior: ProcessBehavior = {
-        handle: async () => {
-          attempts++;
-          if (attempts <= 2) {
-            throw new Error(`Attempt ${attempts} failed`);
-          }
+  describe("isolation", () => {
+    it("should keep per-actor state independent", async () => {
+      let proc1Count = 0;
+      let proc2Count = 0;
+
+      const spec1: ProcessSpec<unknown> = {
+        name: "counter-1",
+        handle: () => {
+          proc1Count++;
+        },
+      };
+      const spec2: ProcessSpec<unknown> = {
+        name: "counter-2",
+        handle: () => {
+          proc2Count++;
         },
       };
 
-      // Use supervisor with minimal restart delay for testing
-      const supervisor = createSupervisor({
-        emit,
-        strategy: {
-          type: "one-for-one",
-          maxRestarts: { count: 5, within: 10000 },
-          backoff: { initial: 10, max: 100, factor: 1 }, // Minimal delay for testing
-        },
-      });
-      const process = await supervisor.spawn(behavior);
+      const supervisor = new Supervisor({ clock, emit });
+      const p1 = await supervisor.spawn(spec1);
+      const p2 = await supervisor.spawn(spec2);
 
-      // Send messages that will fail initially
-      await process.send({ type: "test1" });
-      await process.send({ type: "test2" });
-      await process.send({ type: "test3" });
+      await p1.send({ type: "msg1" });
+      await p1.send({ type: "msg2" });
+      await p2.send({ type: "msg3" });
 
-      // Wait for processing and restarts
-      await new Promise((resolve) => setTimeout(resolve, 300));
+      await new Promise((resolve) => setTimeout(resolve, 50));
 
-      // Should have multiple restart attempts
-      const restartEvents = events.filter((e: unknown) => (e as TestEvent).type === "supervisor:child:restarted");
-      expect(restartEvents.length).toBeGreaterThan(0);
-    });
+      expect(proc1Count).toBe(2);
+      expect(proc2Count).toBe(1);
 
-    it("should work without emit function", async () => {
-      const behavior: ProcessBehavior = {
-        handle: async () => {},
-      };
-
-      const supervisor = createSupervisor();
-      const process = await supervisor.spawn(behavior);
-
-      expect(process.state).toBe("running");
       await supervisor.stop();
-      expect(process.state).toBe("stopped");
     });
 
-    it("should handle rapid spawn/stop cycles", async () => {
-      const behavior: ProcessBehavior = {
-        handle: async () => {},
+    it("should spawn multiple processes in parallel without interference", async () => {
+      const spec: ProcessSpec<unknown> = {
+        name: "child",
+        handle: () => {},
       };
 
-      const supervisor = createSupervisor({ emit });
+      const supervisor = new Supervisor({ clock, emit });
 
-      // Rapid spawning
-      const processes = await Promise.all([
-        supervisor.spawn(behavior),
-        supervisor.spawn(behavior),
-        supervisor.spawn(behavior),
-      ]);
+      const processes = await Promise.all([supervisor.spawn(spec), supervisor.spawn(spec), supervisor.spawn(spec)]);
 
       expect(supervisor.getChildren()).toHaveLength(3);
 
-      // Rapid stopping
       await supervisor.stop();
 
-      processes.forEach((process) => {
-        expect(process.state).toBe("stopped");
+      processes.forEach((p) => {
+        expect(p.status()).toBe("stopped");
       });
-    });
-
-    it("should maintain process isolation", async () => {
-      let process1Messages = 0;
-      let process2Messages = 0;
-
-      const behavior1: ProcessBehavior = {
-        handle: async () => {
-          process1Messages++;
-        },
-      };
-
-      const behavior2: ProcessBehavior = {
-        handle: async () => {
-          process2Messages++;
-        },
-      };
-
-      const supervisor = createSupervisor({ emit });
-      const proc1 = await supervisor.spawn(behavior1);
-      const proc2 = await supervisor.spawn(behavior2);
-
-      await proc1.send({ type: "msg1" });
-      await proc1.send({ type: "msg2" });
-      await proc2.send({ type: "msg3" });
-
-      // Wait for message processing
-      await new Promise((resolve) => setTimeout(resolve, 50));
-
-      expect(process1Messages).toBe(2);
-      expect(process2Messages).toBe(1);
     });
   });
 });

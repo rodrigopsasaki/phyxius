@@ -1,61 +1,98 @@
 /**
  * Temporal utilities for controlling function execution timing.
  * These functions help manage when and how often functions execute.
+ *
+ * Backed by `Clock.Budget` — at most one pending timer per debouncer/
+ * throttler, regardless of input rate. Rapid bursts of calls do not
+ * accumulate sleep handles.
  */
 
-import type { Clock, Millis } from "@phyxiusjs/clock";
+import type { Budget, Clock, Millis } from "@phyxiusjs/clock";
 
-/** Debounce a function using Clock abstraction */
+/**
+ * Debounce a function. The wrapped function fires once, after `delayMs` have
+ * elapsed with no new calls. Each call replaces the pending fire — the latest
+ * arguments win.
+ */
 export function debounce<A extends unknown[]>(
   fn: (...args: A) => void,
   delayMs: Millis,
   clock: Clock,
 ): (...args: A) => void {
-  let latestCall: { args: A; timestamp: number } | null = null;
+  // Holds the current pending budget + the args that should fire when it
+  // expires. On each new call, the previous budget is released (no fire) and
+  // a fresh one is created. At most one pending budget at any time.
+  let pending: { budget: Budget; args: A } | null = null;
 
   return (...args: A) => {
-    const timestamp = clock.now().monoMs;
-    latestCall = { args, timestamp };
+    pending?.budget.release();
 
-    clock.timeout(delayMs).then(() => {
-      // Only execute if this is still the latest call
-      if (latestCall && latestCall.timestamp === timestamp) {
-        fn(...latestCall.args);
-      }
-    });
+    const budget = clock.timeout(delayMs);
+    const entry = { budget, args };
+    pending = entry;
+
+    budget.signal.addEventListener(
+      "abort",
+      () => {
+        if (pending === entry) {
+          pending = null;
+          fn(...entry.args);
+        }
+      },
+      { once: true },
+    );
   };
 }
 
-/** Throttle a function using Clock abstraction */
+/**
+ * Throttle a function. The wrapped function fires immediately on a call that
+ * falls outside the throttle window, and at most once more at the end of the
+ * window with the most recent arguments.
+ */
 export function throttle<A extends unknown[]>(
   fn: (...args: A) => void,
   delayMs: Millis,
   clock: Clock,
 ): (...args: A) => void {
-  let lastCall: number | null = null;
-  let pendingCall: { args: A; timestamp: number } | null = null;
+  let lastCallMono: number | null = null;
+  // At most one trailing budget is in flight at any time. Subsequent calls
+  // within the window update the trailing args without rescheduling.
+  let trailing: { budget: Budget; args: A } | null = null;
 
   return (...args: A) => {
     const now = clock.now().monoMs;
 
-    if (lastCall === null || now - lastCall >= delayMs) {
-      // Execute immediately
-      lastCall = now;
+    if (lastCallMono === null || now - lastCallMono >= delayMs) {
+      // Outside the window — execute immediately and reset.
+      lastCallMono = now;
+      // A previously-scheduled trailing call is now obsolete; release it.
+      trailing?.budget.release();
+      trailing = null;
       fn(...args);
-    } else {
-      // Schedule for later
-      const timestamp = now;
-      pendingCall = { args, timestamp };
-
-      const remainingDelay = (delayMs - (now - lastCall)) as Millis;
-      clock.timeout(remainingDelay).then(() => {
-        // Only execute if this is still the latest pending call
-        if (pendingCall && pendingCall.timestamp === timestamp) {
-          lastCall = clock.now().monoMs;
-          fn(...pendingCall.args);
-          pendingCall = null;
-        }
-      });
+      return;
     }
+
+    // Inside the window. Update the args we'll fire with at the end.
+    if (trailing !== null) {
+      trailing.args = args;
+      return;
+    }
+
+    const remainingDelay = (delayMs - (now - lastCallMono)) as Millis;
+    const budget = clock.timeout(remainingDelay);
+    const entry = { budget, args };
+    trailing = entry;
+
+    budget.signal.addEventListener(
+      "abort",
+      () => {
+        if (trailing === entry) {
+          trailing = null;
+          lastCallMono = clock.now().monoMs;
+          fn(...entry.args);
+        }
+      },
+      { once: true },
+    );
   };
 }

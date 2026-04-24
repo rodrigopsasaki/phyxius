@@ -30,6 +30,40 @@ export interface TimerHandle {
 }
 
 /**
+ * A time budget — a value that carries a deadline and an AbortSignal that
+ * fires when the deadline passes.
+ *
+ * Semantically distinct from `sleep`:
+ *   - `sleep(ms)` is first-person: "I wait."
+ *   - `timeout(ms)` is third-person: "here is a ceiling for something else."
+ *
+ * A Budget is a value you pass down through an operation chain. Operations
+ * that care about deadlines accept a Budget (or just its `signal` for
+ * AbortSignal-aware APIs like `fetch`); operations that don't, ignore it.
+ * Loops can consult `remaining()` or `expired()` to decide whether to continue.
+ *
+ * The signal is read-only. A Budget whose owner can shorten it is just a sleep.
+ * If callers need early cancellation, compose with their own AbortController
+ * via `AbortSignal.any([budget.signal, ownController.signal])`.
+ */
+export interface Budget {
+  /** The moment at which this budget expires (wall + mono). */
+  readonly deadline: Instant;
+  /** Aborts when the budget expires. Pass to fetch, fs, streams, etc. */
+  readonly signal: AbortSignal;
+  /** Time remaining until expiry, in milliseconds. Clamped at 0. */
+  remaining(): Millis;
+  /** True once the budget has expired. Equivalent to `signal.aborted`. */
+  expired(): boolean;
+  /**
+   * Proactively clear the underlying timer to prevent leaks when the caller
+   * finishes before expiry. Does NOT abort the signal — a released budget is
+   * "done with," not "expired."
+   */
+  release(): void;
+}
+
+/**
  * Common interface for all clock implementations
  */
 export interface Clock {
@@ -39,14 +73,22 @@ export interface Clock {
   now(): Instant;
 
   /**
-   * Sleep for a given duration in milliseconds
+   * Sleep for a given duration in milliseconds.
+   *
+   * Use when the wait IS the intent: backoff, pacing, explicit delay.
    */
   sleep(ms: Millis): Promise<void>;
 
   /**
-   * Set a timeout that resolves after ms milliseconds
+   * Create a time budget that expires after `ms` milliseconds.
+   *
+   * Use when time is a ceiling for some OTHER operation: bounding a
+   * downstream call, pairing with fetch/fs/streams via AbortSignal,
+   * or propagating a deadline down a call chain.
+   *
+   * This is NOT a promise — it is a value. Call `sleep` if you want to wait.
    */
-  timeout(ms: Millis): Promise<void>;
+  timeout(ms: Millis): Budget;
 
   /**
    * Set a deadline that resolves at a specific wall time

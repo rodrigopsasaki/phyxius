@@ -161,13 +161,37 @@ describe("SystemClock", () => {
   });
 
   describe("timeout()", () => {
-    it("should timeout for the specified duration", async () => {
-      const start = Date.now();
-      await clock.timeout(50 as Millis);
-      const elapsed = Date.now() - start;
+    it("should return a budget that expires after the specified duration", async () => {
+      const budget = clock.timeout(50 as Millis);
 
-      expect(elapsed).toBeGreaterThanOrEqual(45);
-      expect(elapsed).toBeLessThan(100);
+      expect(budget.expired()).toBe(false);
+      expect(budget.signal.aborted).toBe(false);
+
+      await new Promise<void>((resolve) => {
+        budget.signal.addEventListener("abort", () => resolve());
+      });
+
+      expect(budget.expired()).toBe(true);
+      expect(budget.signal.aborted).toBe(true);
+      expect(budget.remaining()).toBe(0);
+    });
+
+    it("should expose a deadline based on the current instant", () => {
+      const before = clock.now();
+      const budget = clock.timeout(100 as Millis);
+
+      expect(budget.deadline.wallMs).toBeGreaterThanOrEqual(before.wallMs + 100);
+      expect(budget.deadline.monoMs).toBeGreaterThanOrEqual(before.monoMs + 100);
+    });
+
+    it("should not abort the signal when released", async () => {
+      const budget = clock.timeout(50 as Millis);
+      budget.release();
+
+      await new Promise((resolve) => setTimeout(resolve, 80));
+
+      expect(budget.signal.aborted).toBe(false);
+      expect(budget.expired()).toBe(false);
     });
   });
 });

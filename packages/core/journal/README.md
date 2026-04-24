@@ -1,218 +1,232 @@
 # Journal
 
-Events that never disappear. History you can trust. Debugging that actually works.
-
-Every bug you've struggled to reproduce starts with the same problem: "I don't know what happened." Events vanish into the void. State changes without explanation. Systems fail and leave no trace.
-
-Journal fixes this. Append-only log, perfect ordering, complete history.
-
-Two implementations, one interface:
-
-- In-memory journal for single-process event storage with guaranteed ordering.
-- Serializable journal for persistence, with complete state snapshots and recovery.
+A typed, bounded, sequence-ordered event log. Live subscription, replayable history, deterministic in tests.
 
 ---
 
-## Why logs are broken
+## What this really is
 
-### Scattered evidence and lost context
+In database parlance a "journal" is a durable write-ahead log. This isn't that — Journal is in-memory and ephemeral. Durability is `@phyxiusjs/drain`'s job: subscribe to a Journal and stream entries to a sink.
 
-```js
-// This is broken. The evidence is already gone.
-console.log("User logged in");
-console.log("Processing payment...");
-console.log("ERROR: Payment failed!");
+What Journal actually gives you in Node:
 
-// What happened? When? In what order? You'll never know.
-```
-
-### Race conditions in event ordering
-
-```js
-// Multiple async operations logging concurrently
-Promise.resolve().then(() => console.log("Event A"));
-Promise.resolve().then(() => console.log("Event B"));
-setTimeout(() => console.log("Event C"), 0);
-
-// Which happened first? The logs won't tell you.
-```
-
-Logs are scattered across files, timestamps don't align, events are lost, causality is destroyed. When production breaks, you're debugging with a blindfold.
+- **Monotonic sequence ordering.** Every append gets a strictly increasing `sequence`. That's the source of truth for order — not timestamps. You can never ambiguate "what came first," even when wall clocks jump.
+- **Typed, structured events.** `T` flows through from `append` to `getSnapshot` to `subscribe`. No string parsing, no text-log diffing.
+- **Synchronous live subscription.** Subscribers fire inside `append`, before it returns. Fast, ordered, reentrancy-protected.
+- **O(1) indexed lookup by sequence.** `getEntry(n)` is constant time. Critical for replay and range scans.
+- **A bounded cap with an explicit overflow policy.** Every journal is bounded. No unbounded mode exists.
+- **Clock-bound timestamps.** Paired with `createControlledClock`, your event ordering is deterministic in tests.
+- **Serialization hook.** `toJSON` / `fromJSON` for snapshot/restore, with a custom `Serializer` for non-plain data.
 
 ---
 
-## The Problem
+## Boundedness is not optional
 
-Traditional logging gives you text lines scattered across files and systems. No guaranteed ordering, no structured data, no queryable history. When you need to understand what happened, the evidence is gone.
+There is no unbounded mode.
+
+A journal that can grow without limit is an OOM waiting to happen. "We'll decide later what to drop" almost always becomes "production decided by crashing." The primitive forces the question on you up front:
 
 ```ts
-// Debugging nightmare: scattered logs across multiple places
-class OrderService {
-  async processOrder(order: Order) {
-    console.log(`Processing order ${order.id}`);
+type OverflowPolicy = "drop_oldest" | "error";
 
-    try {
-      await this.validateOrder(order);
-      console.log(`Order ${order.id} validated`);
-
-      await this.chargePayment(order);
-      console.log(`Payment charged for order ${order.id}`);
-    } catch (error) {
-      // Where did this error come from? What was the sequence?
-      console.error(`Order processing failed: ${error}`);
-    }
-  }
+interface JournalOptions<T> {
+  maxEntries?: number; // default 10_000
+  overflow?: OverflowPolicy; // default "drop_oldest"
 }
-
-// Logs are scattered, no guaranteed ordering, no structured data
 ```
+
+Two honest choices:
+
+- **`"drop_oldest"`** — evict the oldest entry to make room. Good for monitoring/debugging workloads where recent events matter more. An overflow event fires so subscribers can see the drop; losing data isn't silent.
+- **`"error"`** — throw `JournalOverflowError` on append when full. Good for producers you want to back-pressure when consumers fall behind.
+
+Defaults exist so getting started is easy; the structure guarantees you've made the choice even when you didn't.
 
 ---
 
-## Journal helps you with this
+## The ordering insight
 
-### Example 1 — Perfect event ordering with structured data
+Node's event loop is single-threaded but not strictly ordered across async boundaries. Two microtask chains, two I/O callbacks, two timers — the order they land in your callbacks depends on the runtime, the OS scheduler, and any `await` points along the way.
+
+Journal gives you a channel where the order is **yours, not the runtime's**:
+
+```ts
+const events = new Journal<{ type: string }>({ clock });
+
+Promise.resolve().then(() => events.append({ type: "A" }));
+Promise.resolve().then(() => events.append({ type: "B" }));
+setTimeout(() => events.append({ type: "C" }), 0);
+
+// Later, in a debugger or test:
+events.getSnapshot().entries.forEach((e) => {
+  console.log(e.sequence, e.data.type);
+  // 0 A, 1 B, 2 C — whichever order they were appended in, sequence is the truth
+});
+```
+
+The point isn't that Node's event loop is broken. It's that `sequence` is the only ordering you can trust without reasoning about microtask queues, phases, and kernel buffering. For debugging, replay, and audit, that's exactly what you want.
+
+---
+
+## Examples
+
+### Example 1 — Typed event sourcing
 
 ```ts
 import { Journal } from "@phyxiusjs/journal";
 import { createSystemClock } from "@phyxiusjs/clock";
 
-const clock = createSystemClock();
-const events = new Journal({ clock });
-
-// Every event is preserved forever with perfect ordering
-events.append({ type: "user.login", userId: "alice", ip: "1.2.3.4" });
-events.append({ type: "payment.start", orderId: "ord-123", amount: 1000 });
-events.append({ type: "payment.error", orderId: "ord-123", error: "CARD_DECLINED" });
-
-// Get complete history
-const history = events.getSnapshot();
-history.entries.forEach((entry) => {
-  console.log(`[${entry.sequence}] ${entry.data.type} at ${entry.timestamp.wallMs}`);
-});
-```
-
-### Example 2 — Type-safe event sourcing
-
-```ts
 type OrderEvent =
-  | { type: "order.created"; orderId: string; userId: string; items: string[] }
+  | { type: "order.created"; orderId: string; userId: string }
   | { type: "payment.processed"; orderId: string; amount: number }
-  | { type: "order.shipped"; orderId: string; trackingId: string }
-  | { type: "order.cancelled"; orderId: string; reason: string };
+  | { type: "order.shipped"; orderId: string; trackingId: string };
 
-const orderLog = new Journal<OrderEvent>({ clock });
+const clock = createSystemClock();
+const log = new Journal<OrderEvent>({ clock, maxEntries: 100_000 });
 
-// Type-safe structured events
-orderLog.append({
-  type: "order.created",
-  orderId: "ord-123",
-  userId: "alice",
-  items: ["laptop", "mouse"],
-});
+log.append({ type: "order.created", orderId: "ord-123", userId: "alice" });
+log.append({ type: "payment.processed", orderId: "ord-123", amount: 1299 });
 
-orderLog.append({
-  type: "payment.processed",
-  orderId: "ord-123",
-  amount: 1299,
-});
-
-// Query by event type
-const snapshot = orderLog.getSnapshot();
+// Query by discriminant — fully typed
+const snapshot = log.getSnapshot();
 const payments = snapshot.entries.filter((e) => e.data.type === "payment.processed");
 ```
 
-### Example 3 — Real-time event streaming
+### Example 2 — Live subscription composed with Drain
 
 ```ts
-const userEvents = new Journal<{ type: string; userId: string; data: unknown }>({ clock });
+import { createDrain } from "@phyxiusjs/drain";
 
-// Subscribe to all new events
-const unsubscribe = userEvents.subscribe((entry) => {
-  console.log(`Event: ${entry.data.type} for user ${entry.data.userId}`);
+const journal = new Journal<AppEvent>({ clock });
 
-  // Trigger real-time notifications, update dashboards, etc.
-  if (entry.data.type === "purchase") {
-    notifyRecommendationEngine(entry.data);
+// Durability lives in Drain, not Journal
+const drain = createDrain({
+  journal,
+  clock,
+  sink: s3Sink,
+  batchSize: 500,
+  flushIntervalMs: 5_000,
+});
+
+// Your code just appends — drain streams to S3 in batches
+journal.append({ type: "user.login", userId: "alice" });
+```
+
+### Example 3 — Back-pressure via `"error"` policy
+
+```ts
+const ingress = new Journal<Request>({
+  clock,
+  maxEntries: 1_000,
+  overflow: "error",
+});
+
+try {
+  ingress.append(req);
+} catch (err) {
+  if (err instanceof JournalOverflowError) {
+    // Shed load explicitly — 503 the producer, scale the consumer, etc.
+    return { status: 503, retryAfter: 5 };
   }
-});
-
-// Every append triggers subscribers immediately
-userEvents.append({ type: "purchase", userId: "alice", data: { amount: 99 } });
-userEvents.append({ type: "logout", userId: "alice", data: { duration: 3600 } });
+  throw err;
+}
 ```
 
-### Example 4 — Complete serialization and recovery
+### Example 4 — Snapshot and restore
 
 ```ts
-const log = new Journal<{ action: string; result: string }>({ clock });
+const log = new Journal<AuditEntry>({ clock });
+log.append({ action: "login", user: "alice" });
+log.append({ action: "export", user: "alice", rows: 10_000 });
 
-log.append({ action: "backup_started", result: "success" });
-log.append({ action: "data_validated", result: "success" });
-log.append({ action: "backup_completed", result: "partial_failure" });
-
-// Serialize complete state
+// Serialize
 const serialized = log.toJSON();
-console.log(`Captured ${serialized.entries.length} events`);
+// → { entries: [...], nextSequence: 2, createdAt: Instant }
 
-// Later, restore from serialized state
+// Later — sequence numbers and createdAt survive the roundtrip
 const restored = Journal.fromJSON(serialized, { clock });
-console.log(`Restored ${restored.size()} events`);
-console.log(`First event: ${restored.getFirst()?.data.action}`);
+restored.append({ action: "logout", user: "alice" }); // gets sequence 2
+```
+
+### Example 5 — Deterministic ordering in tests
+
+```ts
+import { createControlledClock } from "@phyxiusjs/clock";
+
+const clock = createControlledClock({ initialTime: 0 });
+const journal = new Journal<string>({ clock });
+
+journal.append("A");
+clock.advanceBy(100);
+journal.append("B");
+
+const [a, b] = journal.getSnapshot().entries;
+expect(a.sequence).toBe(0);
+expect(a.timestamp.wallMs).toBe(0);
+expect(b.sequence).toBe(1);
+expect(b.timestamp.wallMs).toBe(100);
 ```
 
 ---
 
-## Journal does NOT help you with this
+## Journal does NOT help you with
 
-### Example 1 — Real-time log analysis
-
-```ts
-// Not Journal's job - use stream processing:
-const pipeline = kafka
-  .stream("events")
-  .filter((event) => event.type === "error")
-  .aggregate(countByType);
-```
-
-### Example 2 — Log shipping and aggregation
-
-```ts
-// Not Journal's job - use log infrastructure:
-const logger = winston.createLogger({
-  transports: [new winston.transports.File({ filename: "app.log" })],
-});
-```
-
-### Example 3 — Time-series metrics
-
-```ts
-// Not Journal's job - use metrics systems:
-metrics.increment("requests.count", { method: "GET", status: "200" });
-```
+- **Durability.** Journal is in-memory. For persistence, subscribe a Drain to a sink (S3, disk, Postgres, Kafka, etc.).
+- **Distributed ordering.** Sequence is per-journal. Cross-process ordering needs a different tool.
+- **Log shipping and aggregation.** Not a replacement for Winston, Pino, or a logging pipeline.
+- **Time-series metrics.** Events are discrete records, not aggregated counters.
 
 ---
 
-## Why not just use console.log?
+## API at a glance
 
-Traditional logging gives you unstructured text with no guarantees:
+```ts
+class Journal<T> {
+  constructor(options: JournalOptions<T>);
 
-- **No ordering**: Concurrent operations can interleave log lines unpredictably.
-- **No structure**: Text parsing is brittle and error-prone.
-- **No persistence**: Logs rotate, get truncated, or are lost entirely.
-- **No reactivity**: You can't subscribe to log events or build reactive systems.
+  append(data: T): JournalEntry<T>;
+  clear(): void;
 
-Journal provides structured events with guaranteed ordering, complete persistence, and reactive subscriptions.
+  getEntry(sequence: number): JournalEntry<T> | undefined;
+  getFirst(): JournalEntry<T> | undefined;
+  getLast(): JournalEntry<T> | undefined;
+  size(): number;
+  isEmpty(): boolean;
 
----
+  subscribe(fn: (entry: JournalEntry<T>) => void): () => void;
+  getSnapshot(): JournalSnapshot<T>;
 
-## What this is not
+  toJSON(): SerializedJournal;
+  static fromJSON<T>(json: SerializedJournal, options: JournalOptions<T>): Journal<T>;
+}
+```
 
-Journal is not a logging framework, not a database, not a message queue. It does not replace Winston, Pino, or application logs. It does not handle log rotation, shipping, or aggregation.
+### Options
 
-Journal is focused on preserving event history with perfect ordering and complete recovery. It provides the foundation for event sourcing, audit trails, and debugging systems.
+```ts
+interface JournalOptions<T> {
+  clock: Clock;
+  maxEntries?: number; // default 10_000, must be > 0
+  overflow?: "drop_oldest" | "error"; // default "drop_oldest"
+  idGenerator?: () => string; // default Math.random().toString(36).slice(2)
+  emit?: (event: JournalEvent) => void;
+  serializer?: {
+    // for toJSON/fromJSON with non-plain data
+    serialize(data: T): unknown;
+    deserialize(data: unknown): T;
+  };
+}
+```
 
-If you want application logging, use a logging library. If you want metrics, use a metrics system. If you want perfect event history that never disappears, use Journal.
+### Snapshot semantics
+
+`getSnapshot()` returns a **point-in-time view** whose top-level envelope and entry array are frozen. Later appends do not mutate the snapshot.
+
+Individual entries are frozen at creation (the id/sequence/timestamp/data binding can't be mutated). User-provided `data` is **not** defensively cloned or deep-frozen. If you hand in mutable objects and mutate them afterward, that's on you — supply a `Serializer` for defensive copies.
+
+### Reentrancy
+
+Calling `append` from inside a subscriber throws `JournalReentrancyError`. Subscribers that want to append should defer (`queueMicrotask` or `setTimeout(0)`).
 
 ---
 
@@ -226,8 +240,9 @@ npm install @phyxiusjs/journal @phyxiusjs/clock
 
 ## What you get
 
-- Events that never disappear: append-only log with guaranteed preservation.
-- History you can trust: every event is timestamped, ordered, and immutable.
-- Debugging that actually works: complete event history enables time travel debugging.
+- **Trustworthy ordering.** Sequence numbers are monotonic, timestamps come from an injected Clock, and the truth survives async scheduling chaos.
+- **Bounded by construction.** You cannot accidentally build an unbounded log. The overflow decision is in the primitive, not deferred to production.
+- **Composable observability.** Subscribe for live fan-out, snapshot for point-in-time queries, drain for durability. The primitive stays small; behavior composes.
+- **Deterministic in tests.** Pair with a controlled Clock and you get reproducible event timelines.
 
-Journal does not fix logging. It gives you structured events and perfect ordering to make system behavior observable and reproducible. Everything else builds on that foundation.
+Journal is a small primitive. It holds a bounded sequence of typed events you can inspect, subscribe to, and replay. Everything else — durability, aggregation, distribution — composes on top.

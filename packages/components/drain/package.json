@@ -1,0 +1,59 @@
+{
+  "name": "@phyxiusjs/drain",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Journal log export with pluggable sinks — stdout, OTLP HTTP, file",
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "test": "vitest run",
+    "test:watch": "vitest watch",
+    "test:coverage": "vitest run --coverage",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint ."
+  },
+  "dependencies": {
+    "@phyxiusjs/clock": "workspace:*",
+    "@phyxiusjs/journal": "workspace:*"
+  },
+  "peerDependencies": {
+    "@types/node": ">=18"
+  },
+  "devDependencies": {
+    "@vitest/coverage-v8": "^2.1.8",
+    "tsup": "^8.3.5",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "license": "MIT",
+  "author": "Rodrigo Sasaki",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/rodrigopsasaki/phyxius.git",
+    "directory": "packages/components/drain"
+  },
+  "keywords": [
+    "drain",
+    "log-export",
+    "otlp",
+    "structured-logging",
+    "observability",
+    "phyxius"
+  ]
+}

@@ -1,16 +1,15 @@
 {
   "name": "@phyxiusjs/http",
-  "version": "0.0.0",
-  "private": true,
+  "version": "0.1.0",
+  "description": "HTTP adapter — Node http.Server → handler invocations",
   "type": "module",
-  "description": "HTTP adapter — translates IncomingMessage/ServerResponse to Handler inputs and results",
   "main": "./dist/index.js",
   "module": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
     ".": {
-      "import": "./dist/index.js",
-      "types": "./dist/index.d.ts"
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
     }
   },
   "files": [
@@ -24,35 +23,34 @@
     "test:watch": "vitest watch",
     "test:coverage": "vitest run --coverage",
     "typecheck": "tsc --noEmit",
-    "lint": "eslint ."
-  },
-  "dependencies": {
-    "@phyxiusjs/handler": "workspace:*",
-    "@phyxiusjs/fp": "workspace:*"
-  },
-  "devDependencies": {
-    "@phyxiusjs/clock": "workspace:*",
-    "@phyxiusjs/journal": "workspace:*",
-    "@vitest/coverage-v8": "^2.1.8",
-    "tsup": "^8.3.5",
-    "typescript": "^5.7.2",
-    "vitest": "^2.1.8"
-  },
-  "publishConfig": {
-    "access": "public"
-  },
-  "license": "MIT",
-  "author": "Rodrigo Sasaki",
-  "repository": {
-    "type": "git",
-    "url": "https://github.com/rodrigopsasaki/phyxius.git",
-    "directory": "packages/adapters/http"
+    "clean": "rm -rf dist coverage"
   },
   "keywords": [
     "http",
     "adapter",
-    "router",
-    "handler",
     "phyxius"
-  ]
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "@phyxiusjs/fp": "workspace:*",
+    "@phyxiusjs/handler": "workspace:*"
+  },
+  "devDependencies": {
+    "@phyxiusjs/clock": "workspace:*",
+    "@phyxiusjs/journal": "workspace:*",
+    "@phyxiusjs/observe": "workspace:*",
+    "@phyxiusjs/validate": "workspace:*",
+    "@types/node": "^22.10.2",
+    "@vitest/coverage-v8": "^2.1.8",
+    "tsup": "^8.3.5",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8",
+    "zod": "^3.22.0"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
 }

@@ -1,16 +1,15 @@
 {
   "name": "@phyxiusjs/handler",
-  "version": "0.0.0",
-  "private": true,
+  "version": "0.1.0",
+  "description": "The universal work-unit primitive — typed, supervised, decision-forcing",
   "type": "module",
-  "description": "Universal work unit — a supervised Process with concurrency, backpressure, and automatic observability",
   "main": "./dist/index.js",
   "module": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
     ".": {
-      "import": "./dist/index.js",
-      "types": "./dist/index.d.ts"
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
     }
   },
   "files": [
@@ -24,39 +23,39 @@
     "test:watch": "vitest watch",
     "test:coverage": "vitest run --coverage",
     "typecheck": "tsc --noEmit",
-    "lint": "eslint ."
+    "clean": "rm -rf dist coverage"
   },
+  "keywords": [
+    "handler",
+    "work-unit",
+    "resilience",
+    "phyxius"
+  ],
+  "license": "MIT",
   "dependencies": {
     "@phyxiusjs/atom": "workspace:*",
+    "@phyxiusjs/circuit-breaker": "workspace:*",
     "@phyxiusjs/clock": "workspace:*",
     "@phyxiusjs/context": "workspace:*",
     "@phyxiusjs/fp": "workspace:*",
     "@phyxiusjs/journal": "workspace:*",
     "@phyxiusjs/observe": "workspace:*",
-    "@phyxiusjs/process": "workspace:*"
+    "@phyxiusjs/process": "workspace:*",
+    "@phyxiusjs/retry": "workspace:*",
+    "@phyxiusjs/validate": "workspace:*"
   },
   "devDependencies": {
+    "@types/node": "^22.10.2",
     "@vitest/coverage-v8": "^2.1.8",
     "tsup": "^8.3.5",
     "typescript": "^5.7.2",
-    "vitest": "^2.1.8"
+    "vitest": "^2.1.8",
+    "zod": "^3.22.0"
+  },
+  "engines": {
+    "node": ">=22.0.0"
   },
   "publishConfig": {
     "access": "public"
-  },
-  "license": "MIT",
-  "author": "Rodrigo Sasaki",
-  "repository": {
-    "type": "git",
-    "url": "https://github.com/rodrigopsasaki/phyxius.git",
-    "directory": "packages/components/handler"
-  },
-  "keywords": [
-    "handler",
-    "process",
-    "concurrency",
-    "backpressure",
-    "supervision",
-    "phyxius"
-  ]
+  }
 }

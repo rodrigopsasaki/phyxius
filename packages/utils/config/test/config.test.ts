@@ -11,7 +11,7 @@ describe("config", () => {
   const testDir = "/tmp/config-main-test";
   const clock = createSystemClock();
   const journal = new Journal<ConfigEvent>({ clock });
-  
+
   beforeEach(() => {
     try {
       rmSync(testDir, { recursive: true, force: true });
@@ -19,16 +19,16 @@ describe("config", () => {
       // Ignore if directory doesn't exist
     }
     mkdirSync(testDir, { recursive: true });
-    
+
     // Clear journal
     journal.clear();
-    
+
     // Mock environment variables
     vi.stubEnv("SERVER__PORT", "3000");
     vi.stubEnv("SERVER__HOST", "localhost");
     vi.stubEnv("DATABASE__URL", "postgres://localhost/db");
   });
-  
+
   afterEach(() => {
     try {
       rmSync(testDir, { recursive: true, force: true });
@@ -37,200 +37,212 @@ describe("config", () => {
     }
     vi.unstubAllEnvs();
   });
-  
+
   describe("createConfig", () => {
     const serverSchema = z.object({
       server: z.object({
         port: z.number(),
-        host: z.string()
+        host: z.string(),
       }),
-      database: z.object({
-        url: z.string()
-      }).optional()
+      database: z
+        .object({
+          url: z.string(),
+        })
+        .optional(),
     });
-    
+
     it("should create config instance with basic functionality", () => {
       const options: ConfigOptions = {
         sources: [{ type: "env", convention: "dbt" }],
         clock,
-        environment: "test"
+        environment: "test",
       };
-      
+
       const config = createConfig(serverSchema, options);
-      
+
       expect(config).toHaveProperty("get");
+      expect(config).toHaveProperty("getPath");
       expect(config).toHaveProperty("getOrDefault");
       expect(config).toHaveProperty("getAll");
       expect(config).toHaveProperty("reload");
       expect(config).toHaveProperty("subscribe");
-      expect(config).toHaveProperty("generateExample");
       expect(config).toHaveProperty("getMetadata");
+      expect(config).toHaveProperty("dispose");
     });
-    
+
     it("should load and validate config from env source", () => {
       const options: ConfigOptions = {
         sources: [{ type: "env", convention: "dbt" }],
         clock,
-        environment: "test"
+        environment: "test",
       };
-      
+
       const config = createConfig(serverSchema, options);
       const result = config.getAll();
-      
+
       expect(result._tag).toBe("Ok");
       if (result._tag === "Ok") {
         expect(result.value).toEqual({
           server: {
             port: 3000,
-            host: "localhost"
+            host: "localhost",
           },
           database: {
-            url: "postgres://localhost/db"
-          }
+            url: "postgres://localhost/db",
+          },
         });
       }
     });
-    
+
     it("should load config from file source", () => {
       const configPath = join(testDir, "config.json");
       const configData = {
         server: {
           port: 8080,
-          host: "api.example.com"
-        }
+          host: "api.example.com",
+        },
       };
       writeFileSync(configPath, JSON.stringify(configData));
-      
+
       const options: ConfigOptions = {
         sources: [{ type: "file", path: configPath }],
         clock,
-        environment: "test"
+        environment: "test",
       };
-      
+
       const config = createConfig(serverSchema, options);
       const result = config.getAll();
-      
+
       expect(result._tag).toBe("Ok");
       if (result._tag === "Ok") {
         expect(result.value.server.port).toBe(8080);
         expect(result.value.server.host).toBe("api.example.com");
       }
     });
-    
+
     it("should load config from object source", () => {
       const configData = {
         server: {
           port: 4000,
-          host: "staging.example.com"
-        }
+          host: "staging.example.com",
+        },
       };
-      
+
       const options: ConfigOptions = {
         sources: [{ type: "object", data: configData }],
         clock,
-        environment: "test"
+        environment: "test",
       };
-      
+
       const config = createConfig(serverSchema, options);
       const result = config.getAll();
-      
+
       expect(result._tag).toBe("Ok");
       if (result._tag === "Ok") {
         expect(result.value.server.port).toBe(4000);
         expect(result.value.server.host).toBe("staging.example.com");
       }
     });
-    
-    it("should merge multiple sources with precedence", () => {
+
+    it("should merge multiple sources with precedence (first wins)", () => {
       const configPath = join(testDir, "base.json");
       const baseConfig = {
         server: {
           port: 8080,
-          host: "api.example.com"
+          host: "api.example.com",
         },
         database: {
-          url: "postgres://prod/db"
-        }
+          url: "postgres://prod/db",
+        },
       };
       writeFileSync(configPath, JSON.stringify(baseConfig));
-      
+
       const overrideData = {
         server: {
-          port: 9000  // Override port only
-        }
+          port: 9000, // Override port only — higher priority source
+        },
       };
-      
+
       const options: ConfigOptions = {
+        // Highest priority first: override object, then base file.
         sources: [
+          { type: "object", data: overrideData },
           { type: "file", path: configPath },
-          { type: "object", data: overrideData }
         ],
         clock,
-        environment: "test"
+        environment: "test",
       };
-      
+
       const config = createConfig(serverSchema, options);
       const result = config.getAll();
-      
+
       expect(result._tag).toBe("Ok");
       if (result._tag === "Ok") {
         expect(result.value).toEqual({
           server: {
-            port: 9000,  // Overridden
-            host: "api.example.com"  // From file
+            port: 9000, // From override (higher priority)
+            host: "api.example.com", // From file (only source that has it)
           },
           database: {
-            url: "postgres://prod/db"  // From file
-          }
+            url: "postgres://prod/db", // From file
+          },
         });
       }
     });
-    
+
     it("should handle validation errors", () => {
       const invalidData = {
         server: {
-          port: "not-a-number",  // Invalid type
-          host: "localhost"
-        }
+          port: "not-a-number", // Invalid type
+          host: "localhost",
+        },
       };
-      
+
       const options: ConfigOptions = {
         sources: [{ type: "object", data: invalidData }],
         clock,
-        environment: "test"
+        environment: "test",
       };
-      
+
       const config = createConfig(serverSchema, options);
       const result = config.getAll();
-      
+
       expect(result._tag).toBe("Err");
       if (result._tag === "Err") {
         expect(result.error.type).toBe("VALIDATION_ERROR");
       }
     });
   });
-  
+
   describe("config access methods", () => {
     const schema = z.object({
       server: z.object({
         port: z.number(),
         host: z.string(),
-        ssl: z.object({
-          enabled: z.boolean(),
-          cert: z.string().optional()
-        }).optional()
+        ssl: z
+          .object({
+            enabled: z.boolean(),
+            cert: z.string().optional(),
+          })
+          .optional(),
       }),
       features: z.array(z.string()).optional(),
-      database: z.object({
-        connections: z.array(z.object({
-          name: z.string(),
-          url: z.string()
-        })).optional()
-      }).optional()
+      database: z
+        .object({
+          connections: z
+            .array(
+              z.object({
+                name: z.string(),
+                url: z.string(),
+              }),
+            )
+            .optional(),
+        })
+        .optional(),
     });
-    
+
     let config: ReturnType<typeof createConfig<z.infer<typeof schema>>>;
-    
+
     beforeEach(() => {
       const configData = {
         server: {
@@ -238,106 +250,108 @@ describe("config", () => {
           host: "localhost",
           ssl: {
             enabled: true,
-            cert: "server.crt"
-          }
+            cert: "server.crt",
+          },
         },
         features: ["auth", "logging", "monitoring"],
         database: {
           connections: [
             { name: "primary", url: "postgres://db1" },
-            { name: "replica", url: "postgres://db2" }
-          ]
-        }
+            { name: "replica", url: "postgres://db2" },
+          ],
+        },
       };
-      
+
       const options: ConfigOptions = {
         sources: [{ type: "object", data: configData }],
         clock,
-        environment: "test"
+        environment: "test",
       };
-      
+
       config = createConfig(schema, options);
     });
-    
-    describe("get", () => {
-      it("should get simple property value", () => {
+
+    describe("get (typed path access)", () => {
+      it("should get simple property value with typed return", () => {
         const result = config.get("server.port");
-        
+
         expect(result._tag).toBe("Ok");
         if (result._tag === "Ok") {
-          expect(result.value).toBe(3000);
+          // result.value is typed as `number` (PathValue<T, "server.port">)
+          const port: number = result.value;
+          expect(port).toBe(3000);
         }
       });
-      
+
       it("should get nested property value", () => {
         const result = config.get("server.ssl.enabled");
-        
+
         expect(result._tag).toBe("Ok");
         if (result._tag === "Ok") {
           expect(result.value).toBe(true);
         }
       });
-      
+
       it("should get array element", () => {
         const result = config.get("features.1");
-        
+
         expect(result._tag).toBe("Ok");
         if (result._tag === "Ok") {
           expect(result.value).toBe("logging");
         }
       });
-      
+
       it("should get nested array element property", () => {
         const result = config.get("database.connections.0.name");
-        
+
         expect(result._tag).toBe("Ok");
         if (result._tag === "Ok") {
           expect(result.value).toBe("primary");
         }
       });
-      
+
       it("should return error for non-existent path", () => {
         const result = config.get("server.nonexistent");
-        
+
         expect(result._tag).toBe("Err");
         if (result._tag === "Err") {
           expect(result.error.type).toBe("PATH_NOT_FOUND");
         }
       });
     });
-    
+
     describe("getOrDefault", () => {
       it("should return value when path exists", () => {
         const result = config.getOrDefault("server.port", 8080);
-        
+
         expect(result).toBe(3000);
       });
-      
+
       it("should return default when path does not exist", () => {
         const result = config.getOrDefault("server.timeout", 30000);
-        
+
         expect(result).toBe(30000);
       });
-      
+
       it("should return default when config has errors", () => {
         // Create config with validation error
         const invalidOptions: ConfigOptions = {
           sources: [{ type: "object", data: { server: { port: "invalid" } } }],
           clock,
-          environment: "test"
+          environment: "test",
         };
-        
+
         const invalidConfig = createConfig(schema, invalidOptions);
         const result = invalidConfig.getOrDefault("server.port", 8080);
-        
+
         expect(result).toBe(8080);
       });
     });
-    
+
     describe("getAll", () => {
       it("should return entire config object", () => {
         const result = config.getAll();
-        
+
         expect(result._tag).toBe("Ok");
         if (result._tag === "Ok") {
           expect(result.value).toMatchObject({
@@ -346,53 +360,53 @@ describe("config", () => {
               host: "localhost",
               ssl: {
                 enabled: true,
-                cert: "server.crt"
-              }
+                cert: "server.crt",
+              },
             },
-            features: ["auth", "logging", "monitoring"]
+            features: ["auth", "logging", "monitoring"],
           });
         }
       });
     });
   });
-  
+
   describe("reload functionality", () => {
     it("should reload config and detect changes", () => {
       const configPath = join(testDir, "reload.json");
       const initialConfig = { server: { port: 3000, host: "localhost" } };
       writeFileSync(configPath, JSON.stringify(initialConfig));
-      
+
       const schema = z.object({
         server: z.object({
           port: z.number(),
-          host: z.string()
-        })
+          host: z.string(),
+        }),
       });
-      
+
       const options: ConfigOptions = {
         sources: [{ type: "file", path: configPath }],
         clock,
         environment: "test",
-        journal
+        journal,
       };
-      
+
       const config = createConfig(schema, options);
-      
+
       // Initial load
       let result = config.get("server.port");
       expect(result._tag).toBe("Ok");
       if (result._tag === "Ok") {
         expect(result.value).toBe(3000);
       }
-      
+
       // Update file
       const updatedConfig = { server: { port: 8080, host: "localhost" } };
       writeFileSync(configPath, JSON.stringify(updatedConfig));
-      
+
       // Reload
       const reloadResult = config.reload();
       expect(reloadResult._tag).toBe("Ok");
-      
+
       // Verify change
       result = config.get("server.port");
       expect(result._tag).toBe("Ok");
@@ -400,73 +414,73 @@ describe("config", () => {
         expect(result.value).toBe(8080);
       }
     });
-    
+
     it("should emit events on reload", () => {
       const configPath = join(testDir, "events.json");
       writeFileSync(configPath, '{"server": {"port": 3000}}');
-      
+
       const schema = z.object({
         server: z.object({
-          port: z.number()
-        })
+          port: z.number(),
+        }),
       });
-      
+
       const options: ConfigOptions = {
         sources: [{ type: "file", path: configPath }],
         clock,
         environment: "test",
-        journal
+        journal,
       };
-      
+
       const config = createConfig(schema, options);
-      
+
       const events: ConfigEvent[] = [];
       const unsubscribe = config.subscribe((event) => {
         events.push(event);
       });
-      
+
       // Update and reload
       writeFileSync(configPath, '{"server": {"port": 8080}}');
       config.reload();
-      
+
       // Should have CONFIG_RELOADED event
-      const reloadEvent = events.find(e => e.type === "CONFIG_RELOADED");
+      const reloadEvent = events.find((e) => e.type === "CONFIG_RELOADED");
       expect(reloadEvent).toBeDefined();
-      
+
       if (reloadEvent && reloadEvent.type === "CONFIG_RELOADED") {
         expect(reloadEvent.changes).toEqual([
           {
             path: "server.port",
             oldValue: 3000,
-            newValue: 8080
-          }
+            newValue: 8080,
+          },
         ]);
       }
-      
+
       unsubscribe();
     });
-    
+
     it("should handle reload errors", () => {
       const configPath = join(testDir, "reload-error.json");
       writeFileSync(configPath, '{"server": {"port": 3000}}');
-      
+
       const schema = z.object({
         server: z.object({
-          port: z.number()
-        })
+          port: z.number(),
+        }),
       });
-      
+
       const options: ConfigOptions = {
         sources: [{ type: "file", path: configPath }],
         clock,
-        environment: "test"
+        environment: "test",
       };
-      
+
       const config = createConfig(schema, options);
-      
+
       // Corrupt the file
-      writeFileSync(configPath, 'invalid json');
-      
+      writeFileSync(configPath, "invalid json");
+
       const result = config.reload();
       expect(result._tag).toBe("Err");
       if (result._tag === "Err") {
@@ -474,177 +488,226 @@ describe("config", () => {
       }
     });
   });
-  
+
   describe("watch functionality", () => {
     it("should set up file watching when enabled", () => {
       const configPath = join(testDir, "watch.json");
       writeFileSync(configPath, '{"server": {"port": 3000}}');
-      
+
       const schema = z.object({
         server: z.object({
-          port: z.number()
-        })
+          port: z.number(),
+        }),
       });
-      
+
       const options: ConfigOptions = {
         sources: [{ type: "file", path: configPath }],
         clock,
         environment: "test",
         watch: true,
-        journal
+        journal,
       };
-      
+
       const config = createConfig(schema, options);
-      
+
       const events: ConfigEvent[] = [];
       config.subscribe((event) => {
         events.push(event);
       });
-      
+
       // Should have WATCH_STARTED event
-      const watchEvent = events.find(e => e.type === "WATCH_STARTED");
+      const watchEvent = events.find((e) => e.type === "WATCH_STARTED");
       expect(watchEvent).toBeDefined();
     });
-    
+
     it("should auto-reload on file changes", async () => {
       const configPath = join(testDir, "auto-reload.json");
       writeFileSync(configPath, '{"server": {"port": 3000}}');
-      
+
       const schema = z.object({
         server: z.object({
-          port: z.number()
-        })
+          port: z.number(),
+        }),
       });
-      
+
       const options: ConfigOptions = {
         sources: [{ type: "file", path: configPath }],
         clock,
         environment: "test",
-        watch: true
+        watch: true,
       };
-      
+
       const config = createConfig(schema, options);
-      
+
       const events: ConfigEvent[] = [];
       config.subscribe((event) => {
         events.push(event);
       });
-      
+
+      // Let the OS-native watcher (kqueue/inotify) finish registering. A
+      // single tick isn't always enough on macOS; 25ms is well under any
+      // realistic "operator edits config file" latency.
+      await new Promise((resolve) => setTimeout(resolve, 25));
+
       // Update file
       writeFileSync(configPath, '{"server": {"port": 8080}}');
-      
-      // Wait for file watcher and debounce
-      await new Promise(resolve => setTimeout(resolve, 150));
-      
-      // Should auto-reload and detect changes
-      const result = config.get("server.port");
-      expect(result._tag).toBe("Ok");
-      if (result._tag === "Ok") {
-        expect(result.value).toBe(8080);
-      }
-      
+
+      // Poll for reload instead of sleeping on a fixed timeout. Under
+      // concurrent workspace load the event loop can stall; waitFor resolves
+      // as soon as the assertion passes, so the test stays honest on fast
+      // machines and patient on slow ones.
+      await vi.waitFor(
+        () => {
+          const result = config.get("server.port");
+          expect(result._tag).toBe("Ok");
+          if (result._tag === "Ok") {
+            expect(result.value).toBe(8080);
+          }
+        },
+        { timeout: 5000, interval: 25 },
+      );
+
       // Should have CONFIG_RELOADED event
-      const reloadEvent = events.find(e => e.type === "CONFIG_RELOADED");
+      const reloadEvent = events.find((e) => e.type === "CONFIG_RELOADED");
       expect(reloadEvent).toBeDefined();
     });
+
+    it("dispose should tear down watchers and stop receiving updates", async () => {
+      const configPath = join(testDir, "dispose.json");
+      writeFileSync(configPath, '{"server": {"port": 3000}}');
+
+      const schema = z.object({
+        server: z.object({ port: z.number() }),
+      });
+
+      const options: ConfigOptions = {
+        sources: [{ type: "file", path: configPath }],
+        clock,
+        watch: true,
+      };
+
+      const config = createConfig(schema, options);
+
+      const events: ConfigEvent[] = [];
+      config.subscribe((event) => events.push(event));
+
+      // Clear initial events (CONFIG_LOADED, WATCH_STARTED, replay)
+      events.length = 0;
+
+      config.dispose();
+
+      // After dispose, file changes must not produce events.
+      writeFileSync(configPath, '{"server": {"port": 8080}}');
+      await new Promise((resolve) => setTimeout(resolve, 150));
+
+      expect(events.filter((e) => e.type === "CONFIG_RELOADED")).toHaveLength(0);
+    });
+
+    it("dispose should be idempotent", () => {
+      const config = createConfig(z.object({ x: z.number().optional() }), {
+        sources: [{ type: "object", data: {} }],
+        clock,
+      });
+
+      expect(() => config.dispose()).not.toThrow();
+      expect(() => config.dispose()).not.toThrow();
+    });
   });
-  
+
   describe("event subscription", () => {
     it("should allow subscribing to config events", () => {
       const schema = z.object({
-        test: z.boolean().optional()
+        test: z.boolean().optional(),
       });
-      
+
       const options: ConfigOptions = {
         sources: [{ type: "object", data: { test: true } }],
         clock,
         environment: "test",
-        journal
+        journal,
       };
-      
+
       const config = createConfig(schema, options);
-      
+
       const events: ConfigEvent[] = [];
       const unsubscribe = config.subscribe((event) => {
         events.push(event);
       });
-      
+
       // Should have initial CONFIG_LOADED event
       expect(events).toHaveLength(1);
       expect(events[0].type).toBe("CONFIG_LOADED");
-      
+
       unsubscribe();
-      
+
       // After unsubscribe, no more events should be received
       config.reload();
       expect(events).toHaveLength(1);
     });
-    
-    it("should handle subscriber errors gracefully", () => {
+
+    it("should handle subscriber errors gracefully without polluting stderr", () => {
       const schema = z.object({
-        test: z.boolean()
+        test: z.boolean(),
       });
-      
+
       const options: ConfigOptions = {
         sources: [{ type: "object", data: { test: true } }],
         clock,
-        environment: "test"
+        environment: "test",
       };
-      
+
       const config = createConfig(schema, options);
-      
+
       const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-      
-      // Subscribe with throwing callback
+
+      // Throwing subscriber
       config.subscribe(() => {
         throw new Error("Subscriber error");
       });
-      
-      // Subscribe with working callback
+
+      // Working subscriber
       const events: ConfigEvent[] = [];
       config.subscribe((event) => {
         events.push(event);
       });
-      
-      // Reload should not fail despite error in first subscriber
+
+      // Reload succeeds despite the throwing subscriber
       const result = config.reload();
       expect(result._tag).toBe("Ok");
-      
-      // Working subscriber should still receive events
+
+      // Working subscriber still receives events
       expect(events.length).toBeGreaterThan(0);
-      
-      // Error should be logged
-      expect(consoleSpy).toHaveBeenCalledWith(
-        "Config subscriber error:",
-        expect.any(Error)
-      );
-      
+
+      // Library never writes to stderr — the throw is contained, not logged.
+      // Consumers that care can route errors through the journal.
+      expect(consoleSpy).not.toHaveBeenCalled();
+
       consoleSpy.mockRestore();
     });
   });
-  
+
   describe("metadata", () => {
     it("should provide config metadata", () => {
       const configPath = join(testDir, "metadata.json");
       writeFileSync(configPath, '{"test": true}');
-      
+
       const schema = z.object({
-        test: z.boolean()
+        test: z.boolean(),
       });
-      
+
       const options: ConfigOptions = {
         sources: [
           { type: "file", path: configPath },
-          { type: "env", prefix: "APP_" }
+          { type: "env", prefix: "APP_" },
         ],
         clock,
         environment: "production",
-        watch: true
+        watch: true,
       };
-      
+
       const config = createConfig(schema, options);
       const metadata = config.getMetadata();
-      
+
       expect(metadata.sources).toHaveLength(2);
       expect(metadata.sources[0]).toEqual({ type: "file", path: configPath });
       expect(metadata.sources[1]).toEqual({ type: "env", prefix: "APP_" });
@@ -653,165 +716,174 @@ describe("config", () => {
       expect(metadata.reloadCount).toBe(0);
       expect(typeof metadata.loadedAt.wallMs).toBe("number");
     });
-    
+
     it("should update reload count on reload", () => {
       const schema = z.object({
-        test: z.boolean()
+        test: z.boolean(),
       });
-      
+
       const options: ConfigOptions = {
         sources: [{ type: "object", data: { test: true } }],
         clock,
-        environment: "test"
+        environment: "test",
       };
-      
+
       const config = createConfig(schema, options);
-      
+
       expect(config.getMetadata().reloadCount).toBe(0);
-      
+
       config.reload();
       expect(config.getMetadata().reloadCount).toBe(1);
-      
+
       config.reload();
       expect(config.getMetadata().reloadCount).toBe(2);
     });
   });
-  
-  describe("generateExample", () => {
-    it("should generate environment variable example", () => {
-      const schema = z.object({
-        server: z.object({
-          port: z.number()
-        })
-      });
-      
-      const options: ConfigOptions = {
-        sources: [{ type: "env", convention: "dbt" }],
-        clock,
-        environment: "test"
-      };
-      
-      const config = createConfig(schema, options);
-      const example = config.generateExample();
-      
-      // Should be a string (basic smoke test)
-      expect(typeof example).toBe("string");
-      expect(example).toContain("# Generated environment variable example");
-    });
-  });
-  
+
   describe("integration scenarios", () => {
-    it("should handle complex multi-source configuration", () => {
-      // Set up file config
+    it("should handle complex multi-source configuration (first wins)", () => {
+      // Base config on disk
       const configPath = join(testDir, "base.json");
-      writeFileSync(configPath, JSON.stringify({
-        server: {
-          port: 3000,
-          host: "localhost",
-          ssl: { enabled: false }
-        },
-        database: {
-          url: "postgres://localhost/dev"
-        }
-      }));
-      
-      // Set up env overrides
+      writeFileSync(
+        configPath,
+        JSON.stringify({
+          server: {
+            port: 3000,
+            host: "localhost",
+            ssl: { enabled: false },
+          },
+          database: {
+            url: "postgres://localhost/dev",
+          },
+        }),
+      );
+
+      // Env-level overrides
       vi.stubEnv("APP_SERVER__PORT", "8080");
       vi.stubEnv("APP_SERVER__SSL__ENABLED", "true");
-      
+
       const schema = z.object({
         server: z.object({
           port: z.number(),
           host: z.string(),
           ssl: z.object({
-            enabled: z.boolean()
-          })
+            enabled: z.boolean(),
+          }),
         }),
         database: z.object({
-          url: z.string()
-        })
+          url: z.string(),
+        }),
       });
-      
+
       const options: ConfigOptions = {
+        // Highest precedence first: inline override, then env, then file.
         sources: [
-          { type: "file", path: configPath },
+          { type: "object", data: { server: { host: "api.example.com" } } },
           { type: "env", prefix: "APP_", convention: "dbt" },
-          { type: "object", data: { server: { host: "api.example.com" } } }
+          { type: "file", path: configPath },
         ],
         clock,
         environment: "test",
-        journal
+        journal,
       };
-      
+
       const config = createConfig(schema, options);
       const result = config.getAll();
-      
+
       expect(result._tag).toBe("Ok");
       if (result._tag === "Ok") {
         expect(result.value).toEqual({
           server: {
-            port: 8080,  // From env
-            host: "api.example.com",  // From object (highest precedence)
-            ssl: { enabled: true }  // From env
+            port: 8080, // From env (beats file, not set by object)
+            host: "api.example.com", // From object (highest priority)
+            ssl: { enabled: true }, // From env (beats file)
           },
           database: {
-            url: "postgres://localhost/dev"  // From file
-          }
+            url: "postgres://localhost/dev", // From file (only source that has it)
+          },
         });
       }
     });
-    
+
     it("should handle configuration evolution over time", async () => {
       const configPath = join(testDir, "evolution.json");
-      writeFileSync(configPath, JSON.stringify({
-        version: 1,
-        server: { port: 3000 }
-      }));
-      
+      writeFileSync(
+        configPath,
+        JSON.stringify({
+          version: 1,
+          server: { port: 3000 },
+        }),
+      );
+
       const schema = z.object({
         version: z.number(),
         server: z.object({
           port: z.number(),
-          host: z.string().optional()
-        })
+          host: z.string().optional(),
+        }),
       });
-      
+
       const options: ConfigOptions = {
         sources: [{ type: "file", path: configPath }],
         clock,
         environment: "test",
-        watch: true
+        watch: true,
       };
-      
+
       const config = createConfig(schema, options);
       const events: ConfigEvent[] = [];
-      config.subscribe(event => events.push(event));
-      
+      config.subscribe((event) => events.push(event));
+
+      // Give the OS-native watcher (kqueue/inotify) time to register. A
+      // single event-loop tick isn't always enough; 25ms is well under any
+      // realistic "operator edits config file" latency.
+      await new Promise((resolve) => setTimeout(resolve, 25));
+
       // Evolution 1: Add host
-      writeFileSync(configPath, JSON.stringify({
-        version: 2,
-        server: { port: 3000, host: "localhost" }
-      }));
-      
-      await new Promise(resolve => setTimeout(resolve, 150));
-      
+      writeFileSync(
+        configPath,
+        JSON.stringify({
+          version: 2,
+          server: { port: 3000, host: "localhost" },
+        }),
+      );
+
+      // Wait for the first evolution to land before writing the second, so
+      // the two writes don't get coalesced into one debounced reload under
+      // load. We poll for the observable effect (version === 2), not for a
+      // fixed timeout — that stays honest on fast and slow machines alike.
+      await vi.waitFor(
+        () => {
+          const result = config.get("version");
+          expect(result._tag).toBe("Ok");
+          if (result._tag === "Ok") expect(result.value).toBe(2);
+        },
+        { timeout: 5000, interval: 25 },
+      );
+
       // Evolution 2: Change port
-      writeFileSync(configPath, JSON.stringify({
-        version: 3,
-        server: { port: 8080, host: "localhost" }
-      }));
-      
-      await new Promise(resolve => setTimeout(resolve, 150));
-      
-      // Should track all changes
-      const reloadEvents = events.filter(e => e.type === "CONFIG_RELOADED");
-      expect(reloadEvents).toHaveLength(2);
-      
-      const finalResult = config.get("server.port");
-      expect(finalResult._tag).toBe("Ok");
-      if (finalResult._tag === "Ok") {
-        expect(finalResult.value).toBe(8080);
-      }
+      writeFileSync(
+        configPath,
+        JSON.stringify({
+          version: 3,
+          server: { port: 8080, host: "localhost" },
+        }),
+      );
+
+      await vi.waitFor(
+        () => {
+          const result = config.get("server.port");
+          expect(result._tag).toBe("Ok");
+          if (result._tag === "Ok") expect(result.value).toBe(8080);
+        },
+        { timeout: 5000, interval: 25 },
+      );
+
+      // Each evolution should have produced at least one reload event.
+      // (Exact count is unreliable — fs.watchFile can coalesce near-simultaneous
+      // writes — but observable state evolves through both versions.)
+      const reloadEvents = events.filter((e) => e.type === "CONFIG_RELOADED");
+      expect(reloadEvents.length).toBeGreaterThanOrEqual(2);
     });
   });
 });

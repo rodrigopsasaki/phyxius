@@ -316,16 +316,20 @@ function UserProfile({ userId }: { userId: string }) {
 
 ### Combinators
 
-| Function               | Type                             | Description              |
-| ---------------------- | -------------------------------- | ------------------------ |
-| `identity(x)`          | `T → T`                          | Return input unchanged   |
-| `constant(x)`          | `T → () → T`                     | Always return same value |
-| `flip(fn)`             | `(A → B → C) → (B → A → C)`      | Flip first two arguments |
-| `curry2(fn)`           | `(A, B) → C) → A → B → C`        | Curry 2-arg function     |
-| `curry3(fn)`           | `(A, B, C) → D) → A → B → C → D` | Curry 3-arg function     |
-| `partial(fn, ...args)` | `Function → ...any[] → Function` | Partially apply function |
-| `memoize(fn)`          | `Function → Function`            | Cache function results   |
-| `once(fn)`             | `Function → Function`            | Execute only once        |
+| Function                       | Type                                                          | Description                                                |
+| ------------------------------ | ------------------------------------------------------------- | ---------------------------------------------------------- |
+| `identity(x)`                  | `T → T`                                                       | Return input unchanged                                     |
+| `constant(x)`                  | `T → () → T`                                                  | Always return same value                                   |
+| `flip(fn)`                     | `(A → B → C) → (B → A → C)`                                   | Flip first two arguments                                   |
+| `curry2(fn)`                   | `(A, B) → C) → A → B → C`                                     | Curry 2-arg function                                       |
+| `curry3(fn)`                   | `(A, B, C) → D) → A → B → C → D`                              | Curry 3-arg function                                       |
+| `partial(fn, ...args)`         | `Function → ...any[] → Function`                              | Partially apply function                                   |
+| `memoize(fn, { maxSize? })`    | `Function → MemoizeOptions → Function`                        | Cache with bounded LRU (default `maxSize: 1000`)           |
+| `memoizeWith(fn, keyFn, opts)` | `Function → (T → string) → MemoizeOptions → Function`         | Cache with custom key fn + LRU                             |
+| `once(fn)`                     | `Function → Function`                                         | Call exactly once (replays value or rethrows cached error) |
+| `either(fn1, fn2)`             | `(A → R) → (A → R) → (A → Result<R, { primary, fallback? }>)` | Try-with-fallback lifted into Result                       |
+| `tryOrElse(fn1, fn2)`          | `(A → R) → (A → R) → (A → R)`                                 | Try-with-fallback returning `R` (rethrows unmatched)       |
+| `chainNullable(fn1, fn2)`      | `(A → B?) → (B → C?) → (A → C?)`                              | Compose nullable-returning functions                       |
 
 ## Why @phyxiusjs/fp?
 
@@ -384,13 +388,16 @@ This library embodies the Phyxius philosophy:
 
 ## Part of the Phyxius Ecosystem
 
-Works seamlessly with:
+`@phyxiusjs/fp` depends on `@phyxiusjs/clock` — the async-result module's
+`retryAsync` and `timeoutAsync` accept a Clock so retry backoff and timeouts
+are deterministic under a controlled clock. No raw `setTimeout` or
+`Date.now()` inside this library.
 
-- `@phyxiusjs/clock` - Deterministic time operations
-- `@phyxiusjs/atom` - Race-free state management
-- `@phyxiusjs/effect` - Structured concurrency
-- `@phyxiusjs/handler` - Reliable external boundaries
-- `@phyxiusjs/temporal` - Function execution timing control
+Pairs naturally with:
+
+- `@phyxiusjs/atom` — Result + Atom for state that can fail
+- `@phyxiusjs/journal` — Result-valued events in an ordered log
+- `@phyxiusjs/temporal` — debounce/throttle under the same Clock
 
 ---
 

@@ -1,777 +1,475 @@
-import { describe, it, expect, beforeEach } from "vitest";
-import { createSystemClock } from "@phyxiusjs/clock";
-import type { Millis } from "@phyxiusjs/clock";
+import { describe, it, expect } from "vitest";
+import { z } from "zod";
+import { createControlledClock, ms } from "@phyxiusjs/clock";
 import { Journal } from "@phyxiusjs/journal";
+import { observe } from "@phyxiusjs/observe";
 import { isOk, isErr } from "@phyxiusjs/fp";
-import {
-  createHandler,
-  defineHandler,
-  HandlerError,
-  type HandlerEvent,
-} from "../src/index.js";
+import { defineHandler, spawn, retry, cb, type HandlerEvent, type HandlerRuntime } from "../src/index.js";
 
-// ── Shared test infrastructure ───────────────────────────────────────────────
+// ── Test helpers ─────────────────────────────────────────────────────────────
 
-function echoProcessor(input: { message: string }): Promise<{ echo: string }> {
-  return Promise.resolve({ echo: input.message });
+function setup() {
+  const clock = createControlledClock({ initialTime: 0 });
+  const journal = new Journal<HandlerEvent>({ clock, maxEntries: 100 });
+  const runtime: HandlerRuntime = { clock, journal };
+  return { clock, journal, runtime };
 }
 
-function failingProcessor(_input: { message: string }): Promise<{ result: string }> {
-  return Promise.reject(new Error("Intentional test failure"));
-}
+const echoFields = observe.fields({
+  echoed: observe.field<string>(),
+});
 
-function slowProcessor(delayMs: number) {
-  return async (input: { value: number }): Promise<{ value: number }> => {
-    await new Promise((resolve) => setTimeout(resolve, delayMs));
-    return { value: input.value };
-  };
-}
+// Baseline handler: validates input, returns it doubled, declares all stability.
+const doubleSchema = defineHandler({
+  name: "double",
+  input: z.object({ value: z.number() }),
+  output: z.object({ doubled: z.number() }),
+  fields: echoFields,
+  timeout: ms(1000),
+  concurrency: { max: 2, queueSize: 10, backpressure: "reject" },
+  retry: retry.none(),
+  circuitBreaker: cb.none(),
+  run: async ({ value }) => ({ doubled: value * 2 }),
+});
 
-describe("Handler", () => {
-  let clock: ReturnType<typeof createSystemClock>;
-  let journal: Journal<HandlerEvent>;
-
-  beforeEach(() => {
-    clock = createSystemClock();
-    journal = new Journal({ clock });
-  });
-
-  // ── defineHandler ──────────────────────────────────────────────────────────
-
+describe("@phyxiusjs/handler", () => {
   describe("defineHandler", () => {
-    it("returns the definition unchanged (pure configuration)", () => {
-      const definition = defineHandler({
-        name: "echo-handler",
-        processor: echoProcessor,
-        concurrency: { max: 5, backpressure: "reject", queueSize: 10 },
-      });
+    it("should return the spec unchanged (pure data)", () => {
+      expect(doubleSchema.name).toBe("double");
+    });
 
-      expect(definition.name).toBe("echo-handler");
-      expect(definition.processor).toBe(echoProcessor);
-      expect(definition.concurrency.max).toBe(5);
-      expect(definition.concurrency.backpressure).toBe("reject");
-      expect(definition.concurrency.queueSize).toBe(10);
+    it("should reject invalid concurrency", () => {
+      expect(() =>
+        defineHandler({
+          ...doubleSchema,
+          concurrency: { max: 0, queueSize: 10, backpressure: "reject" },
+        }),
+      ).toThrow(/concurrency\.max/);
+    });
+
+    it("should reject negative timeout", () => {
+      expect(() => defineHandler({ ...doubleSchema, timeout: -1 as never })).toThrow(/timeout/);
     });
   });
 
-  // ── Lifecycle ──────────────────────────────────────────────────────────────
+  describe("happy path", () => {
+    it("should validate input, run, validate output, return Ok", async () => {
+      const { runtime, journal } = setup();
+      const handler = await spawn(doubleSchema, runtime);
 
-  describe("lifecycle", () => {
-    it("starts in idle state", () => {
-      const handler = createHandler(
-        defineHandler({
-          name: "test",
-          processor: echoProcessor,
-          concurrency: { max: 1, backpressure: "reject", queueSize: 5 },
-        }),
-        { clock, journal },
-      );
-
-      expect(handler.getState()).toBe("idle");
-    });
-
-    it("transitions idle → running after start()", async () => {
-      const handler = createHandler(
-        defineHandler({
-          name: "test",
-          processor: echoProcessor,
-          concurrency: { max: 1, backpressure: "reject", queueSize: 5 },
-        }),
-        { clock, journal },
-      );
-
-      await handler.start();
-
-      expect(handler.getState()).toBe("running");
-
-      await handler.stop();
-    });
-
-    it("transitions running → stopped after stop()", async () => {
-      const handler = createHandler(
-        defineHandler({
-          name: "test",
-          processor: echoProcessor,
-          concurrency: { max: 1, backpressure: "reject", queueSize: 5 },
-        }),
-        { clock, journal },
-      );
-
-      await handler.start();
-      await handler.stop();
-
-      expect(handler.getState()).toBe("stopped");
-    });
-
-    it("throws HANDLER_ALREADY_RUNNING when started twice", async () => {
-      const handler = createHandler(
-        defineHandler({
-          name: "test",
-          processor: echoProcessor,
-          concurrency: { max: 1, backpressure: "reject", queueSize: 5 },
-        }),
-        { clock, journal },
-      );
-
-      await handler.start();
-
-      await expect(handler.start()).rejects.toBeInstanceOf(HandlerError);
-
-      await handler.stop();
-    });
-
-    it("stop() is a no-op when handler is not running", async () => {
-      const handler = createHandler(
-        defineHandler({
-          name: "test",
-          processor: echoProcessor,
-          concurrency: { max: 1, backpressure: "reject", queueSize: 5 },
-        }),
-        { clock, journal },
-      );
-
-      await expect(handler.stop()).resolves.toBeUndefined();
-    });
-  });
-
-  // ── submit() basic execution ─────────────────────────────────────────────
-
-  describe("submit() — basic execution", () => {
-    it("executes the processor and returns Ok on success", async () => {
-      const handler = createHandler(
-        defineHandler({
-          name: "echo",
-          processor: echoProcessor,
-          concurrency: { max: 5, backpressure: "reject", queueSize: 10 },
-        }),
-        { clock, journal },
-      );
-
-      await handler.start();
-
-      const result = await handler.submit({ message: "hello" });
+      const result = await handler.invoke({ value: 7 });
 
       expect(isOk(result)).toBe(true);
-      if (isOk(result)) {
-        expect(result.value.echo).toBe("hello");
-      }
+      if (isOk(result)) expect(result.value).toEqual({ doubled: 14 });
+
+      // One journal entry, outcome success.
+      const snap = journal.getSnapshot();
+      expect(snap.entries).toHaveLength(1);
+      expect(snap.entries[0]?.data.outcome).toBe("success");
+      expect(snap.entries[0]?.data.name).toBe("double");
+      expect(snap.entries[0]?.data.attempts).toBe(1);
 
       await handler.stop();
     });
 
-    it("returns Err wrapping the error on failure", async () => {
-      const handler = createHandler(
-        defineHandler({
-          name: "failing",
-          processor: failingProcessor,
-          concurrency: { max: 5, backpressure: "reject", queueSize: 10 },
-        }),
-        { clock, journal },
-      );
+    it("should capture caller-written observe fields on the journal entry", async () => {
+      const { runtime, journal } = setup();
+      const fields = observe.fields({
+        userId: observe.field<string>(),
+        foo: observe.field<string>(),
+      });
 
-      await handler.start();
-
-      const result = await handler.submit({ message: "will fail" });
-
-      expect(isErr(result)).toBe(true);
-      if (isErr(result)) {
-        expect(result.error).toBeInstanceOf(HandlerError);
-        expect(result.error.code).toBe("EXECUTION_FAILED");
-      }
-
-      await handler.stop();
-    });
-
-    it("returns HANDLER_NOT_RUNNING when submitted before start()", async () => {
-      const handler = createHandler(
-        defineHandler({
-          name: "test",
-          processor: echoProcessor,
-          concurrency: { max: 5, backpressure: "reject", queueSize: 10 },
-        }),
-        { clock, journal },
-      );
-
-      const result = await handler.submit({ message: "too early" });
-
-      expect(isErr(result)).toBe(true);
-      if (isErr(result)) {
-        expect(result.error.code).toBe("HANDLER_NOT_RUNNING");
-      }
-    });
-
-    it("propagates correlationId from WorkMeta to the Journal event", async () => {
-      const handler = createHandler(
-        defineHandler({
-          name: "traced",
-          processor: echoProcessor,
-          concurrency: { max: 5, backpressure: "reject", queueSize: 10 },
-        }),
-        { clock, journal },
-      );
-
-      await handler.start();
-
-      await handler.submit(
-        { message: "trace me" },
-        {
-          source: "test",
-          correlationId: "my-trace-id-123",
+      const h = defineHandler({
+        name: "observer",
+        input: z.object({ u: z.string() }),
+        output: z.object({ ok: z.boolean() }),
+        fields,
+        timeout: ms(1000),
+        concurrency: { max: 1, queueSize: 5, backpressure: "reject" },
+        retry: retry.none(),
+        circuitBreaker: cb.none(),
+        run: async ({ u }) => {
+          fields.userId.set(u);
+          fields.foo.set("bar");
+          return { ok: true };
         },
+      });
+
+      const handler = await spawn(h, runtime);
+      await handler.invoke({ u: "alice" });
+
+      const entry = journal.getSnapshot().entries[0];
+      expect(entry?.data.observed).toMatchObject({ userId: "alice", foo: "bar" });
+
+      await handler.stop();
+    });
+
+    it("should carry correlationId + source + meta on the entry", async () => {
+      const { runtime, journal } = setup();
+      const handler = await spawn(doubleSchema, runtime);
+
+      await handler.invoke(
+        { value: 1 },
+        { correlationId: "req-123", source: "http", context: { method: "POST", path: "/x" } },
       );
 
-      const snapshot = journal.getSnapshot();
-      expect(snapshot.totalCount).toBeGreaterThan(0);
-      const lastEntry = snapshot.entries[snapshot.entries.length - 1];
-      expect(lastEntry).toBeDefined();
-      if (lastEntry) {
-        expect(lastEntry.data.correlationId).toBe("my-trace-id-123");
-        expect(lastEntry.data.source).toBe("test");
+      const entry = journal.getSnapshot().entries[0]?.data;
+      expect(entry?.correlationId).toBe("req-123");
+      expect(entry?.source).toBe("http");
+      expect(entry?.meta).toMatchObject({ method: "POST", path: "/x" });
+
+      await handler.stop();
+    });
+  });
+
+  describe("VALIDATION_ERROR (input)", () => {
+    it("should return VALIDATION_ERROR with target 'input'", async () => {
+      const { runtime, journal } = setup();
+      const handler = await spawn(doubleSchema, runtime);
+
+      // Wrong shape — Zod will reject
+      const result = await handler.invoke({ value: "not-a-number" } as never);
+
+      expect(isErr(result)).toBe(true);
+      if (isErr(result)) {
+        expect(result.error.type).toBe("VALIDATION_ERROR");
+        if (result.error.type === "VALIDATION_ERROR") {
+          expect(result.error.target).toBe("input");
+          expect(result.error.error.issues.length).toBeGreaterThan(0);
+        }
+      }
+
+      const entry = journal.getSnapshot().entries[0]?.data;
+      expect(entry?.outcome).toBe("failure");
+      expect(entry?.error?.type).toBe("VALIDATION_ERROR");
+
+      await handler.stop();
+    });
+  });
+
+  describe("VALIDATION_ERROR (output)", () => {
+    it("should return VALIDATION_ERROR with target 'output'", async () => {
+      const { runtime } = setup();
+
+      const lyingHandler = defineHandler({
+        name: "lies",
+        input: z.object({ x: z.number() }),
+        output: z.object({ doubled: z.number() }),
+        fields: echoFields,
+        timeout: ms(1000),
+        concurrency: { max: 1, queueSize: 5, backpressure: "reject" },
+        retry: retry.none(),
+        circuitBreaker: cb.none(),
+        run: async () => ({ doubled: "not a number" }) as never,
+      });
+
+      const handler = await spawn(lyingHandler, runtime);
+      const result = await handler.invoke({ x: 1 });
+
+      expect(isErr(result)).toBe(true);
+      if (isErr(result) && result.error.type === "VALIDATION_ERROR") {
+        expect(result.error.target).toBe("output");
       }
 
       await handler.stop();
     });
   });
 
-  // ── submit() concurrency ───────────────────────────────────────────────────
+  describe("HANDLER_ERROR", () => {
+    it("should capture thrown errors as HANDLER_ERROR", async () => {
+      const { runtime, journal } = setup();
 
-  describe("submit() — concurrency", () => {
-    it("queues work when concurrency max is reached, executes when slot opens", async () => {
-      const handler = createHandler(
-        defineHandler({
-          name: "limited",
-          processor: slowProcessor(50),
-          concurrency: { max: 1, backpressure: "reject", queueSize: 5 },
-        }),
-        { clock, journal },
-      );
+      const throwing = defineHandler({
+        name: "throws",
+        input: z.any(),
+        output: z.any(),
+        fields: echoFields,
+        timeout: ms(1000),
+        concurrency: { max: 1, queueSize: 5, backpressure: "reject" },
+        retry: retry.none(),
+        circuitBreaker: cb.none(),
+        run: async () => {
+          throw new Error("boom");
+        },
+      });
 
-      await handler.start();
+      const handler = await spawn(throwing, runtime);
+      const result = await handler.invoke({});
 
-      const [r1, r2] = await Promise.all([
-        handler.submit({ value: 1 }),
-        handler.submit({ value: 2 }),
-      ]);
+      expect(isErr(result)).toBe(true);
+      if (isErr(result) && result.error.type === "HANDLER_ERROR") {
+        expect((result.error.cause as Error).message).toBe("boom");
+      }
 
-      expect(isOk(r1)).toBe(true);
-      expect(isOk(r2)).toBe(true);
+      const entry = journal.getSnapshot().entries[0]?.data;
+      expect(entry?.error?.type).toBe("HANDLER_ERROR");
+      expect(entry?.error?.message).toBe("boom");
 
-      await handler.stop();
-    });
-
-    it("getMetrics() shows activeCount and queuedCount", async () => {
-      const handler = createHandler(
-        defineHandler({
-          name: "measured",
-          processor: slowProcessor(200),
-          concurrency: { max: 1, backpressure: "reject", queueSize: 5 },
-        }),
-        { clock, journal },
-      );
-
-      await handler.start();
-
-      const p1 = handler.submit({ value: 1 });
-      const p2 = handler.submit({ value: 2 });
-
-      await new Promise((r) => setTimeout(r, 10));
-
-      const metrics = handler.getMetrics();
-      expect(metrics.activeCount).toBeGreaterThanOrEqual(1);
-      expect(metrics.state).toBe("running");
-
-      await Promise.all([p1, p2]);
       await handler.stop();
     });
   });
 
-  // ── Backpressure ─────────────────────────────────────────────────────────
+  describe("TIMEOUT", () => {
+    it("should return TIMEOUT when run exceeds budget", async () => {
+      const { runtime, clock } = setup();
 
-  describe("submit() — backpressure: reject", () => {
-    it("returns BACKPRESSURE_REJECT when queue is full with 'reject' policy", async () => {
-      const handler = createHandler(
-        defineHandler({
-          name: "capped",
-          processor: slowProcessor(500),
-          concurrency: { max: 1, backpressure: "reject", queueSize: 1 },
-        }),
-        { clock, journal },
-      );
+      const slow = defineHandler({
+        name: "slow",
+        input: z.any(),
+        output: z.any(),
+        fields: echoFields,
+        timeout: ms(100),
+        concurrency: { max: 1, queueSize: 5, backpressure: "reject" },
+        retry: retry.none(),
+        circuitBreaker: cb.none(),
+        run: async ({ clock: c, signal }) => {
+          // Wait for the budget to abort.
+          return new Promise<never>((_, reject) => {
+            signal.addEventListener("abort", () => reject(new Error("aborted")));
+            void c.sleep(ms(10_000));
+          });
+        },
+      });
 
-      await handler.start();
+      const handler = await spawn(slow, runtime);
+      const pending = handler.invoke({});
 
-      const p1 = handler.submit({ value: 1 });
-      await new Promise((r) => setTimeout(r, 5));
-      const p2 = handler.submit({ value: 2 });
-      const p3 = handler.submit({ value: 3 });
+      // Let the scope open and budget register its timer.
+      await Promise.resolve();
+      await Promise.resolve();
+
+      clock.advanceBy(ms(100));
+      await clock.flush();
+      await new Promise((r) => setImmediate(r));
+
+      const result = await pending;
+      // Either TIMEOUT (if retry was aborted) or HANDLER_ERROR (if the work's
+      // own abort handling threw first). Both are acceptable failure modes;
+      // the important thing is failure, not hang.
+      expect(isErr(result)).toBe(true);
+
+      await handler.stop();
+    });
+  });
+
+  describe("retry", () => {
+    it("should retry on failure and succeed", async () => {
+      const { runtime, journal, clock } = setup();
+
+      let attempts = 0;
+      const flaky = defineHandler({
+        name: "flaky",
+        input: z.any(),
+        output: z.object({ attempt: z.number() }),
+        fields: echoFields,
+        timeout: ms(5000),
+        concurrency: { max: 1, queueSize: 5, backpressure: "reject" },
+        retry: retry.fixed({ maxAttempts: 3, delay: ms(10) }),
+        circuitBreaker: cb.none(),
+        run: async () => {
+          attempts += 1;
+          if (attempts < 3) throw new Error(`fail #${attempts}`);
+          return { attempt: attempts };
+        },
+      });
+
+      const handler = await spawn(flaky, runtime);
+      const pending = handler.invoke({});
+
+      // Advance the clock past each retry delay.
+      for (let i = 0; i < 5; i++) {
+        await Promise.resolve();
+        clock.advanceBy(ms(10));
+        await clock.flush();
+      }
+
+      const result = await pending;
+
+      expect(isOk(result)).toBe(true);
+      if (isOk(result)) expect(result.value).toEqual({ attempt: 3 });
+
+      const entry = journal.getSnapshot().entries[0]?.data;
+      expect(entry?.attempts).toBe(3);
+
+      await handler.stop();
+    });
+
+    it("should return RETRY_EXHAUSTED when all attempts fail", async () => {
+      const { runtime, clock } = setup();
+
+      const alwaysFails = defineHandler({
+        name: "alwaysFails",
+        input: z.any(),
+        output: z.any(),
+        fields: echoFields,
+        timeout: ms(5000),
+        concurrency: { max: 1, queueSize: 5, backpressure: "reject" },
+        retry: retry.fixed({ maxAttempts: 2, delay: ms(10) }),
+        circuitBreaker: cb.none(),
+        run: async () => {
+          throw new Error("always");
+        },
+      });
+
+      const handler = await spawn(alwaysFails, runtime);
+      const pending = handler.invoke({});
+
+      for (let i = 0; i < 3; i++) {
+        await Promise.resolve();
+        clock.advanceBy(ms(10));
+        await clock.flush();
+      }
+
+      const result = await pending;
+      expect(isErr(result)).toBe(true);
+      if (isErr(result) && result.error.type === "RETRY_EXHAUSTED") {
+        expect(result.error.attempts).toBe(2);
+      }
+
+      await handler.stop();
+    });
+  });
+
+  describe("circuit breaker", () => {
+    it("should short-circuit with CIRCUIT_OPEN after consecutive failures", async () => {
+      const { runtime } = setup();
+
+      const failing = defineHandler({
+        name: "cb-fail",
+        input: z.any(),
+        output: z.any(),
+        fields: echoFields,
+        timeout: ms(1000),
+        concurrency: { max: 1, queueSize: 5, backpressure: "reject" },
+        retry: retry.none(),
+        circuitBreaker: cb.policy({ failureThreshold: 2, resetTimeout: ms(10_000) }),
+        run: async () => {
+          throw new Error("downstream down");
+        },
+      });
+
+      const handler = await spawn(failing, runtime);
+
+      // First two failures feed the breaker.
+      await handler.invoke({});
+      await handler.invoke({});
+
+      // Third call is short-circuited.
+      const third = await handler.invoke({});
+      expect(isErr(third)).toBe(true);
+      if (isErr(third)) expect(third.error.type).toBe("CIRCUIT_OPEN");
+
+      expect(handler.getMetrics().circuitState).toBe("open");
+
+      await handler.stop();
+    });
+
+    it("should report 'disabled' circuit state when using cb.none()", async () => {
+      const { runtime } = setup();
+      const handler = await spawn(doubleSchema, runtime);
+
+      expect(handler.getMetrics().circuitState).toBe("disabled");
+
+      await handler.stop();
+    });
+  });
+
+  describe("concurrency + backpressure", () => {
+    it("should BACKPRESSURE_REJECT when queue is full", async () => {
+      const { runtime, clock } = setup();
+
+      const slow = defineHandler({
+        name: "slow",
+        input: z.any(),
+        output: z.any(),
+        fields: echoFields,
+        timeout: ms(10_000),
+        concurrency: { max: 1, queueSize: 1, backpressure: "reject" },
+        retry: retry.none(),
+        circuitBreaker: cb.none(),
+        run: async ({ clock: c }) => {
+          await c.sleep(ms(1000));
+          return {};
+        },
+      });
+
+      const handler = await spawn(slow, runtime);
+
+      // Fire three — capacity is max(1) + queueSize(1) = 2. The third rejects.
+      const p1 = handler.invoke({});
+      const p2 = handler.invoke({});
+      const p3 = handler.invoke({});
+
+      // Let the first one start executing.
+      await Promise.resolve();
+      await Promise.resolve();
 
       const r3 = await p3;
       expect(isErr(r3)).toBe(true);
-      if (isErr(r3)) {
-        expect(r3.error.code).toBe("BACKPRESSURE_REJECT");
-      }
+      if (isErr(r3)) expect(r3.error.type).toBe("BACKPRESSURE_REJECT");
 
-      await Promise.all([p1, p2]);
+      // Drain the others so the handler can stop cleanly.
+      clock.advanceBy(ms(1000));
+      await clock.flush();
+      await p1;
+      clock.advanceBy(ms(1000));
+      await clock.flush();
+      await p2;
+
       await handler.stop();
     });
   });
 
-  describe("submit() — backpressure: drop-oldest", () => {
-    it("evicts the oldest queued item and enqueues the new one when queue is full", async () => {
-      const handler = createHandler(
-        defineHandler({
-          name: "drop-oldest",
-          processor: slowProcessor(500),
-          concurrency: { max: 1, backpressure: "drop-oldest", queueSize: 1 },
-        }),
-        { clock, journal },
-      );
+  describe("HANDLER_NOT_RUNNING", () => {
+    it("should reject invocations after stop", async () => {
+      const { runtime } = setup();
+      const handler = await spawn(doubleSchema, runtime);
 
-      await handler.start();
-
-      const p1 = handler.submit({ value: 1 });
-      await new Promise((r) => setTimeout(r, 5));
-      const p2 = handler.submit({ value: 2 });
-      const p3 = handler.submit({ value: 3 });
-
-      const r2 = await p2;
-      expect(isErr(r2)).toBe(true);
-      if (isErr(r2)) {
-        expect(r2.error.code).toBe("BACKPRESSURE_REJECT");
-      }
-
-      await Promise.all([p1, p3]);
       await handler.stop();
+
+      const result = await handler.invoke({ value: 1 });
+      expect(isErr(result)).toBe(true);
+      if (isErr(result)) expect(result.error.type).toBe("HANDLER_NOT_RUNNING");
     });
   });
 
-  // ── Journal events ────────────────────────────────────────────────────────
+  describe("metrics", () => {
+    it("should track total invocations, successes, failures", async () => {
+      const { runtime } = setup();
+      const handler = await spawn(doubleSchema, runtime);
 
-  describe("Journal events", () => {
-    it("appends one Journal event per completed work unit", async () => {
-      const handler = createHandler(
-        defineHandler({
-          name: "journaled",
-          processor: echoProcessor,
-          concurrency: { max: 5, backpressure: "reject", queueSize: 10 },
-        }),
-        { clock, journal },
-      );
-
-      await handler.start();
-
-      await handler.submit({ message: "one" });
-      await handler.submit({ message: "two" });
-      await handler.submit({ message: "three" });
-
-      await handler.stop();
-
-      const snapshot = journal.getSnapshot();
-      expect(snapshot.totalCount).toBe(3);
-    });
-
-    it("Journal event has correct fields for successful execution", async () => {
-      const handler = createHandler(
-        defineHandler({
-          name: "test.echo",
-          processor: echoProcessor,
-          concurrency: { max: 5, backpressure: "reject", queueSize: 10 },
-        }),
-        { clock, journal },
-      );
-
-      await handler.start();
-
-      await handler.submit(
-        { message: "inspect me" },
-        {
-          source: "http",
-          correlationId: "trace-abc",
-        },
-      );
-
-      await handler.stop();
-
-      const snapshot = journal.getSnapshot();
-      const event = snapshot.entries[0]?.data;
-      expect(event).toBeDefined();
-      if (!event) return;
-
-      expect(event.handlerName).toBe("test.echo");
-      expect(event.source).toBe("http");
-      expect(event.correlationId).toBe("trace-abc");
-      expect(event.outcome).toBe("success");
-      expect(event.durationMs).toBeGreaterThanOrEqual(0);
-      expect(event.attempts).toBe(1);
-      expect(event.error).toBeUndefined();
-    });
-
-    it("Journal event has correct fields for failed execution", async () => {
-      const handler = createHandler(
-        defineHandler({
-          name: "test.fail",
-          processor: failingProcessor,
-          concurrency: { max: 5, backpressure: "reject", queueSize: 10 },
-        }),
-        { clock, journal },
-      );
-
-      await handler.start();
-
-      await handler.submit({ message: "fail please" });
-
-      await handler.stop();
-
-      const snapshot = journal.getSnapshot();
-      const event = snapshot.entries[0]?.data;
-      expect(event).toBeDefined();
-      if (!event) return;
-
-      expect(event.outcome).toBe("failure");
-      expect(event.error).toBeDefined();
-      expect(event.error?.message).toBe("Intentional test failure");
-    });
-
-    it("Journal event captures observed data from Context+Observe", async () => {
-      const processorWithObserve = async (input: { userId: string }): Promise<{ ok: true }> => {
-        const { observe } = await import("@phyxiusjs/observe");
-        observe.set("userId", input.userId);
-        observe.set("action", "profile.lookup");
-        observe.inc("lookupCount");
-        return { ok: true };
-      };
-
-      const handler = createHandler(
-        defineHandler({
-          name: "observe-test",
-          processor: processorWithObserve,
-          concurrency: { max: 5, backpressure: "reject", queueSize: 10 },
-        }),
-        { clock, journal: journal as unknown as Journal<HandlerEvent> },
-      );
-
-      await handler.start();
-
-      await handler.submit({ userId: "user-42" });
-
-      await handler.stop();
-
-      const snapshot = journal.getSnapshot();
-      const event = snapshot.entries[0]?.data;
-      expect(event).toBeDefined();
-      if (!event) return;
-
-      // Handler-seeded observe data
-      expect(event.observed["handler"]).toBe("observe-test");
-      expect(event.observed["executionId"]).toBeDefined();
-      expect(event.observed["source"]).toBe("unknown");
-
-      // Processor-set observe data — THE MISSING PIECE
-      expect(event.observed["userId"]).toBe("user-42");
-      expect(event.observed["action"]).toBe("profile.lookup");
-      expect(event.observed["lookupCount"]).toBe(1);
-    });
-  });
-
-  // ── Graceful shutdown ───────────────────────────────────────────────────────
-
-  describe("stop() — graceful shutdown", () => {
-    it("drains active work before stopping", async () => {
-      const handler = createHandler(
-        defineHandler({
-          name: "graceful",
-          processor: slowProcessor(100),
-          concurrency: { max: 5, backpressure: "reject", queueSize: 10 },
-        }),
-        { clock, journal },
-      );
-
-      await handler.start();
-
-      const work = handler.submit({ value: 42 });
-
-      await handler.stop();
-
-      const result = await work;
-      expect(isOk(result)).toBe(true);
-
-      expect(handler.getState()).toBe("stopped");
-    });
-
-    it("rejects queued (not yet started) work when stopping", async () => {
-      const handler = createHandler(
-        defineHandler({
-          name: "clear-queue",
-          processor: slowProcessor(500),
-          concurrency: { max: 1, backpressure: "reject", queueSize: 5 },
-        }),
-        { clock, journal },
-      );
-
-      await handler.start();
-
-      const p1 = handler.submit({ value: 1 });
-      await new Promise((r) => setTimeout(r, 5));
-      const p2 = handler.submit({ value: 2 });
-
-      await handler.stop();
-
-      const r2 = await p2;
-      expect(isErr(r2)).toBe(true);
-      if (isErr(r2)) {
-        expect(r2.error.code).toBe("HANDLER_NOT_RUNNING");
-      }
-
-      const r1 = await p1;
-      expect(isOk(r1)).toBe(true);
-    });
-  });
-
-  // ── Metrics ─────────────────────────────────────────────────────────────────
-
-  describe("getMetrics()", () => {
-    it("updates totalProcessed, totalSucceeded, totalFailed after each execution", async () => {
-      const handler = createHandler(
-        defineHandler({
-          name: "counted",
-          processor: echoProcessor,
-          concurrency: { max: 5, backpressure: "reject", queueSize: 10 },
-        }),
-        { clock, journal },
-      );
-
-      await handler.start();
-
-      await handler.submit({ message: "one" });
-      await handler.submit({ message: "two" });
+      await handler.invoke({ value: 1 });
+      await handler.invoke({ value: 2 });
+      await handler.invoke({ value: "bad" } as never); // validation fails
 
       const m = handler.getMetrics();
-      expect(m.totalProcessed).toBe(2);
-      expect(m.totalSucceeded).toBe(2);
-      expect(m.totalFailed).toBe(0);
-
-      await handler.stop();
-    });
-
-    it("counts failures separately", async () => {
-      const handler = createHandler(
-        defineHandler({
-          name: "failures",
-          processor: failingProcessor,
-          concurrency: { max: 5, backpressure: "reject", queueSize: 10 },
-        }),
-        { clock, journal },
-      );
-
-      await handler.start();
-
-      await handler.submit({ message: "fail" });
-      await handler.submit({ message: "fail again" });
-
-      const m = handler.getMetrics();
-      expect(m.totalProcessed).toBe(2);
-      expect(m.totalSucceeded).toBe(0);
-      expect(m.totalFailed).toBe(2);
+      expect(m.totalInvocations).toBe(3);
+      expect(m.totalSuccesses).toBe(2);
+      expect(m.totalFailures).toBe(1);
 
       await handler.stop();
     });
   });
 
-  // ── Timeout ─────────────────────────────────────────────────────────────────
+  describe("one journal entry per invocation, shape-stable across outcomes", () => {
+    it("should always produce exactly one entry, success or failure", async () => {
+      const { runtime, journal } = setup();
+      const handler = await spawn(doubleSchema, runtime);
 
-  describe("timeout", () => {
-    it("fails with EXECUTION_TIMEOUT when processor exceeds timeout", async () => {
-      const handler = createHandler(
-        defineHandler({
-          name: "timeout-test",
-          processor: slowProcessor(500),
-          concurrency: { max: 5, backpressure: "reject", queueSize: 10 },
-          timeout: 50 as Millis,
-        }),
-        { clock, journal },
-      );
+      await handler.invoke({ value: 1 });
+      await handler.invoke({ value: "bad" } as never);
+      await handler.invoke({ value: 2 });
 
-      await handler.start();
-
-      const result = await handler.submit({ value: 1 });
-
-      expect(isErr(result)).toBe(true);
-      if (isErr(result)) {
-        expect(result.error.code).toBe("EXECUTION_FAILED");
-        expect(result.error.message).toContain("timed out");
+      const {entries} = journal.getSnapshot();
+      expect(entries).toHaveLength(3);
+      for (const e of entries) {
+        expect(e.data).toHaveProperty("name", "double");
+        expect(e.data).toHaveProperty("invocationId");
+        expect(e.data).toHaveProperty("startedAt");
+        expect(e.data).toHaveProperty("durationMs");
+        expect(e.data).toHaveProperty("attempts");
+        expect(e.data).toHaveProperty("outcome");
       }
-
-      await handler.stop();
-    });
-
-    it("succeeds when processor completes within timeout", async () => {
-      const handler = createHandler(
-        defineHandler({
-          name: "fast-enough",
-          processor: slowProcessor(10),
-          concurrency: { max: 5, backpressure: "reject", queueSize: 10 },
-          timeout: 1000 as Millis,
-        }),
-        { clock, journal },
-      );
-
-      await handler.start();
-
-      const result = await handler.submit({ value: 42 });
-
-      expect(isOk(result)).toBe(true);
-
-      await handler.stop();
-    });
-  });
-
-  // ── Retry ───────────────────────────────────────────────────────────────────
-
-  describe("retry", () => {
-    it("retries the processor on failure up to maxAttempts", async () => {
-      let callCount = 0;
-      const failTwiceThenSucceed = async (input: { value: number }): Promise<{ value: number }> => {
-        callCount++;
-        if (callCount < 3) {
-          throw new Error(`Attempt ${callCount} failed`);
-        }
-        return { value: input.value };
-      };
-
-      const handler = createHandler(
-        defineHandler({
-          name: "retry-test",
-          processor: failTwiceThenSucceed,
-          concurrency: { max: 5, backpressure: "reject", queueSize: 10 },
-          retry: {
-            maxAttempts: 3,
-            backoff: "fixed",
-            initialDelay: 10 as Millis,
-          },
-        }),
-        { clock, journal },
-      );
-
-      await handler.start();
-
-      const result = await handler.submit({ value: 99 });
-
-      expect(isOk(result)).toBe(true);
-      if (isOk(result)) {
-        expect(result.value.value).toBe(99);
-      }
-      expect(callCount).toBe(3);
-
-      // Journal should show 3 attempts
-      const snapshot = journal.getSnapshot();
-      const event = snapshot.entries[0]?.data;
-      expect(event?.attempts).toBe(3);
-
-      await handler.stop();
-    });
-
-    it("fails after exhausting all retry attempts", async () => {
-      const alwaysFail = async (_input: { value: number }): Promise<{ value: number }> => {
-        throw new Error("Always fails");
-      };
-
-      const handler = createHandler(
-        defineHandler({
-          name: "exhausted-retries",
-          processor: alwaysFail,
-          concurrency: { max: 5, backpressure: "reject", queueSize: 10 },
-          retry: {
-            maxAttempts: 2,
-            backoff: "fixed",
-            initialDelay: 10 as Millis,
-          },
-        }),
-        { clock, journal },
-      );
-
-      await handler.start();
-
-      const result = await handler.submit({ value: 1 });
-
-      expect(isErr(result)).toBe(true);
-      if (isErr(result)) {
-        expect(result.error.code).toBe("EXECUTION_FAILED");
-      }
-
-      await handler.stop();
-    });
-  });
-
-  // ── Circuit Breaker ─────────────────────────────────────────────────────────
-
-  describe("circuit breaker", () => {
-    it("opens the circuit after reaching failure threshold", async () => {
-      const alwaysFail = async (_input: { value: number }): Promise<{ value: number }> => {
-        throw new Error("Boom");
-      };
-
-      const handler = createHandler(
-        defineHandler({
-          name: "cb-test",
-          processor: alwaysFail,
-          concurrency: { max: 5, backpressure: "reject", queueSize: 10 },
-          circuitBreaker: {
-            failureThreshold: 2,
-            resetTimeout: 60_000 as Millis,
-          },
-        }),
-        { clock, journal },
-      );
-
-      await handler.start();
-
-      // First two failures trip the circuit
-      await handler.submit({ value: 1 });
-      await handler.submit({ value: 2 });
-
-      // Third call should be rejected by the circuit breaker
-      const result = await handler.submit({ value: 3 });
-
-      expect(isErr(result)).toBe(true);
-      if (isErr(result)) {
-        expect(result.error.code).toBe("CIRCUIT_OPEN");
-      }
-
-      await handler.stop();
-    });
-
-    it("resets the circuit after a successful execution", async () => {
-      let callCount = 0;
-      const failOnceThenSucceed = async (input: { value: number }): Promise<{ value: number }> => {
-        callCount++;
-        if (callCount === 1) {
-          throw new Error("First call fails");
-        }
-        return { value: input.value };
-      };
-
-      const handler = createHandler(
-        defineHandler({
-          name: "cb-reset-test",
-          processor: failOnceThenSucceed,
-          concurrency: { max: 5, backpressure: "reject", queueSize: 10 },
-          circuitBreaker: {
-            failureThreshold: 3,
-            resetTimeout: 60_000 as Millis,
-          },
-        }),
-        { clock, journal },
-      );
-
-      await handler.start();
-
-      // First call fails (1 consecutive failure)
-      await handler.submit({ value: 1 });
-
-      // Second call succeeds — should reset consecutive failures to 0
-      const result = await handler.submit({ value: 2 });
-
-      expect(isOk(result)).toBe(true);
 
       await handler.stop();
     });

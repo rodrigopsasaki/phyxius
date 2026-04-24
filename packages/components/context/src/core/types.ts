@@ -27,6 +27,17 @@ export interface ContextScopeOptions<T = Record<string, unknown>> {
   /** Initial data for the new context */
   initial?: T;
 
-  /** Whether to inherit data from parent context (default: true) */
+  /**
+   * Whether to inherit data from parent context (default: true).
+   *
+   * Inheritance is a shallow copy — nested references (arrays, Maps, class
+   * instances) in the parent's data are shared with the child. This is
+   * intentional: it's the mechanism by which `@phyxiusjs/observe` accumulates
+   * state across nested scopes into a single picture. A child scope pushing
+   * to an inherited array is visible in the parent by design.
+   *
+   * Pass `inherit: false` if you want genuine scope isolation — the child's
+   * `data` is a fresh object with no parent visibility.
+   */
   inherit?: boolean;
 }

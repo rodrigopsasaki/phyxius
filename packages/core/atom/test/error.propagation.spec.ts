@@ -1,5 +1,5 @@
-import { describe, it, expect } from "vitest";
-import { createAtom } from "../src/index.js";
+import { describe, it, expect, vi } from "vitest";
+import { createAtom, type AtomEvent } from "../src/index.js";
 import { createControlledClock } from "@phyxiusjs/clock";
 
 describe("Atom Error Propagation", () => {
@@ -187,6 +187,46 @@ describe("Atom Error Propagation", () => {
       originalHandler.forEach((handler) => {
         process.on("unhandledRejection", handler);
       });
+    }
+  });
+
+  it("should route subscriber errors through emit when provided", () => {
+    const clock = createControlledClock({ initialTime: 0 });
+    const events: AtomEvent[] = [];
+    const atom = createAtom("start", clock, {
+      emit: (event) => events.push(event),
+    });
+
+    atom.watch(() => {
+      throw new Error("boom");
+    });
+
+    atom.reset("next");
+
+    expect(events).toHaveLength(1);
+    const event = events[0];
+    expect(event).toBeDefined();
+    if (!event) return;
+    expect(event.type).toBe("atom:subscriber:error");
+    expect((event.error as Error).message).toBe("boom");
+    expect(event.versionFrom).toBe(0);
+    expect(event.versionTo).toBe(1);
+  });
+
+  it("should not write to stderr when no emit is provided", () => {
+    const clock = createControlledClock({ initialTime: 0 });
+    const atom = createAtom("start", clock);
+    const consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    atom.watch(() => {
+      throw new Error("silent failure");
+    });
+
+    try {
+      atom.reset("next");
+      expect(consoleErrorSpy).not.toHaveBeenCalled();
+    } finally {
+      consoleErrorSpy.mockRestore();
     }
   });
 

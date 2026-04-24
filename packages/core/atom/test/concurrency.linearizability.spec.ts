@@ -2,10 +2,15 @@ import { describe, it, expect } from "vitest";
 import { createAtom } from "../src/index.js";
 import { createControlledClock } from "@phyxiusjs/clock";
 
+function defined<T>(value: T | undefined): T {
+  if (value === undefined) throw new Error("Expected value to be defined");
+  return value;
+}
+
 describe("Atom Concurrency Linearizability", () => {
   it("should handle interleaved async swap operations correctly", async () => {
     const clock = createControlledClock({ initialTime: 0 });
-    const atom = createAtom(0, clock, { baseVersion: 0 });
+    const atom = createAtom(0, clock);
     const capturedVersions: number[] = [];
 
     // Track all version changes
@@ -25,7 +30,7 @@ describe("Atom Concurrency Linearizability", () => {
 
     // Verify final state
     expect(atom.deref()).toBe(100);
-    expect(atom.version()).toBe(100); // baseVersion (0) + 100
+    expect(atom.version()).toBe(100);
 
     // Verify all versions are captured and strictly increasing
     expect(capturedVersions).toHaveLength(100);
@@ -35,7 +40,7 @@ describe("Atom Concurrency Linearizability", () => {
 
     // Verify versions are strictly increasing
     for (let i = 1; i < capturedVersions.length; i++) {
-      expect(capturedVersions[i]).toBe(capturedVersions[i - 1]! + 1);
+      expect(capturedVersions[i]).toBe(defined(capturedVersions[i - 1]) + 1);
     }
   });
 
@@ -137,7 +142,7 @@ describe("Atom Concurrency Linearizability", () => {
 
     // Verify each change added exactly one item
     for (let i = 0; i < allChanges.length; i++) {
-      const change = allChanges[i]!;
+      const change = defined(allChanges[i]);
       expect(change.to.length).toBe(change.from.length + 1);
       expect(change.version).toBe(i + 1);
     }

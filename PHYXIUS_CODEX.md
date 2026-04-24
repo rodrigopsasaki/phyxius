@@ -161,39 +161,6 @@ const history = events.getSnapshot();
 
 **Production Impact**: Complete event history. No more lost context. Time travel debugging.
 
-### Effect: Async That Cannot Leak
-
-**The Problem**: JavaScript promises are fire-and-forget missiles. No reliable cancellation, no guaranteed cleanup, no structured concurrency. Resources leak, operations hang, timeouts don't work.
-
-**The Solution**: Structured concurrency with automatic cleanup, explicit cancellation, and resource safety.
-
-```typescript
-const fetchUser = effect(async (env) => {
-  const response = await fetch("/api/user");
-  return { _tag: "Ok", value: await response.json() };
-});
-
-// Automatic timeout and cleanup
-const result = await fetchUser.timeout(5000).unsafeRunPromise({ clock });
-
-// Resource-safe operations
-const withDatabase = acquireUseRelease(
-  connect, // acquire
-  query, // use
-  disconnect, // release (guaranteed to run)
-);
-```
-
-**Key Insights**:
-
-- Structured concurrency where children are cleaned up when parents complete
-- Explicit error types with `Result<E, A>` instead of exceptions
-- Automatic resource management with finalizers
-- Cancellation that propagates through operation trees
-- Retry with exponential backoff and jitter
-
-**Production Impact**: No resource leaks. Operations that clean up properly. Cancellation that actually works.
-
 ### Process: Units That Self-Heal
 
 **The Problem**: Object-oriented concurrency creates shared mutable state, cascading failures, and systems that are impossible to reason about under load.
@@ -373,8 +340,8 @@ We want a **lego castle, not a wool one**:
 **This means**:
 
 - Clock doesn't know about Process
-- Atom doesn't know about Effect
-- Journal doesn't know about Vision
+- Atom doesn't know about Journal
+- Journal doesn't know about Drain
 - But they all compose naturally
 
 ### 3. Built For Ourselves
@@ -416,16 +383,14 @@ This is **bold work**. We're walking in a different direction:
 
 ### The Primitive Layer (Core)
 
-Five primitives that address fundamental issues:
+Four primitives that address fundamental issues:
 
 ```
 Clock ────── Explicit, controllable time
 │
-├── Atom ── State that cannot race
+├── Atom ── Versioned observable state
 │
-├── Journal ── Events that never disappear
-│
-├── Effect ── Async that cannot leak
+├── Journal ── Typed, bounded, sequence-ordered event log
 │
 └── Process ── Units that self-heal
 ```
@@ -439,7 +404,7 @@ Each primitive is:
 
 ### The Component Layer
 
-Four components that provide higher-level abstractions:
+Higher-level abstractions composed from the core primitives:
 
 **Context** (`@phyxiusjs/context`)
 
@@ -447,23 +412,27 @@ Four components that provide higher-level abstractions:
 - Thread-local data with type safety
 - Zero external dependencies
 
-**Handler** (`@phyxiusjs/handler`)
-
-- Universal work processor
-- Transport-agnostic reliability
-- Uses all 5 core primitives
-
 **Observe** (`@phyxiusjs/observe`)
 
 - Context manipulation utilities
 - Simple API for adding observability data
 - No domain knowledge, pure utilities
 
-**Validate** (`@phyxiusjs/validate`)
+**Handle** (`@phyxiusjs/handle`)
 
-- Validation abstraction layer
-- Works with Zod, Yup, Joi, or custom validators
-- Solves the "double dependency" problem
+- Request/operation bracket primitive
+- Opens a Context scope, accumulates observed fields, appends one Journal entry
+- Foundation for higher-level work-unit abstractions
+
+**Drain** (`@phyxiusjs/drain`)
+
+- Journal subscriber with batching
+- Ships entries to a configurable sink on size or interval
+- Sink errors are caught and emitted, never thrown
+
+> The framework-level work-unit component (reliability, backpressure, supervision)
+> is being re-imagined. See `.mycelium/invariants.md` and `.mycelium/intents.md`
+> for the authored design constraints.
 
 ### The Vision System
 
@@ -488,35 +457,17 @@ Components demonstrate key principles:
 
 ### The Complete System
 
-When all pieces work together:
+When the primitives compose, you get:
 
-```typescript
-// Handler orchestrates everything
-const handler = createHandler({
-  processor: async (request, ctx) => {
-    // Context flows automatically
-    observe.set("operation", "user.create");
-
-    // Type-safe validation
-    const userData = validateUser(request.body);
-
-    // Reliable business logic with full observability
-    return await processUser(userData);
-  },
-  config: PRODUCTION_CONFIG, // Circuit breaker, backpressure
-  clock: createSystemClock(), // Deterministic time
-  emit: logger.info, // Complete observability
-});
-```
-
-You get:
-
-- **Automatic observability** - one event tells the complete story
-- **Resource safety** - Effect manages cleanup
-- **State consistency** - Atom prevents races
-- **Event history** - Journal captures everything
+- **Automatic observability** - one event tells the complete story (Context + Observe + Journal)
+- **Resource safety** - standard Node mechanisms (AbortSignal, try/finally, using) paired with Clock.Budget for deadlines
+- **State consistency** - Atom collapses non-deterministic async ordering back into deterministic sync commits
+- **Event history** - Journal captures everything, bounded and ordered
 - **Self-healing** - Process supervision handles failures
 - **Time control** - Clock makes behavior deterministic
+
+The framework-level work-unit abstraction that binds these together is being
+re-imagined as a clean slate on top of this substrate.
 
 ---
 

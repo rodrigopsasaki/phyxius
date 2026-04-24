@@ -1,12 +1,37 @@
 import type { Instant } from "@phyxiusjs/clock";
 
+/**
+ * Out-of-band events that the Atom emits.
+ *
+ * Committed changes are delivered via `watch`, not `emit` — `watch` is the
+ * structured observability channel for state transitions. `emit` is reserved
+ * for things that watchers can't see (notably: subscriber errors).
+ */
+export type AtomEvent = {
+  type: "atom:subscriber:error";
+  error: unknown;
+  versionFrom: number;
+  versionTo: number;
+  at: Instant;
+};
+
+export type EmitFn = (event: AtomEvent) => void;
+
 export interface AtomOptions<T> {
   /** Equality check to avoid no-op writes and power CAS. Defaults to Object.is */
   equals?: (a: T, b: T) => boolean;
-  /** Start version (default 0) */
-  baseVersion?: number;
-  /** Keep an in-memory ring buffer of the last N snapshots (default 1) */
+  /**
+   * Keep an in-memory ring buffer of the last N snapshots.
+   *
+   * Defaults to 0 — `history()` returns `[]` unless you opt in.
+   * For a full durable audit trail, bridge `watch` into `@phyxiusjs/journal`.
+   */
   historySize?: number;
+  /**
+   * Optional sink for out-of-band events. If omitted, subscriber errors are
+   * silently swallowed — the library does NOT write to stderr.
+   */
+  emit?: EmitFn;
 }
 
 export interface Change<T> {

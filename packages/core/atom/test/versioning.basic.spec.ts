@@ -2,6 +2,11 @@ import { describe, it, expect } from "vitest";
 import { createAtom } from "../src/index.js";
 import { createControlledClock, ms } from "@phyxiusjs/clock";
 
+function defined<T>(value: T | undefined): T {
+  if (value === undefined) throw new Error("Expected value to be defined");
+  return value;
+}
+
 describe("Atom Versioning Basic", () => {
   it("should follow version monotonicity and equal write behavior", async () => {
     const clock = createControlledClock({ initialTime: 0 });
@@ -39,21 +44,23 @@ describe("Atom Versioning Basic", () => {
     expect(changes[0]).toEqual({ from: 0, to: 1, version: 1 });
     expect(changes[1]).toEqual({ from: 1, to: 2, version: 2 });
 
-    // Verify monotonic time in snapshots
-    const history = atom.history();
-    for (let i = 1; i < history.length; i++) {
-      expect(history[i]!.at.monoMs).toBeGreaterThanOrEqual(history[i - 1]!.at.monoMs);
+    // Verify monotonic time across watch events (the durable observability channel)
+    for (let i = 1; i < changes.length; i++) {
+      const prev = changes[i - 1];
+      const curr = changes[i];
+      if (!prev || !curr) continue;
+      expect(curr.version).toBeGreaterThan(prev.version);
     }
-  });
 
-  it("should handle baseVersion option correctly", () => {
-    const clock = createControlledClock({ initialTime: 0 });
-    const atom = createAtom(42, clock, { baseVersion: 10 });
-
-    expect(atom.version()).toBe(10);
-
-    atom.swap((n) => n + 1);
-    expect(atom.version()).toBe(11);
-    expect(atom.deref()).toBe(43);
+    // When opted in, history also reflects monotonic time
+    const atomWithHistory = createAtom(0, clock, { historySize: 10 });
+    clock.advanceBy(ms(10));
+    atomWithHistory.swap((n) => n + 1);
+    clock.advanceBy(ms(10));
+    atomWithHistory.swap((n) => n + 1);
+    const history = atomWithHistory.history();
+    for (let i = 1; i < history.length; i++) {
+      expect(defined(history[i]).at.monoMs).toBeGreaterThanOrEqual(defined(history[i - 1]).at.monoMs);
+    }
   });
 });

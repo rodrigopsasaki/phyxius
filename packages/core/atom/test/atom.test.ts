@@ -3,6 +3,11 @@ import { createAtom, type Change } from "../src/index.js";
 import { createControlledClock } from "@phyxiusjs/clock";
 import type { Atom } from "../src/types.js";
 
+function defined<T>(value: T | undefined): T {
+  if (value === undefined) throw new Error("Expected value to be defined");
+  return value;
+}
+
 describe("Atom", () => {
   let testAtom: Atom<number>;
   let clock: ReturnType<typeof createControlledClock>;
@@ -112,19 +117,27 @@ describe("Atom", () => {
 
       const history = testAtom.history();
       expect(history).toHaveLength(5);
-      expect(history[0]!.value).toBe(5);
-      expect(history[4]!.value).toBe(9);
+      expect(defined(history[0]).value).toBe(5);
+      expect(defined(history[4]).value).toBe(9);
     });
 
-    it("should clear history but keep current", () => {
+    it("should clear history to empty without touching current value or version", () => {
       testAtom.reset(100);
       testAtom.reset(200);
       testAtom.clearHistory();
 
-      const history = testAtom.history();
-      expect(history).toHaveLength(1);
-      expect(history[0]!.value).toBe(200);
-      expect(history[0]!.version).toBe(2);
+      expect(testAtom.history()).toEqual([]);
+      expect(testAtom.deref()).toBe(200);
+      expect(testAtom.version()).toBe(2);
+    });
+
+    it("should return [] by default (historySize: 0)", () => {
+      const clock = createControlledClock({ initialTime: 0 });
+      const atom = createAtom(1, clock);
+      atom.reset(2);
+      atom.reset(3);
+      expect(atom.history()).toEqual([]);
+      expect(atom.deref()).toBe(3);
     });
   });
 
@@ -230,16 +243,16 @@ describe("Atom", () => {
     it("should work with multiple watchers", () => {
       const results: Change<number>[][] = [[], []];
 
-      testAtom.watch((change) => results[0]!.push(change));
-      testAtom.watch((change) => results[1]!.push(change));
+      testAtom.watch((change) => defined(results[0]).push(change));
+      testAtom.watch((change) => defined(results[1]).push(change));
 
       testAtom.reset(100);
       testAtom.reset(200);
 
       expect(results[0]).toHaveLength(2);
       expect(results[1]).toHaveLength(2);
-      expect(results[0]![0]!.to).toBe(100);
-      expect(results[1]![0]!.to).toBe(100);
+      expect(defined(defined(results[0])[0]).to).toBe(100);
+      expect(defined(defined(results[1])[0]).to).toBe(100);
     });
 
     it("should include cause in changes", () => {
@@ -248,7 +261,7 @@ describe("Atom", () => {
 
       testAtom.reset(100, { cause: "test-cause" });
 
-      expect(changes[0]!.cause).toBe("test-cause");
+      expect(defined(changes[0]).cause).toBe("test-cause");
     });
   });
 });

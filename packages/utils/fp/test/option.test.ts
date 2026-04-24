@@ -27,7 +27,6 @@ import {
   all,
   compact,
   any,
-  partition,
   zip,
   zipWith,
   flatten,
@@ -336,13 +335,6 @@ describe("Option", () => {
       const options = [none(), none(), none()];
       const option = any(options);
       expect(isNone(option)).toBe(true);
-    });
-
-    it("partition should separate Somes and Nones", () => {
-      const options = [some(1), none(), some(2), none()];
-      const [somes, nones] = partition(options);
-      expect(somes).toEqual([1, 2]);
-      expect(nones).toHaveLength(2);
     });
   });
 

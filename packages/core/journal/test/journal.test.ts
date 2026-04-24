@@ -171,27 +171,31 @@ describe("Journal", () => {
     });
   });
 
-  describe("backpressure policies", () => {
-    it("should allow unlimited entries with 'none' policy", () => {
-      const journal = new Journal({
-        clock,
-        idGenerator,
-        overflow: "none",
-      });
+  describe("overflow policies", () => {
+    it("should reject maxEntries <= 0", () => {
+      expect(() => new Journal({ clock, idGenerator, maxEntries: 0 })).toThrow();
+      expect(() => new Journal({ clock, idGenerator, maxEntries: -1 })).toThrow();
+    });
 
-      for (let i = 0; i < 1000; i++) {
+    it("should default to drop_oldest with a 10k cap", () => {
+      const journal = new Journal({ clock, idGenerator });
+
+      for (let i = 0; i < 10_001; i++) {
         journal.append(i);
       }
 
-      expect(journal.size()).toBe(1000);
+      // Capped at 10k; the oldest was dropped to make room.
+      expect(journal.size()).toBe(10_000);
+      expect(journal.getFirst()?.data).toBe(1);
+      expect(journal.getLast()?.data).toBe(10_000);
     });
 
-    it("should throw error with 'bounded:error' policy", () => {
+    it("should throw error with 'error' policy", () => {
       const journal = new Journal({
         clock,
         idGenerator,
         maxEntries: 2,
-        overflow: "bounded:error",
+        overflow: "error",
         emit: (event) => events.push(event),
       });
 
@@ -204,16 +208,16 @@ describe("Journal", () => {
 
       const overflowEvent = events.find((e) => e.type === "journal:overflow");
       expect(overflowEvent).toBeDefined();
-      expect(overflowEvent?.policy).toBe("bounded:error");
+      expect(overflowEvent?.policy).toBe("error");
       expect(overflowEvent?.maxEntries).toBe(2);
     });
 
-    it("should drop oldest with 'bounded:drop_oldest' policy", () => {
+    it("should drop oldest with 'drop_oldest' policy", () => {
       const journal = new Journal({
         clock,
         idGenerator,
         maxEntries: 3,
-        overflow: "bounded:drop_oldest",
+        overflow: "drop_oldest",
         emit: (event) => events.push(event),
       });
 
@@ -233,13 +237,13 @@ describe("Journal", () => {
 
       const overflowEvent = events.find((e) => e.type === "journal:overflow");
       expect(overflowEvent).toBeDefined();
-      expect(overflowEvent?.policy).toBe("bounded:drop_oldest");
+      expect(overflowEvent?.policy).toBe("drop_oldest");
       expect(overflowEvent?.droppedCount).toBe(1);
     });
   });
 
   describe("snapshots", () => {
-    it("should create immutable snapshots", () => {
+    it("should create point-in-time snapshots with frozen entry envelopes", () => {
       const journal = new Journal({ clock, idGenerator });
 
       journal.append("first");
@@ -255,14 +259,26 @@ describe("Journal", () => {
       expect(snapshot.timestamp.wallMs).toBe(200);
       expect(snapshot.entries).toHaveLength(2);
 
-      // Test immutability
+      // Snapshot envelope and its array are frozen at the top level.
+      expect(Object.isFrozen(snapshot)).toBe(true);
       expect(Object.isFrozen(snapshot.entries)).toBe(true);
+      // Each entry's envelope (id/sequence/timestamp/data binding) is frozen
+      // — but user-owned `data` is NOT defensively cloned or deep-frozen.
       expect(Object.isFrozen(snapshot.entries[0])).toBe(true);
-      expect(Object.isFrozen(snapshot.entries[0].data)).toBe(true);
 
-      // Snapshot should not change when journal changes
+      // Later appends don't mutate the snapshot.
       journal.append("third");
       expect(snapshot.entries).toHaveLength(2);
+    });
+
+    it("should not deep-freeze user-owned data in snapshots", () => {
+      const journal = new Journal<{ tags: string[] }>({ clock, idGenerator });
+      journal.append({ tags: ["a", "b"] });
+
+      const snapshot = journal.getSnapshot();
+      // Data is handed back as the caller provided it. If they want defensive
+      // copies, they should supply a Serializer.
+      expect(Object.isFrozen(snapshot.entries[0].data)).toBe(false);
     });
   });
 
@@ -288,6 +304,22 @@ describe("Journal", () => {
       expect(restored.size()).toBe(2);
       expect(restored.getEntry(0)?.data).toEqual({ message: "first" });
       expect(restored.getEntry(1)?.data).toEqual({ message: "second" });
+    });
+
+    it("should preserve createdAt across a roundtrip", () => {
+      const originalClock = createControlledClock({ initialTime: 1000 });
+      const journal = new Journal({ clock: originalClock, idGenerator });
+      journal.append("x");
+
+      const serialized = journal.toJSON();
+      expect(serialized.createdAt?.wallMs).toBe(1000);
+
+      // Reconstruct with a clock that's at a completely different time —
+      // createdAt should come from the serialized form, not from the new clock.
+      const newClock = createControlledClock({ initialTime: 99_999 });
+      const restored = Journal.fromJSON(serialized, { clock: newClock, idGenerator });
+
+      expect(restored.toJSON().createdAt?.wallMs).toBe(1000);
     });
 
     it("should use custom serializer", () => {
@@ -323,7 +355,7 @@ describe("Journal", () => {
         clock,
         idGenerator,
         maxEntries: 2,
-        overflow: "bounded:drop_oldest",
+        overflow: "drop_oldest",
         emit: (event) => events.push(event),
       });
 
@@ -363,7 +395,7 @@ describe("Journal", () => {
         clock,
         idGenerator,
         maxEntries: 3,
-        overflow: "bounded:drop_oldest",
+        overflow: "drop_oldest",
       });
 
       // Fill journal

@@ -1,13 +1,28 @@
 import { ok, err, type Result } from "@phyxiusjs/fp";
+import type { Clock, Millis } from "@phyxiusjs/clock";
+import { debounce as temporalDebounce } from "@phyxiusjs/temporal";
 import type { ConfigSource, ConfigError, ConfigLoader } from "./types.js";
 import { parseEnv } from "./parsers/env.js";
 import { loadFile } from "./parsers/file.js";
-import { watchFile, unwatchFile, type Stats } from "fs";
+import { watch as fsWatch, watchFile, unwatchFile, type Stats } from "fs";
+
+const DEFAULT_WATCH_POLL_INTERVAL_MS = 100;
+const DEFAULT_WATCH_DEBOUNCE_MS = 20;
 
 /**
- * Create a config loader for all source types
+ * Create a config loader for all source types.
+ *
+ * @param options.clock - Injected Clock used to pace the file-watch debounce.
+ *   The loader's own timing never touches `Date.now()` or `setTimeout`; tests
+ *   with a controlled clock are deterministic.
+ * @param options.watchPollIntervalMs - Fallback `fs.watchFile` poll interval
+ *   (ms). Only used if the OS-native `fs.watch` (kqueue/inotify) fails. The
+ *   native watcher is event-driven and doesn't depend on timer latency.
  */
-export function createLoader(): ConfigLoader {
+export function createLoader(options?: { clock?: Clock; watchPollIntervalMs?: number }): ConfigLoader {
+  const clock = options?.clock;
+  const watchPollIntervalMs = options?.watchPollIntervalMs ?? DEFAULT_WATCH_POLL_INTERVAL_MS;
+
   return {
     load(source: ConfigSource): Result<unknown, ConfigError> {
       switch (source.type) {
@@ -46,44 +61,80 @@ export function createLoader(): ConfigLoader {
         return () => {};
       }
 
-      let debounceTimer: ReturnType<typeof setTimeout> | undefined;
+      // Debounce is Clock-controlled when a clock is injected. With an
+      // injected ControlledClock, tests that use this loader are deterministic
+      // on the debounce axis (the OS notification axis is still real-time —
+      // that's inherent to filesystem watching).
+      const debounced = clock
+        ? temporalDebounce(
+            () => {
+              const fileOpts: Parameters<typeof loadFile>[1] = {};
+              if (source.format !== undefined) fileOpts.format = source.format;
+              const result = loadFile(source.path, fileOpts);
+              if (result._tag === "Ok") {
+                callback(result.value);
+              }
+            },
+            DEFAULT_WATCH_DEBOUNCE_MS as Millis,
+            clock,
+          )
+        : (() => {
+            // Fallback: no clock injected, debounce against setTimeout.
+            let timer: ReturnType<typeof setTimeout> | undefined;
+            return () => {
+              if (timer) clearTimeout(timer);
+              timer = setTimeout(() => {
+                const fileOpts: Parameters<typeof loadFile>[1] = {};
+                if (source.format !== undefined) fileOpts.format = source.format;
+                const result = loadFile(source.path, fileOpts);
+                if (result._tag === "Ok") {
+                  callback(result.value);
+                }
+              }, DEFAULT_WATCH_DEBOUNCE_MS);
+            };
+          })();
 
-      const handleChange = () => {
-        // Debounce rapid changes
-        if (debounceTimer) {
-          clearTimeout(debounceTimer);
-        }
-
-        debounceTimer = setTimeout(() => {
-          const watchFileOpts: Parameters<typeof loadFile>[1] = {};
-          if (source.format !== undefined) watchFileOpts.format = source.format;
-          const result = loadFile(source.path, watchFileOpts);
-
-          if (result._tag === "Ok") {
-            callback(result.value);
+      // Primary: event-driven `fs.watch` (kqueue on macOS, inotify on Linux,
+      // ReadDirectoryChangesW on Windows). No timer latency — changes are
+      // pushed as the OS sees them.
+      //
+      // Fallback: if `fs.watch` throws (unusual filesystems, permission
+      // issues), drop to `fs.watchFile` stat-polling. Slower, but universal.
+      try {
+        const watcher = fsWatch(source.path, { persistent: false }, (eventType) => {
+          if (eventType === "change" || eventType === "rename") {
+            debounced();
           }
-        }, 20);
-      };
+        });
+        watcher.on("error", () => {
+          // Silent — the watcher is best-effort; the caller can always
+          // explicitly `reload()` if it suspects drift.
+        });
+        return () => {
+          try {
+            watcher.close();
+          } catch {
+            // close() can throw if already closed; ignore.
+          }
+        };
+      } catch {
+        // Fall through to stat-polling fallback below.
+      }
 
-      // Use polling via watchFile for reliable cross-platform file change detection
       const handleStatChange = (curr: Stats, prev: Stats) => {
         if (curr.mtimeMs !== prev.mtimeMs) {
-          handleChange();
+          debounced();
         }
       };
 
       try {
-        watchFile(source.path, { interval: 5, persistent: false }, handleStatChange);
-      } catch (error) {
-        // Failed to watch, silently ignore
-        console.warn(`Failed to watch config file: ${source.path}`, error);
+        watchFile(source.path, { interval: watchPollIntervalMs, persistent: false }, handleStatChange);
+      } catch {
+        // Both watchers failed. Caller can still explicitly reload().
+        return () => {};
       }
 
-      // Return cleanup function
       return () => {
-        if (debounceTimer) {
-          clearTimeout(debounceTimer);
-        }
         unwatchFile(source.path, handleStatChange);
       };
     },
@@ -91,27 +142,20 @@ export function createLoader(): ConfigLoader {
 }
 
 /**
- * Merge multiple configuration objects with precedence
- * Earlier sources have higher precedence
+ * Merge multiple configuration objects with precedence.
+ *
+ * Earlier configs in the array have HIGHER precedence (first wins). The
+ * sources list in `ConfigOptions.sources` is likewise ordered high-to-low:
+ * `[env, file, defaults]` means env wins over file wins over defaults.
+ *
+ * Implementation: iterate from lowest priority (last) to highest priority
+ * (first). Each `deepMerge` lets the second argument override the first, so
+ * applying high-priority sources last means they override the layers below.
  */
-export function mergeConfigs(
-  configs: unknown[],
-  schemas: Array<{ hasDefaults: boolean; getDefaults: () => unknown }> = [],
-): Result<unknown, ConfigError> {
-  // Start with schema defaults if available
+export function mergeConfigs(configs: unknown[]): Result<unknown, ConfigError> {
   let result: Record<string, unknown> = {};
 
-  for (const schema of schemas) {
-    if (schema.hasDefaults) {
-      const defaults = schema.getDefaults();
-      if (typeof defaults === "object" && defaults !== null) {
-        result = deepMerge(result, defaults as Record<string, unknown>);
-      }
-    }
-  }
-
-  // Apply configs in order — later sources override earlier ones
-  for (let i = 0; i < configs.length; i++) {
+  for (let i = configs.length - 1; i >= 0; i--) {
     const config = configs[i];
     if (typeof config === "object" && config !== null) {
       result = deepMerge(result, config as Record<string, unknown>);

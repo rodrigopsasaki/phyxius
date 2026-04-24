@@ -2,6 +2,11 @@ import { describe, it, expect } from "vitest";
 import { createAtom } from "../src/index.js";
 import { createControlledClock, ms } from "@phyxiusjs/clock";
 
+function defined<T>(value: T | undefined): T {
+  if (value === undefined) throw new Error("Expected value to be defined");
+  return value;
+}
+
 describe("Atom History Ring Buffer", () => {
   it("should maintain ring buffer with specified size", () => {
     const clock = createControlledClock({ initialTime: 0 });
@@ -27,23 +32,23 @@ describe("Atom History Ring Buffer", () => {
     expect(atom.history()).toHaveLength(2);
   });
 
-  it("should handle historySize of 1 (default)", () => {
+  it("should return an empty history when historySize is not opted into (default 0)", () => {
     const clock = createControlledClock({ initialTime: 0 });
-    const atom = createAtom(10, clock); // Default historySize is 1
+    const atom = createAtom(10, clock);
 
-    expect(atom.history()).toHaveLength(1);
-    expect(atom.history()[0]!.value).toBe(10);
+    expect(atom.history()).toEqual([]);
 
     atom.reset(20);
-    expect(atom.history()).toHaveLength(1);
-    expect(atom.history()[0]!.value).toBe(20);
+    expect(atom.history()).toEqual([]);
 
     atom.reset(30);
-    expect(atom.history()).toHaveLength(1);
-    expect(atom.history()[0]!.value).toBe(30);
+    expect(atom.history()).toEqual([]);
+
+    // Current value is still accessible via deref()
+    expect(atom.deref()).toBe(30);
   });
 
-  it("should clear history but preserve current value", () => {
+  it("should clear history to empty", () => {
     const clock = createControlledClock({ initialTime: 0 });
     const atom = createAtom("initial", clock, { historySize: 3 });
 
@@ -58,24 +63,24 @@ describe("Atom History Ring Buffer", () => {
     expect(atom.history()).toHaveLength(3);
     expect(atom.history().map((s) => s.value)).toEqual(["first", "second", "third"]);
 
-    // Clear history
+    // Clear history — actually clears
     atom.clearHistory();
+    expect(atom.history()).toEqual([]);
 
-    // History should contain only current snapshot, but current value unchanged
-    expect(atom.history()).toHaveLength(1);
+    // Current value and version are untouched
     expect(atom.deref()).toBe("third");
-    expect(atom.version()).toBe(3); // Version unchanged
+    expect(atom.version()).toBe(3);
 
-    // New changes should start building history again
+    // New changes populate history afresh
     clock.advanceBy(ms(50));
     atom.reset("after-clear");
-    expect(atom.history()).toHaveLength(2);
-    expect(atom.history()[1]!.value).toBe("after-clear");
+    expect(atom.history()).toHaveLength(1);
+    expect(defined(atom.history()[0]).value).toBe("after-clear");
   });
 
   it("should preserve version and timestamp info in history", () => {
     const clock = createControlledClock({ initialTime: 1000 });
-    const atom = createAtom(0, clock, { historySize: 3, baseVersion: 5 });
+    const atom = createAtom(0, clock, { historySize: 3 });
 
     clock.advanceBy(ms(100));
     atom.swap((n) => n + 1);
@@ -87,14 +92,14 @@ describe("Atom History Ring Buffer", () => {
     expect(history).toHaveLength(3);
 
     // Check first snapshot (after first change)
-    expect(history[1]!.value).toBe(1);
-    expect(history[1]!.version).toBe(6); // baseVersion + 1
-    expect(history[1]!.at.monoMs).toBe(1100);
+    expect(defined(history[1]).value).toBe(1);
+    expect(defined(history[1]).version).toBe(1);
+    expect(defined(history[1]).at.monoMs).toBe(1100);
 
     // Check second snapshot (after second change)
-    expect(history[2]!.value).toBe(2);
-    expect(history[2]!.version).toBe(7); // baseVersion + 2
-    expect(history[2]!.at.monoMs).toBe(1300);
+    expect(defined(history[2]).value).toBe(2);
+    expect(defined(history[2]).version).toBe(2);
+    expect(defined(history[2]).at.monoMs).toBe(1300);
   });
 
   it("should not add to history on equal writes", () => {
@@ -106,7 +111,7 @@ describe("Atom History Ring Buffer", () => {
     // Equal write should not add to history
     atom.reset("value");
     expect(atom.history()).toHaveLength(1);
-    expect(atom.history()[0]!.value).toBe("value");
+    expect(defined(atom.history()[0]).value).toBe("value");
 
     // Different write should add to history
     atom.reset("new-value");

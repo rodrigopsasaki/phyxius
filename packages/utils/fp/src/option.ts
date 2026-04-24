@@ -181,20 +181,6 @@ export function any<T>(options: Option<T>[]): Option<T> {
   return none();
 }
 
-/** Partition array of Options into [somes, nones] */
-export function partition<T>(options: Option<T>[]): [T[], None[]] {
-  const somes: T[] = [];
-  const nones: None[] = [];
-  for (const option of options) {
-    if (isSome(option)) {
-      somes.push(option.value);
-    } else {
-      nones.push(option);
-    }
-  }
-  return [somes, nones];
-}
-
 /** Zip two Options into an Option of tuple */
 export function zip<T, U>(first: Option<T>, second: Option<U>): Option<[T, U]> {
   return isSome(first) && isSome(second) ? some([first.value, second.value]) : none();

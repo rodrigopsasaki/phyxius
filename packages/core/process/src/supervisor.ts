@@ -1,16 +1,7 @@
-import type {
-  SupervisionStrategy,
-  ProcessId,
-  EmitFn,
-  ProcessBehavior,
-  ProcessRef,
-  ProcessSpec,
-  Tools,
-  ProcessEvent,
-  StopReason,
-} from "./types.js";
+import type { SupervisionStrategy, ProcessId, EmitFn, ProcessRef, ProcessSpec, ProcessEvent } from "./types.js";
 import type { Clock, Millis } from "@phyxiusjs/clock";
 import { ProcessImpl } from "./process.js";
+import { createProcessId } from "./process-id.js";
 
 export interface RestartWindow {
   startTime: number;
@@ -19,6 +10,12 @@ export interface RestartWindow {
 
 export type SupervisionAction = "restart" | "stop" | "escalate";
 
+/**
+ * A flat supervisor: it owns a set of children, restarts them on failure
+ * (per strategy), and stops them on shutdown. Hierarchical nesting is done
+ * explicitly by creating nested supervisors — there is no implicit
+ * `tools.spawn` inside a child that silently registers with its parent.
+ */
 export class Supervisor {
   readonly id: ProcessId;
   private readonly strategy: SupervisionStrategy;
@@ -27,112 +24,39 @@ export class Supervisor {
   private readonly restartWindows = new Map<ProcessId, RestartWindow>();
   private readonly children: ProcessRef<unknown>[] = [];
   private readonly supervisionActions = new Map<ProcessId, SupervisionAction>();
-  private readonly processBehaviors = new Map<ProcessId, ProcessBehavior<unknown, unknown, unknown>>();
-  private stopped: boolean = false;
+  // Kept so a restart can re-spawn the same shape after the failed instance
+  // is cleaned up. Supervisor, not Process, owns restart bookkeeping.
+  private readonly processSpecs = new Map<ProcessId, ProcessSpec<unknown, unknown, unknown>>();
+  private readonly processCtxs = new Map<ProcessId, unknown>();
+  private readonly restartCounts = new Map<ProcessId, number>();
+  private stopped = false;
 
-  constructor(id: ProcessId, clock: Clock, emit?: EmitFn, strategy?: SupervisionStrategy) {
-    this.id = id;
-    this.strategy = strategy || {
+  constructor(options: { id?: ProcessId; clock: Clock; emit?: EmitFn; strategy?: SupervisionStrategy }) {
+    this.id = options.id ?? createProcessId();
+    this.clock = options.clock;
+    if (options.emit) this.emit = options.emit;
+    this.strategy = options.strategy ?? {
       type: "one-for-one",
-      maxRestarts: { count: 3, within: 10000 as Millis }, // Default: max 3 restarts in 10 seconds
-      backoff: { initial: 1000 as Millis, max: 30000 as Millis, factor: 2 },
+      maxRestarts: { count: 3, within: 10_000 as Millis },
+      backoff: { initial: 1_000 as Millis, max: 30_000 as Millis, factor: 2 },
     };
-    this.clock = clock;
-    if (emit) this.emit = emit;
   }
 
-  shouldRestart(processId: ProcessId): boolean {
-    if (this.strategy.type === "none" || this.stopped) {
-      return false;
-    }
-
-    if (!this.strategy.maxRestarts) {
-      return true; // No limit, always restart
-    }
-
-    const now = this.clock.now().wallMs;
-    const window = this.restartWindows.get(processId);
-
-    if (!window) {
-      // First restart
-      this.restartWindows.set(processId, {
-        startTime: now,
-        restarts: 1,
-      });
-      return true;
-    }
-
-    const windowElapsed = now - window.startTime;
-
-    if (windowElapsed > this.strategy.maxRestarts.within) {
-      // Window expired, reset with circuit breaker delay
-      this.restartWindows.set(processId, {
-        startTime: now,
-        restarts: 1,
-      });
-      return true;
-    }
-
-    if (window.restarts >= this.strategy.maxRestarts.count) {
-      // Too many restarts in window - circuit breaker activated
-      this.emit?.({
-        type: "supervisor:giveup",
-        supervisorId: this.id,
-        processId,
-        attempts: window.restarts,
-        withinMs: windowElapsed,
-        timestamp: now,
-      });
-
-      // Clean up the restart window to prevent memory leaks
-      this.restartWindows.delete(processId);
-      return false;
-    }
-
-    // Allow restart and increment counter
-    window.restarts++;
-    return true;
-  }
-
-  getRestartDelay(processId: ProcessId): Millis {
-    if (!this.strategy.backoff) {
-      return 0 as Millis;
-    }
-
-    const window = this.restartWindows.get(processId);
-    const attempt = window ? window.restarts : 1;
-
-    const { initial, max, factor, jitter } = this.strategy.backoff;
-    let delay = initial * Math.pow(factor, attempt - 1);
-    delay = Math.min(delay, max);
-
-    // Apply jitter if specified (±5%)
-    if (jitter !== undefined) {
-      const jitterAmount = delay * (jitter / 100);
-      delay += (Math.random() - 0.5) * 2 * jitterAmount;
-      delay = Math.max(0, delay);
-    }
-
-    this.emit?.({
-      type: "supervisor:restart",
-      id: processId,
-      attempt,
-      delayMs: delay,
-    });
-
-    return delay as Millis;
-  }
-
-  clearRestartHistory(processId: ProcessId): void {
-    this.restartWindows.delete(processId);
+  /** Number of times the supervisor has restarted this process. */
+  getRestartCount(processId: ProcessId): number {
+    return this.restartCounts.get(processId) ?? 0;
   }
 
   getChildren(): ProcessRef<unknown>[] {
     return [...this.children];
   }
 
-  async spawn<TMsg = unknown, TState = unknown, TCtx = unknown>(
-    behavior: ProcessBehavior<TMsg, TState, TCtx>,
+  /**
+   * Spawn a supervised child. Returns a running ref.
+   */
+  async spawn<TMsg, TState = void, TCtx = void>(
+    spec: ProcessSpec<TMsg, TState, TCtx>,
+    ctx?: TCtx,
   ): Promise<ProcessRef<TMsg>> {
     if (this.stopped) {
       throw new Error("Cannot spawn process: supervisor is stopped");
@@ -145,11 +69,9 @@ export class Supervisor {
     });
 
     try {
-      const process = await this.createSupervisedProcess(behavior);
+      const process = await this.createSupervisedProcess(spec, ctx as TCtx);
 
       this.children.push(process as ProcessRef<unknown>);
-
-      // Set default supervision action and emit supervision event
       this.supervisionActions.set(process.id, "restart");
 
       this.emit?.({
@@ -179,74 +101,149 @@ export class Supervisor {
     }
   }
 
+  supervise<TMsg>(process: ProcessRef<TMsg>, action: SupervisionAction): void {
+    this.supervisionActions.set(process.id, action);
+    this.emit?.({
+      type: "supervisor:supervising",
+      supervisorId: this.id,
+      processId: process.id,
+      strategy: action,
+      timestamp: this.clock.now().wallMs,
+    });
+  }
+
+  async stop(): Promise<void> {
+    if (this.stopped) return;
+    this.stopped = true;
+
+    this.emit?.({
+      type: "supervisor:stopping",
+      supervisorId: this.id,
+      timestamp: this.clock.now().wallMs,
+    });
+
+    const stopPromises = this.children.map(async (child) => {
+      try {
+        await child.stop();
+      } catch (error) {
+        this.emit?.({
+          type: "supervisor:child:stop:error",
+          supervisorId: this.id,
+          processId: child.id,
+          error,
+          timestamp: this.clock.now().wallMs,
+        });
+      }
+    });
+
+    await Promise.all(stopPromises);
+    this.children.length = 0;
+
+    this.emit?.({
+      type: "supervisor:stopped",
+      supervisorId: this.id,
+      timestamp: this.clock.now().wallMs,
+    });
+  }
+
+  // ── Private ───────────────────────────────────────────────────────────────
+
+  private shouldRestart(processId: ProcessId): boolean {
+    if (this.strategy.type === "none" || this.stopped) {
+      return false;
+    }
+
+    if (!this.strategy.maxRestarts) {
+      return true; // no limit
+    }
+
+    const now = this.clock.now().wallMs;
+    const window = this.restartWindows.get(processId);
+
+    if (!window) {
+      this.restartWindows.set(processId, { startTime: now, restarts: 1 });
+      return true;
+    }
+
+    const windowElapsed = now - window.startTime;
+
+    if (windowElapsed > this.strategy.maxRestarts.within) {
+      // Window expired — fresh budget.
+      this.restartWindows.set(processId, { startTime: now, restarts: 1 });
+      return true;
+    }
+
+    if (window.restarts >= this.strategy.maxRestarts.count) {
+      this.emit?.({
+        type: "supervisor:giveup",
+        supervisorId: this.id,
+        processId,
+        attempts: window.restarts,
+        withinMs: windowElapsed,
+        timestamp: now,
+      });
+      this.restartWindows.delete(processId);
+      return false;
+    }
+
+    window.restarts++;
+    return true;
+  }
+
+  private getRestartDelay(processId: ProcessId): Millis {
+    if (!this.strategy.backoff) return 0 as Millis;
+
+    const window = this.restartWindows.get(processId);
+    const attempt = window ? window.restarts : 1;
+
+    const { initial, max, factor, jitter } = this.strategy.backoff;
+    let delay = initial * Math.pow(factor, attempt - 1);
+    delay = Math.min(delay, max);
+
+    if (jitter !== undefined) {
+      const jitterAmount = delay * (jitter / 100);
+      delay += (Math.random() - 0.5) * 2 * jitterAmount;
+      delay = Math.max(0, delay);
+    }
+
+    this.emit?.({
+      type: "supervisor:restart",
+      id: processId,
+      attempt,
+      delayMs: delay,
+    });
+
+    return delay as Millis;
+  }
+
   private async createSupervisedProcess<TMsg, TState, TCtx>(
-    behavior: ProcessBehavior<TMsg, TState, TCtx>,
+    spec: ProcessSpec<TMsg, TState, TCtx>,
+    ctx: TCtx,
   ): Promise<ProcessRef<TMsg>> {
-    // Convert behavior to spec format with failure monitoring
-    const spec: ProcessSpec<TMsg, TState, TCtx> = {
-      name: "supervised-process",
-      handle: (state: TState, msg: TMsg, tools: Tools<TState, TMsg, TCtx>) => {
-        const handleFunc = behavior.handle;
-        let result;
-
-        if (handleFunc.length === 0) {
-          result = handleFunc();
-        } else if (handleFunc.length === 1) {
-          result = (handleFunc as (msg: TMsg) => TState | Promise<TState> | void | Promise<void>)(msg);
-        } else if (handleFunc.length === 2) {
-          result = handleFunc(state, msg);
-        } else {
-          result = handleFunc(state, msg, tools);
-        }
-
-        if (result === undefined) {
-          return state;
-        }
-        return result as TState;
-      },
-      ...(behavior.init && {
-        init: (ctx: TCtx) => {
-          const result = behavior.init!(ctx);
-          return result as TState;
-        },
-      }),
-      ...(behavior.terminate && {
-        onStop: (state: TState, reason: StopReason, ctx: TCtx) => {
-          const terminateFunc = behavior.terminate!;
-          if (terminateFunc.length === 0) {
-            return terminateFunc();
-          } else {
-            return terminateFunc(state, reason, ctx);
-          }
-        },
-      }),
-    };
-
-    const process = new ProcessImpl(spec, {} as TCtx, this.clock, this.createFailureMonitor());
+    const process = new ProcessImpl(spec, ctx, this.clock, this.createFailureMonitor());
     await process.start();
 
-    // Store behavior for restart purposes
-    this.processBehaviors.set(process.id, behavior as ProcessBehavior<unknown, unknown, unknown>);
+    // Record spec+ctx for restart re-spawning.
+    this.processSpecs.set(process.id, spec as ProcessSpec<unknown, unknown, unknown>);
+    this.processCtxs.set(process.id, ctx);
 
     return process;
   }
 
   private createFailureMonitor(): EmitFn {
     return (event: ProcessEvent) => {
-      // Forward all events
       this.emit?.(event);
 
-      // Monitor for process failure
       if (event.type === "process:fail" && event.id) {
-        // Get behavior from storage to avoid closure capture
-        const behavior = this.processBehaviors.get(event.id);
-        if (behavior) {
-          // Handle failure asynchronously to avoid blocking
-          this.handleProcessFailure(event.id, behavior).catch((error) => {
+        const failedId = event.id;
+        const spec = this.processSpecs.get(failedId);
+        const ctx = this.processCtxs.get(failedId);
+        if (spec) {
+          this.handleProcessFailure(failedId, spec, ctx).catch((error) => {
             this.emit?.({
               type: "supervisor:restart:failed",
               supervisorId: this.id,
-              processId: event.id!,
+              processId: failedId,
               error,
               timestamp: this.clock.now().wallMs,
             });
@@ -258,33 +255,28 @@ export class Supervisor {
 
   private async handleProcessFailure<TMsg, TState, TCtx>(
     processId: ProcessId,
-    behavior: ProcessBehavior<TMsg, TState, TCtx>,
+    spec: ProcessSpec<TMsg, TState, TCtx>,
+    ctx: TCtx,
   ): Promise<void> {
-    const action = this.supervisionActions.get(processId) || "restart";
+    const action = this.supervisionActions.get(processId) ?? "restart";
 
-    // Always clean up the failed process first
     await this.cleanupProcess(processId);
 
     if (action === "restart" && this.shouldRestart(processId)) {
       const delay = this.getRestartDelay(processId);
-
-      // Wait for restart delay
       if (delay > 0) {
-        await this.clock.timeout(delay);
+        await this.clock.sleep(delay);
       }
 
-      // Check if supervisor was stopped during delay
-      if (this.stopped) {
-        return;
-      }
+      if (this.stopped) return;
 
       try {
-        // Create new process instance
-        const newProcess = await this.createSupervisedProcess(behavior);
+        const newProcess = await this.createSupervisedProcess(spec, ctx);
         this.children.push(newProcess as ProcessRef<unknown>);
-
-        // Maintain supervision action
         this.supervisionActions.set(newProcess.id, action);
+
+        // Bump the restart counter against the original id for observability.
+        this.restartCounts.set(processId, (this.restartCounts.get(processId) ?? 0) + 1);
 
         this.emit?.({
           type: "supervisor:child:restarted",
@@ -320,77 +312,24 @@ export class Supervisor {
   }
 
   private async cleanupProcess(processId: ProcessId): Promise<void> {
-    // Remove from children
-    const processIndex = this.children.findIndex((child) => child.id === processId);
-    if (processIndex >= 0) {
-      const process = this.children[processIndex];
-
-      // Stop the process if it's still running
+    const index = this.children.findIndex((child) => child.id === processId);
+    if (index >= 0) {
+      const process = this.children[index];
       if (process) {
         try {
-          if (process.state === "running" || process.state === "starting") {
+          const state = process.status();
+          if (state === "running" || state === "starting") {
             await process.stop();
           }
         } catch {
-          // Ignore stop errors for failed processes
+          // Failed process's own stop failures don't propagate here.
         }
       }
-
-      this.children.splice(processIndex, 1);
+      this.children.splice(index, 1);
     }
 
-    // Clean up supervision actions
     this.supervisionActions.delete(processId);
-  }
-
-  supervise<TMsg>(process: ProcessRef<TMsg>, action: SupervisionAction): void {
-    this.supervisionActions.set(process.id, action);
-
-    this.emit?.({
-      type: "supervisor:supervising",
-      supervisorId: this.id,
-      processId: process.id,
-      strategy: action,
-      timestamp: this.clock.now().wallMs,
-    });
-  }
-
-  async stop(): Promise<void> {
-    if (this.stopped) {
-      return; // Idempotent
-    }
-
-    this.stopped = true;
-
-    this.emit?.({
-      type: "supervisor:stopping",
-      supervisorId: this.id,
-      timestamp: this.clock.now().wallMs,
-    });
-
-    // Stop all children
-    const stopPromises = this.children.map(async (child) => {
-      try {
-        await child.stop();
-      } catch (error) {
-        this.emit?.({
-          type: "supervisor:child:stop:error",
-          supervisorId: this.id,
-          processId: child.id,
-          error,
-          timestamp: this.clock.now().wallMs,
-        });
-      }
-    });
-
-    await Promise.all(stopPromises);
-
-    this.children.length = 0;
-
-    this.emit?.({
-      type: "supervisor:stopped",
-      supervisorId: this.id,
-      timestamp: this.clock.now().wallMs,
-    });
+    this.processSpecs.delete(processId);
+    this.processCtxs.delete(processId);
   }
 }
