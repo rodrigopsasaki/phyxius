@@ -1,0 +1,29 @@
+{
+  "name": "@phyxiusjs/example-http-orders",
+  "version": "0.0.0",
+  "private": true,
+  "description": "End-to-end example: HTTP adapter + handler + journal + stdout drain",
+  "type": "module",
+  "scripts": {
+    "start": "tsx src/server.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@phyxiusjs/clock": "workspace:*",
+    "@phyxiusjs/drain": "workspace:*",
+    "@phyxiusjs/fp": "workspace:*",
+    "@phyxiusjs/handler": "workspace:*",
+    "@phyxiusjs/http": "workspace:*",
+    "@phyxiusjs/journal": "workspace:*",
+    "@phyxiusjs/observe": "workspace:*",
+    "zod": "^3.22.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  }
+}
