@@ -454,4 +454,144 @@ describe("createDrain", () => {
       /batchSize.*maxBufferSize/,
     );
   });
+
+  // ── filter — sampling, gating, cost-control ───────────────────────────────
+
+  it("filter: entries where the predicate returns false are dropped before buffering", async () => {
+    const clock = createControlledClock({ initialTime: 1000 });
+    const journal = new Journal<TestData>({ clock });
+    const sink = createTestSink();
+
+    const drain = createDrain({
+      journal,
+      sink,
+      clock,
+      batchSize: 100,
+      flushIntervalMs: ms(60_000),
+      filter: (entry) => entry.data.msg !== "skip",
+    });
+
+    journal.append({ msg: "keep-1" });
+    journal.append({ msg: "skip" });
+    journal.append({ msg: "keep-2" });
+    journal.append({ msg: "skip" });
+    journal.append({ msg: "keep-3" });
+
+    await drain.flush();
+
+    expect(sink.written).toHaveLength(1);
+    const msgs = sink.written[0]?.map((e) => e.data.msg);
+    expect(msgs).toEqual(["keep-1", "keep-2", "keep-3"]);
+
+    await drain.stop();
+  });
+
+  it("filter: entries passing the predicate flow through unchanged", async () => {
+    const clock = createControlledClock({ initialTime: 1000 });
+    const journal = new Journal<TestData>({ clock });
+    const sink = createTestSink();
+
+    const drain = createDrain({
+      journal,
+      sink,
+      clock,
+      batchSize: 100,
+      flushIntervalMs: ms(60_000),
+      filter: () => true, // pass everything
+    });
+
+    journal.append({ msg: "a" });
+    journal.append({ msg: "b" });
+    await drain.flush();
+
+    expect(sink.written[0]?.map((e) => e.data.msg)).toEqual(["a", "b"]);
+    await drain.stop();
+  });
+
+  it("filter: no filter supplied → all entries pass (unchanged behavior)", async () => {
+    const clock = createControlledClock({ initialTime: 1000 });
+    const journal = new Journal<TestData>({ clock });
+    const sink = createTestSink();
+
+    const drain = createDrain({
+      journal,
+      sink,
+      clock,
+      batchSize: 100,
+      flushIntervalMs: ms(60_000),
+      // no filter
+    });
+
+    journal.append({ msg: "a" });
+    await drain.flush();
+    expect(sink.written[0]).toHaveLength(1);
+    await drain.stop();
+  });
+
+  it("filter: a throwing filter drops the entry and emits drain:filter-error", async () => {
+    const clock = createControlledClock({ initialTime: 1000 });
+    const journal = new Journal<TestData>({ clock });
+    const sink = createTestSink();
+    const events: DrainEvent[] = [];
+
+    const drain = createDrain({
+      journal,
+      sink,
+      clock,
+      batchSize: 100,
+      flushIntervalMs: ms(60_000),
+      emit: (e) => events.push(e),
+      filter: (entry) => {
+        if (entry.data.msg === "boom") throw new Error("filter boom");
+        return true;
+      },
+    });
+
+    journal.append({ msg: "good" });
+    journal.append({ msg: "boom" });
+    journal.append({ msg: "also-good" });
+    await drain.flush();
+
+    // "boom" was dropped; good messages still made it through.
+    expect(sink.written[0]?.map((e) => e.data.msg)).toEqual(["good", "also-good"]);
+
+    const filterErrors = events.filter((e) => e.type === "drain:filter-error");
+    expect(filterErrors).toHaveLength(1);
+    if (filterErrors[0]?.type === "drain:filter-error") {
+      expect((filterErrors[0].cause as Error).message).toBe("filter boom");
+    }
+
+    await drain.stop();
+  });
+
+  it("filter: the predicate receives the full DrainEntry (id, sequence, timestamp, data)", async () => {
+    const clock = createControlledClock({ initialTime: 1000 });
+    const journal = new Journal<TestData>({ clock });
+    const sink = createTestSink();
+
+    const seen: Array<{ id: string; sequence: number; msg: string }> = [];
+
+    const drain = createDrain({
+      journal,
+      sink,
+      clock,
+      batchSize: 100,
+      flushIntervalMs: ms(60_000),
+      filter: (entry) => {
+        seen.push({ id: entry.id, sequence: entry.sequence, msg: entry.data.msg });
+        return true;
+      },
+    });
+
+    journal.append({ msg: "one" });
+    journal.append({ msg: "two" });
+    await drain.flush();
+
+    expect(seen).toHaveLength(2);
+    expect(seen[0]?.sequence).toBe(0);
+    expect(seen[1]?.sequence).toBe(1);
+    expect(seen[0]?.msg).toBe("one");
+
+    await drain.stop();
+  });
 });

@@ -29,6 +29,7 @@ export function createDrain<T>(options: DrainOptions<T>): Drain {
     maxBufferSize = DEFAULT_MAX_BUFFER_SIZE,
     overflow = DEFAULT_OVERFLOW,
     flushIntervalMs = DEFAULT_FLUSH_INTERVAL_MS,
+    filter,
     emit,
   } = options;
 
@@ -57,6 +58,21 @@ export function createDrain<T>(options: DrainOptions<T>): Drain {
       timestamp: entry.timestamp,
       data: entry.data,
     };
+
+    // Apply the optional sampling filter BEFORE any buffer work — dropped
+    // entries should never consume buffer capacity. A throwing filter is
+    // treated as a drop so a broken policy can't flood a downstream sink
+    // it shouldn't have reached; the error is surfaced via events.
+    if (filter) {
+      let keep: boolean;
+      try {
+        keep = filter(drainEntry);
+      } catch (cause) {
+        emit?.({ type: "drain:filter-error", cause, at: clock.now() });
+        return;
+      }
+      if (!keep) return;
+    }
 
     if (buffer.length >= maxBufferSize) {
       if (overflow === "error") {

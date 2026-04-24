@@ -55,6 +55,21 @@ export interface DrainOptions<T> {
   readonly overflow?: DrainOverflowPolicy;
   /** Flush on this interval (milliseconds). Set to 0 to disable. Default: 5000. */
   readonly flushIntervalMs?: Millis;
+  /**
+   * Optional per-entry predicate, applied at ingress (before buffering).
+   * Returning `false` drops the entry; `true` lets it through.
+   *
+   * The filter exists so sampling policies — "log 30% of successes, 100%
+   * of failures," feature-flag gating, cost controls — can be expressed
+   * as declarative decisions rather than buried in whatever code
+   * produced the event.
+   *
+   * The filter runs BEFORE buffering so dropped entries don't consume
+   * buffer capacity. A throwing filter is treated like `false` (the
+   * entry is dropped) and a `drain:filter-error` event is emitted — we
+   * never let a broken filter flood a sink it shouldn't have reached.
+   */
+  readonly filter?: (entry: DrainEntry<T>) => boolean;
   /** Structured event emitter for observability. */
   readonly emit?: (event: DrainEvent) => void;
 }
@@ -82,7 +97,12 @@ export type DrainEvent =
       readonly droppedCount: number;
       readonly at: Instant;
     }
-  | { readonly type: "drain:stop"; readonly remaining: number; readonly at: Instant };
+  | { readonly type: "drain:stop"; readonly remaining: number; readonly at: Instant }
+  | {
+      readonly type: "drain:filter-error";
+      readonly cause: unknown;
+      readonly at: Instant;
+    };
 
 /**
  * Options for the OTLP HTTP sink.
