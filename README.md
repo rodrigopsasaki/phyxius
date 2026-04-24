@@ -197,6 +197,52 @@ No real timers. No race-condition flakes. No "oh this test only fails in CI, mus
 
 ---
 
+## Schema evolution, as a typed value
+
+Every system accumulates half-finished migrations. Column renames waiting on the drop. Dual-writes that never got switched over. "We'll finish this next sprint" turning into fossils in the schema. The reason isn't that people don't know expand-and-contract — everyone knows it. It's that **the verification step between phases is trust-based**: you checked the dual-write was matching once, three weeks ago, and never looked again.
+
+`@phyxiusjs/migration` turns that pattern into a value. Phases are declared; each transition names the **evidence** it requires; `advance()` runs the evidence queries against live substrate and refuses to transition if the proof isn't there. Wrong-until-proven-otherwise by construction:
+
+```ts
+const quoteToSalesDocument = defineMigration({
+  name: "quote-to-sales-document",
+  phases: {
+    expand: { evidence: { schemaReady: schemaApplied({ check: checkAlembicHead }) } },
+    dualWrite: { evidence: { parityVerified: attestation({ check: readSignoffStore }) } },
+    flip: {
+      evidence: {
+        zeroLegacyReads: journalWindow({
+          query: { name: "quote.read" },
+          windowMs: ms(14 * 24 * 60 * 60 * 1000),
+          predicate: (events) => (events.length === 0 ? ok({ count: 0 }) : err({ reason: "saw legacy reads" })),
+        }),
+      },
+    },
+    contract: {
+      evidence: {
+        zeroLegacyWrites: journalWindow({
+          /* ... */
+        }),
+      },
+    },
+  },
+});
+
+// Handlers read the live phase at dispatch time.
+if ((await migration.currentPhase()) === "flip") {
+  /* new path */
+}
+
+// `advance()` consults the evidence — no shortcut produces a valid transition.
+await migration.advance();
+```
+
+Same structural invariant as required-stability fields, one layer up: the halfway-state that used to be a memorized checklist stops being expressible because the type system and the runtime both demand proof.
+
+→ [migration/README](packages/components/migration/README.md)
+
+---
+
 ## The packages, if you want to look
 
 The framework is one composition of the primitives. Nothing stops you from dropping to the primitive layer and composing differently — each package is a standalone value, each has its own README, each does one thing.
@@ -222,6 +268,7 @@ The framework is one composition of the primitives. Nothing stops you from dropp
 | ------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
 | [`@phyxiusjs/handler`](packages/components/handler)     | **The universal work-unit.** Validated, supervised, timing-bounded, retry-aware, breaker-guarded, backpressure-shaped. |
 | [`@phyxiusjs/connector`](packages/components/connector) | 3rd-party integration primitive. `ConnectorSpec extends HandlerSpec` + typed `ConnectorError` + HTTP deepdive.         |
+| [`@phyxiusjs/migration`](packages/components/migration) | Evidence-gated expand-and-contract. Phases require proof to advance; wrong-until-proven-otherwise by construction.     |
 | [`@phyxiusjs/db`](packages/components/db)               | Database boundary. Transaction-as-context, typed errors, driver-agnostic.                                              |
 | [`@phyxiusjs/observe`](packages/components/observe)     | Typed field handles. `core` vs `extra` tiers. Snapshots into every journal entry.                                      |
 | [`@phyxiusjs/context`](packages/components/context)     | Typed `AsyncLocalStorage`. A scope is a value.                                                                         |
