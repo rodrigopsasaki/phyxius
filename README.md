@@ -119,13 +119,14 @@ That's a supervised, timeout-bounded, retry-aware, circuit-broken, backpressure-
 
 ### Components — composed primitives
 
-| Package                                             | What it is                                                                                                                                   |
-| --------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
-| [`@phyxiusjs/context`](packages/components/context) | Typed `AsyncLocalStorage`. A scope is a value; data flows without prop-drilling.                                                             |
-| [`@phyxiusjs/observe`](packages/components/observe) | Typed field handles (`observe.fields({...})`) that snapshot into each journal entry.                                                         |
-| [`@phyxiusjs/handle`](packages/components/handle)   | Scoped observable handle — the low-level building block behind `handler`.                                                                    |
-| [`@phyxiusjs/drain`](packages/components/drain)     | Bounded batching pump from journal to sink (stdout / file / OTLP-shaped).                                                                    |
-| [`@phyxiusjs/handler`](packages/components/handler) | **The universal work-unit.** Validated, supervised, timing-bounded, retry-aware, breaker-guarded, backpressure-shaped. Every field required. |
+| Package                                             | What it is                                                                                                                                                                        |
+| --------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| [`@phyxiusjs/context`](packages/components/context) | Typed `AsyncLocalStorage`. A scope is a value; data flows without prop-drilling.                                                                                                  |
+| [`@phyxiusjs/observe`](packages/components/observe) | Typed field handles (`observe.fields({...})`) that snapshot into each journal entry.                                                                                              |
+| [`@phyxiusjs/handle`](packages/components/handle)   | Scoped observable handle — the low-level building block behind `handler`.                                                                                                         |
+| [`@phyxiusjs/drain`](packages/components/drain)     | Bounded batching pump from journal to sink (stdout / file / OTLP-shaped).                                                                                                         |
+| [`@phyxiusjs/handler`](packages/components/handler) | **The universal work-unit.** Validated, supervised, timing-bounded, retry-aware, breaker-guarded, backpressure-shaped. Every field required.                                      |
+| [`@phyxiusjs/db`](packages/components/db)           | Database boundary. Transaction-as-context (no prop-drilling), typed errors (DEADLOCK / SERIALIZATION / UNIQUE / etc.), driver-agnostic. Ships with an in-memory driver for tests. |
 
 ### Utilities — value-level building blocks
 
