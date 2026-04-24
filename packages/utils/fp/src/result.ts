@@ -106,11 +106,9 @@ export function or<T, E>(first: Result<T, E>, second: Result<T, E>): Result<T, E
 
 /** Apply a function inside a Result to a value inside another Result */
 export function ap<T, U, E>(fnResult: Result<(value: T) => U, E>, valueResult: Result<T, E>): Result<U, E> {
-  return isOk(fnResult) && isOk(valueResult)
-    ? ok(fnResult.value(valueResult.value))
-    : isErr(fnResult)
-      ? fnResult
-      : (valueResult as Err<E>);
+  if (isErr(fnResult)) return fnResult;
+  if (isErr(valueResult)) return valueResult;
+  return ok(fnResult.value(valueResult.value));
 }
 
 /** Collect array of Results into Result of array */
@@ -188,7 +186,8 @@ export function tapErr<T, E>(result: Result<T, E>, fn: (error: E) => void): Resu
 
 /** Filter Ok values, converting filtered out values to Err */
 export function filter<T, E>(result: Result<T, E>, predicate: (value: T) => boolean, error: E): Result<T, E> {
-  return isOk(result) ? (predicate(result.value) ? result : err(error)) : result;
+  if (isErr(result)) return result;
+  return predicate(result.value) ? result : err(error);
 }
 
 /** Swap Ok and Err */
@@ -223,10 +222,14 @@ export function partition<T, E>(results: Result<T, E>[]): [T[], E[]] {
 
 /** Zip two Results into a Result of tuple */
 export function zip<T, U, E>(first: Result<T, E>, second: Result<U, E>): Result<[T, U], E> {
-  return isOk(first) && isOk(second) ? ok([first.value, second.value]) : isErr(first) ? first : (second as Err<E>);
+  if (isErr(first)) return first;
+  if (isErr(second)) return second;
+  return ok([first.value, second.value]);
 }
 
 /** Zip with custom combiner function */
 export function zipWith<T, U, V, E>(first: Result<T, E>, second: Result<U, E>, fn: (a: T, b: U) => V): Result<V, E> {
-  return isOk(first) && isOk(second) ? ok(fn(first.value, second.value)) : isErr(first) ? first : (second as Err<E>);
+  if (isErr(first)) return first;
+  if (isErr(second)) return second;
+  return ok(fn(first.value, second.value));
 }

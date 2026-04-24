@@ -21,10 +21,7 @@
     "noUncheckedIndexedAccess": true,
     "exactOptionalPropertyTypes": true,
     "noPropertyAccessFromIndexSignature": true,
-    "verbatimModuleSyntax": true,
-    "paths": {
-      "@phyxius/*": ["./packages/*/src"]
-    }
+    "verbatimModuleSyntax": true
   },
   "exclude": ["node_modules", "dist", "coverage", ".nx"]
 }

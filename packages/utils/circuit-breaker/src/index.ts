@@ -136,12 +136,7 @@ export function createCircuitBreaker(options: CircuitBreakerOptions): CircuitBre
   state.watch((change: Change<CircuitSnapshot>) => {
     if (change.from.state === change.to.state) return;
 
-    const event: CircuitEvent =
-      change.to.state === "open"
-        ? { type: "circuit:opened", consecutiveFailures: change.to.consecutiveFailures, at: change.at }
-        : change.to.state === "half-open"
-          ? { type: "circuit:half-open", at: change.at }
-          : { type: "circuit:closed", at: change.at };
+    const event = toCircuitEvent(change);
 
     for (const watcher of watchers) {
       try {
@@ -221,4 +216,24 @@ export function createCircuitBreaker(options: CircuitBreakerOptions): CircuitBre
       };
     },
   };
+}
+
+/**
+ * Map an atom state transition to its corresponding CircuitEvent.
+ * Pulled out as a named function so the reader doesn't parse a nested
+ * ternary to understand it — it's a flat switch over the target state.
+ */
+function toCircuitEvent(change: Change<CircuitSnapshot>): CircuitEvent {
+  switch (change.to.state) {
+    case "open":
+      return {
+        type: "circuit:opened",
+        consecutiveFailures: change.to.consecutiveFailures,
+        at: change.at,
+      };
+    case "half-open":
+      return { type: "circuit:half-open", at: change.at };
+    case "closed":
+      return { type: "circuit:closed", at: change.at };
+  }
 }
