@@ -1,607 +1,217 @@
-# PHYXIUS CODEX: The Complete Understanding
+# PHYXIUS CODEX
 
-> _"Phyxius is an epithet of Zeus. It means 'the god who gives escape' or 'the god of deliverance'. It's to flee from flaky systems, to take refuge from opaque systems. Hey there. You, running full steam ahead on that maze. I think there may be another way to do this. There's an escape hatch from these vines. You should try it, maybe it'll give you wings."_
-
----
-
-## Table of Contents
-
-- [I. THE AWAKENING (Philosophy & Intent)](#i-the-awakening-philosophy--intent)
-- [II. THE FOUNDATIONS (Core Primitives)](#ii-the-foundations-core-primitives)
-- [III. THE VISION (Observability Revolution)](#iii-the-vision-observability-revolution)
-- [IV. THE PRINCIPLES (Sacred Laws)](#iv-the-principles-sacred-laws)
-- [V. THE ARCHITECTURE (How It All Fits)](#v-the-architecture-how-it-all-fits)
-- [VI. THE FUTURE (Where We're Heading)](#vi-the-future-where-were-heading)
+> _"Phyxius is an epithet of Zeus. It means 'the god who gives escape'. To flee from flaky systems, to take refuge from opaque ones. You, running full steam ahead on that maze — I think there may be another way."_
 
 ---
 
-## I. THE AWAKENING (Philosophy & Intent)
+## Table of contents
 
-### The 8-Year Journey
-
-Phyxius wasn't born from theoretical computer science. It was forged in the crucible of **8 years of NodeJS production pain**. Every single company, every single project, the same issues:
-
-- **Emergent behavior** - Systems doing things no one intended
-- **Hidden complexity** - Critical behavior buried in implementation details
-- **Flaky tests** - The dreaded "sometimes red, sometimes green"
-- **Memory leaks** - Resources vanishing into the void
-- **Lack of observability** - "I don't know what happened"
-
-The industry response? More tools, more frameworks, more complexity. More bandaids on a fundamentally broken foundation.
-
-### The Core Insight
-
-The problem isn't that we need better tools. The problem is **we got the whole thing backwards**.
-
-Traditional approach:
-
-1. Write business logic
-2. Add error handling as an afterthought
-3. Sprinkle console.log statements everywhere
-4. Ship to production
-5. Get woken up at 3AM
-6. Add more logging
-7. Pay Datadog $100k/year to manage the mess
-8. Still don't know what actually happened
-
-This is insane. We're **inference-driven instead of intent-driven**.
-
-### The Phyxius Way
-
-What if systems could **explain themselves**? What if concurrency was **safe by construction**? What if time was **explicit and controllable**? What if errors were **structured and contextual**?
-
-This isn't about building another framework. This is about **changing the conversation**.
-
-From: "How do I debug this mess?"
-To: "My system already knows what happened."
-
-From: "Why did this fail in production?"
-To: "Here's the complete story of what went wrong and what I did about it."
-
-From: "I hope this works."
-To: "I can prove this works."
-
-### The Escape
-
-Phyxius offers escape from:
-
-- **Time-dependent bugs** that only happen in CI
-- **Race conditions** that only happen under load
-- **Memory leaks** you can't reproduce
-- **Scattered logs** that tell you nothing
-- **3AM pages** for problems the system could handle
-- **"Works on my machine"** because your machine and production run different systems
-
-This isn't incremental improvement. This is **paradigm shift**.
+- [I. What this is](#i-what-this-is)
+- [II. The invariants the substrate enforces](#ii-the-invariants-the-substrate-enforces)
+- [III. What's actually built](#iii-whats-actually-built)
+- [IV. How this is packaged](#iv-how-this-is-packaged)
+- [V. What's honestly not there yet](#v-whats-honestly-not-there-yet)
+- [VI. Earned principles](#vi-earned-principles)
+- [VII. The horizon](#vii-the-horizon)
 
 ---
 
-## II. THE FOUNDATIONS (Core Primitives)
+## I. What this is
 
-Phyxius is built on 5 core primitives that address fundamental issues in concurrent, observable systems. Each primitive solves a specific class of production problems.
+A reliability substrate for TypeScript systems on Node.js.
 
-### Clock: Making Time Explicit
+Phyxius is a catalog of composable primitives that enforce production invariants structurally, plus a reference framework composition that wires them together. The core bet:
 
-**The Problem**: Time is the source of most flaky behavior. Tests that pass locally but fail in CI. Race conditions that only happen under load. Timeouts that work on fast machines but fail on slow ones.
+**You shouldn't be able to ship work that silently defaulted a stability decision.** Timeouts, retries, circuit breakers, concurrency limits, failure modes — all declared as values, all visible in the type, all carried on the same journal shape regardless of whether work enters your system through HTTP, a queue, a cron tick, a 3rd-party API call, or a schema migration.
 
-**The Solution**: Separate wall time (jumps, drifts, goes backwards) from monotonic time (steady progression for measuring intervals).
-
-```typescript
-const clock = createSystemClock();
-const start = clock.now();
-await clock.sleep(ms(500));
-const end = clock.now();
-
-const elapsed = end.monoMs - start.monoMs; // immune to NTP/DST jumps
-```
-
-**Key Insights**:
-
-- Real systems experience NTP corrections, leap seconds, DST shifts, VM migrations
-- Clock doesn't prevent time jumps - it makes them **visible and manageable**
-- Controlled clock enables **deterministic testing** of time-dependent behavior
-- Every operation emits structured events for complete observability
-
-**Production Impact**: Tests that never flake. Time-dependent logic that's reproducible. Debugging timeouts that actually helps.
-
-### Atom: State That Cannot Race
-
-**The Problem**: Shared mutable state leads to race conditions, lost updates, inconsistent reads. Every "works on my machine" bug that only happens under concurrent load.
-
-**The Solution**: Atomic operations with compare-and-swap, versioned state changes, and structured notifications.
-
-```typescript
-const counter = createAtom(0, clock);
-
-// Race-safe increment
-counter.swap((n) => n + 1);
-
-// Safe concurrent access
-const success = counter.compareAndSet(expected, newValue);
-
-// Complete audit trail
-counter.watch((change) => {
-  console.log(`${change.from} → ${change.to} at ${change.at.wallMs}`);
-});
-```
-
-**Key Insights**:
-
-- Eliminate race conditions **by construction**
-- Every state change is versioned and timestamped
-- Observable mutations with complete change history
-- Foundation for Software Transactional Memory (STM)
-
-**Production Impact**: No more lost updates. No more race conditions. Complete audit trail of state changes.
-
-### Journal: Events That Never Disappear
-
-**The Problem**: Traditional logging produces scattered text lines with no guaranteed ordering, no structured data, no queryable history. When you need to debug, the evidence is gone.
-
-**The Solution**: Append-only log with perfect ordering, structured events, and complete persistence.
-
-```typescript
-const events = new Journal({ clock });
-
-events.append({ type: "user.login", userId: "alice", ip: "1.2.3.4" });
-events.append({ type: "payment.start", orderId: "ord-123", amount: 1000 });
-events.append({ type: "payment.error", orderId: "ord-123", error: "CARD_DECLINED" });
-
-// Get complete history
-const history = events.getSnapshot();
-```
-
-**Key Insights**:
-
-- Perfect event ordering with sequence numbers
-- Structured data instead of text parsing
-- Complete serialization and recovery
-- Real-time subscriptions to event streams
-- Backpressure policies for overflow handling
-
-**Production Impact**: Complete event history. No more lost context. Time travel debugging.
-
-### Process: Units That Self-Heal
-
-**The Problem**: Object-oriented concurrency creates shared mutable state, cascading failures, and systems that are impossible to reason about under load.
-
-**The Solution**: Actor model with isolated state, message passing, and supervision trees.
-
-```typescript
-const counter = spawn(
-  {
-    name: "counter",
-    init: () => ({ count: 0 }),
-    handle: (state, message) => {
-      switch (message.type) {
-        case "increment":
-          return { count: state.count + 1 };
-        case "get":
-          message.reply(state.count);
-          return state;
-      }
-    },
-  },
-  {},
-);
-
-// Send messages - never blocks, never races
-await counter.send({ type: "increment" });
-const count = await counter.ask((reply) => ({ type: "get", reply }));
-```
-
-**Key Insights**:
-
-- Isolated state per process - no shared memory
-- Message passing eliminates race conditions
-- Supervision strategies with restart policies
-- Circuit breakers prevent restart storms
-- Complete lifecycle observability
-
-**Production Impact**: Systems that self-heal. No cascading failures. Concurrency without chaos.
+It's not Express / Nest / Fastify. It's the substrate those would compete on if they'd been built for operators.
 
 ---
 
-## III. THE VISION (Observability Revolution)
+## II. The invariants the substrate enforces
 
-### The Backwards Industry
+Four structural invariants. The rest of the codebase is consequences of these.
 
-We're doing observability completely backwards. We:
+### 1. No non-decision
 
-1. **Log scattered human-written statements** produced in isolation
-2. **Aggregate them with expensive tools** (Datadog, Splunk, etc.)
-3. **Try to infer context** from fragments
-4. **Pay per GB of noise** we generate
-5. **Still can't answer**: "Why did that customer's checkout fail?"
+Every stability field on a work-unit spec is required at the type level. You cannot ship a `defineHandler` call that silently defaulted a timeout, a retry, a breaker, or a concurrency shape. "No retry" is a value (`retry.none()`), not an absence. **This is structural, not rhetorical** — the type system refuses the code.
 
-This is like hiring a translator to explain what you said in your own language.
+### 2. Every failure mode is a value
 
-### The Revolution: Context Over Output
+No throws cross primitive boundaries. Every work-unit produces a `Result<T, E>` where `E` is a discriminated union. Retry predicates narrow on it. Dashboards group by it. Pagers fire on specific variants. Failures are pattern-matchable, not vibes.
 
-**You don't want logs. You want to know what happened.**
+### 3. Time is injected
 
-Traditional logging:
+`Date.now()` and `setTimeout` live in exactly one place: `@phyxiusjs/clock/system-clock`. Every other timing decision flows through an injected `Clock`. A `ControlledClock` makes tests deterministic — no flaky backoff, no real timers, no race-condition flakes.
 
-```javascript
-console.log("processing payment");
-console.log("payment amount:", amount);
-console.log("calling stripe");
-console.log("payment failed:", error);
-// 4 disconnected fragments, no correlation, no context
-```
+### 4. Transport-stable observability
 
-Vision approach:
+One journal entry per invocation, same shape across every way work enters the system. HTTP, queue, cron, connector, migration — all produce `HandlerEvent`. One dashboard, one query layer, one alerting surface.
 
-```javascript
-await vision.observe("payment.process", async () => {
-  vision.set("amount", amount);
-  vision.set("gateway", "stripe");
+### The generative move: evidence as query
 
-  try {
-    const result = await stripe.charge(amount);
-    vision.set("charge_id", result.id);
-    vision.set("status", "success");
-  } catch (error) {
-    vision.set("status", "failed");
-    vision.set("error", error.message);
-    throw error;
-  }
-});
-// ONE event with complete context and story
-```
+Load-bearing but discovered late: when a primitive needs to know "has X happened," the answer is never trust-based. It's a query the primitive runs against live substrate.
 
-### One Event Per Unit of Work
+Migrations gate on evidence queries; the answer is _currently true_ or the transition doesn't happen. **"I checked three weeks ago" stops being a sentence that can be constructed**, because the check and the advance are the same action.
 
-The core insight: **capture intent and outcome, not implementation details**.
+### The design test: shape-fits
 
-Each event contains:
+Concretely: if a new primitive extends an existing primitive's shape naturally, the existing shape is right. If it doesn't, one of three things is true:
 
-- **What** you were trying to accomplish
-- **All relevant context** at the time
-- **What actually happened** (success/failure)
-- **Complete timing information**
-- **Full error details** if applicable
+1. **The new primitive is wrong** — rework it.
+2. **The substrate is missing a concept** — lift it into the substrate, both layers get stronger.
+3. **They're legitimately orthogonal** — keep them so; don't force the extension.
 
-```json
-{
-  "name": "checkout.process",
-  "duration_ms": 234,
-  "data": {
-    "user_id": "123",
-    "cart_total": 99.99,
-    "payment_gateway": "stripe",
-    "attempts": 3,
-    "final_status": "success",
-    "events": ["cart_validated", "inventory_reserved", "payment_processed", "confirmation_sent"]
-  }
-}
-```
+The test is generative in all three outcomes. Each is useful information, and it keeps the substrate honest as it grows.
 
-### The LLM Layer
-
-With complete contextual events, AI can transform raw data into human understanding:
-
-**Traditional alert at 3AM:**
-
-> "ERROR: Stripe checkout failed. Code XYZ917339"
-
-**LLM-enhanced summary at 9AM:**
-
-> "Good morning. Sale 123 failed initially due to Stripe timeouts, but our fallback processed it successfully on attempt 4. I'm monitoring Stripe health and increased heartbeat checks for the next 4 hours. Revenue captured, customer notified. Nothing requires action."
-
-### Production-Grade From Localhost
-
-The same observability you get in production works identically on your laptop:
-
-```typescript
-// This works the same everywhere
-await vision.observe("user.create", async () => {
-  vision.set("email", user.email);
-  return await createUser(user);
-});
-```
-
-- **Local**: See complete events in terminal
-- **Production**: Same events flow to storage
-- **Same queries work everywhere**
-
-No more "works on my machine" for observability. No graduation to observability when you're big enough to afford Datadog. Production-grade insight from the first line of code.
+`ConnectorSpec extends HandlerSpec` cleanly. `MigrationSpec` almost-fit and revealed the fleet-store gap. Both were substrate wins.
 
 ---
 
-## IV. THE PRINCIPLES (Sacred Laws)
+## III. What's actually built
 
-### 1. Correctness Is King
+Three tiers, honestly labeled.
 
-We don't compromise correctness for **anything**:
+### Core primitives
 
-- Not for performance (premature optimization is evil)
-- Not for convenience (foot-guns aren't convenient)
-- Not for compatibility (with broken systems)
-- Not for adoption (we build for ourselves first)
+Stable shape, battle-tested implementations.
 
-**Correctness means**:
+- **`@phyxiusjs/clock`** — wall + monotonic time, `ControlledClock` for tests, `Budget` (deadline + AbortSignal as a value), sleep / deadline / interval with structured events.
+- **`@phyxiusjs/atom`** — versioned observable state with CAS. Transactional, linearizable, bounded.
+- **`@phyxiusjs/journal`** — bounded, ordered, append-only event log. Ring buffer — memory growth impossible by construction.
+- **`@phyxiusjs/resource`** — acquire / use / release with guaranteed cleanup. Parallel + sequence compose lifecycles. Release errors never mask body errors.
+- **`@phyxiusjs/process`** — lifecycle primitive. Start / stop / status / crash observation. Use for lifecycle coherence when you want it as a value. **Not an OTP-style supervisor** — Node is single-threaded, and that is not what this delivers.
 
-- Race conditions are impossible by construction
-- Resource leaks cannot happen
-- Time-dependent behavior is deterministic
-- Errors contain complete context
-- State changes are atomic and observable
+### Work-unit primitives — the center of gravity
 
-### 2. Simplicity Through Composition
+- **`@phyxiusjs/handler`** — the universal work-unit. Input/output validation, timeout, concurrency (with backpressure policy), retry, circuit breaker, observation fields — **all required**. `defineHandler` won't compile without them. Same spec runs behind HTTP today, a queue tomorrow, a cron tick next week, with identical stability guarantees and identical journal entries.
+- **`@phyxiusjs/connector`** — 3rd-party integration. `ConnectorSpec extends HandlerSpec` + `provider` + `mapError`. Typed `ConnectorError` union (UNAUTHORIZED, FORBIDDEN, NOT_FOUND, VALIDATION, RATE_LIMITED, TIMEOUT, CONNECTION_ERROR, PROVIDER_ERROR). HTTP mapping helpers (`mapHttpStatus`, `mapFetchError`, `parseRetryAfter`).
+- **`@phyxiusjs/migration`** — expand-and-contract as a typed value. Evidence-gated phase transitions. Wrong-until-proven-otherwise by construction. Evidence sources: `journalWindow`, `schemaApplied`, `attestation`.
 
-We want a **lego castle, not a wool one**:
+### Supporting primitives
 
-- Simple constructs that compose into complex behavior
-- Each primitive does ONE thing perfectly
-- Primitives work together without knowing about each other
-- Complexity emerges from composition, not implementation
+Composable building blocks.
 
-**This means**:
+- **`@phyxiusjs/context`** — typed `AsyncLocalStorage`. A scope is a value. Uses `Symbol.for` to share state across duplicate package installs — inherited from Vision's production-proven context pattern.
+- **`@phyxiusjs/observe`** — typed field handles. `core` vs `extra` tiers, hot-reloadable at runtime. Snapshots into every journal entry.
+- **`@phyxiusjs/handle`** — scoped observable handle. Low-level building block behind `Handler`.
+- **`@phyxiusjs/drain`** — journal → sink pump with batching and per-entry filtering. Sink errors caught, never thrown.
+- **`@phyxiusjs/stats`** — rolling p50/p95/p99 + error rate per handler, with edge-triggered threshold alerts. Poor-man's APM, bounded memory.
+- **`@phyxiusjs/db`** — database boundary. Transaction-as-context (no prop-drilling), typed errors (`DEADLOCK`, `SERIALIZATION_FAILURE`, `UNIQUE_VIOLATION`, etc.), driver-agnostic. Ships with in-memory driver for tests.
 
-- Clock doesn't know about Process
-- Atom doesn't know about Journal
-- Journal doesn't know about Drain
-- But they all compose naturally
+### Utilities
 
-### 3. Built For Ourselves
+Value-level building blocks.
 
-We're **not building this for anyone other than ourselves**:
+- **`@phyxiusjs/fp`** — `Result<T, E>`, `Option<T>`, pattern-match, pipe. No throws as a value language.
+- **`@phyxiusjs/validate`** — `Validator<T>` contract. Zod-compatible, framework-free.
+- **`@phyxiusjs/retry`** — retry policies as values. `retry.none()`, `retry.fixed(...)`, `retry.exponential(...)`.
+- **`@phyxiusjs/circuit-breaker`** — closed / open / half-open state machine with injected clock. `cb.none()` is a first-class decision.
+- **`@phyxiusjs/temporal`** — clock-driven debounce / throttle. Deterministic in tests.
+- **`@phyxiusjs/config`** — layered typed config with file-watching and first-wins precedence. Hot-reloadable.
+- **`@phyxiusjs/strategy`** — pure named computation with shadow deployment. Primary + shadows for versioned rollouts. Mismatches are typed events.
+- **`@phyxiusjs/state-machine`** — typed state machines. States are discriminated unions; transitions are strategies; the graph is the primitive.
 
-- Express integration is a non-goal
-- Framework compatibility is a non-goal
-- Enterprise features are a non-goal
-- Mass adoption is a non-goal
+### Adapters
 
-**We build for**:
+How work enters the system, and how the DB boundary meets a real engine.
 
-- Correctness over convenience
-- Clarity over compatibility
-- Intent over integration
+- **`@phyxiusjs/http`** — thin Node `http` adapter. Pure `handle(HttpRequest): Promise<HttpResponse>` core — testable without sockets. Every `HandlerError` mapped to a sensible HTTP status.
+- **`@phyxiusjs/queue`** — broker-agnostic pull-based consumer. `MessageSource` contract, drop-in for SQS / Redis / Kafka. Every `HandlerError` mapped to ack / nack decisions. Memory reference source for tests.
+- **`@phyxiusjs/scheduler`** — time-driven invocations. Pluggable `Schedule` values. Overlap / catchup / drift policies declared, none defaulted.
+- **`@phyxiusjs/db-pg`** — Postgres driver for `@phyxiusjs/db`. Curated SQLSTATE → `DbError` mapping. The table is the real product.
 
-If we can choose abstractions that enable future integrations **without compromising**, fine. But we won't write a single line thinking about it intentionally.
+### Framework — the convenience bow
 
-### 4. Trust Intuition Over Common Sense
-
-This is **bold work**. We're walking in a different direction:
-
-- Common sense says "just use console.log"
-- Common sense says "race conditions are inevitable"
-- Common sense says "flaky tests are normal"
-- Common sense says "3AM pages are part of the job"
-
-**We trust**:
-
-- Our lived experience of pain
-- Proven solutions from other ecosystems
-- The desire for systems that explain themselves
-- The belief that software can be both powerful and reliable
+- **`@phyxiusjs/framework`** — `createApp()` that wires Clock + Journal + Drain + Stats + Config and exposes `.route` / `.schedule` / `.consume` / `.use`. Every framework method is a documented composition. Transports are optional peer deps. Invariants pass through unchanged.
 
 ---
 
-## V. THE ARCHITECTURE (How It All Fits)
+## IV. How this is packaged
 
-### The Primitive Layer (Core)
+Twenty-seven packages. **That's deliberate.**
 
-Four primitives that address fundamental issues:
+This is not a framework with twenty-seven dependencies. It's a catalog of primitives, each usable independently, with one reference framework composition included. The publishing posture is "here are the building blocks — use them, test them, fork them, replace them." Each package is small, well-factored, and documented to stand on its own.
 
-```
-Clock ────── Explicit, controllable time
-│
-├── Atom ── Versioned observable state
-│
-├── Journal ── Typed, bounded, sequence-ordered event log
-│
-└── Process ── Units that self-heal
-```
+You can start at any level:
 
-Each primitive is:
+- **Day one:** `createApp()` and a working service.
+- **Day two:** drop to `defineHandler()` + a transport when you outgrow the framework's defaults.
+- **Day three:** compose primitives directly when you need something the components don't offer.
 
-- **Independent** - works without the others
-- **Composable** - enhances the others
-- **Observable** - emits structured events
-- **Testable** - deterministic behavior
-
-### The Component Layer
-
-Higher-level abstractions composed from the core primitives:
-
-**Context** (`@phyxiusjs/context`)
-
-- Pure AsyncLocalStorage wrapper
-- Thread-local data with type safety
-- Zero external dependencies
-
-**Observe** (`@phyxiusjs/observe`)
-
-- Context manipulation utilities
-- Simple API for adding observability data
-- No domain knowledge, pure utilities
-
-**Handle** (`@phyxiusjs/handle`)
-
-- Request/operation bracket primitive
-- Opens a Context scope, accumulates observed fields, appends one Journal entry
-- Foundation for higher-level work-unit abstractions
-
-**Drain** (`@phyxiusjs/drain`)
-
-- Journal subscriber with batching
-- Ships entries to a configurable sink on size or interval
-- Sink errors are caught and emitted, never thrown
-
-> The framework-level work-unit component (reliability, backpressure, supervision)
-> is being re-imagined. See `.mycelium/invariants.md` and `.mycelium/intents.md`
-> for the authored design constraints.
-
-### The Vision System
-
-Vision is the **precursor** that proves the observability revolution:
-
-- **AsyncLocalStorage foundation** for zero-overhead context propagation
-- **One event per unit of work** with complete context
-- **Smart error serialization** that actually captures information
-- **Framework-agnostic instrumentation** through proxies
-- **Production-ready exporters** with batching and circuit breakers
-
-### Integration Philosophy
-
-Components demonstrate key principles:
-
-1. **Pure primitives** with minimal domain knowledge
-2. **Composability** - work together but remain independent
-3. **Type safety** without runtime overhead
-4. **Zero dependencies** where possible
-5. **Bring your own** dependencies (validation libraries, etc.)
-6. **Production ready** with built-in reliability patterns
-
-### The Complete System
-
-When the primitives compose, you get:
-
-- **Automatic observability** - one event tells the complete story (Context + Observe + Journal)
-- **Resource safety** - standard Node mechanisms (AbortSignal, try/finally, using) paired with Clock.Budget for deadlines
-- **State consistency** - Atom collapses non-deterministic async ordering back into deterministic sync commits
-- **Event history** - Journal captures everything, bounded and ordered
-- **Self-healing** - Process supervision handles failures
-- **Time control** - Clock makes behavior deterministic
-
-The framework-level work-unit abstraction that binds these together is being
-re-imagined as a clean slate on top of this substrate.
+The breadth is respect for the reader's autonomy, not feature-list marketing. A fork of one package doesn't fork the whole system. An experiment on one primitive doesn't touch the others.
 
 ---
 
-## VI. THE FUTURE (Where We're Heading)
+## V. What's honestly not there yet
 
-### The Death of Traditional Monitoring
+Phyxius is opinionated. Opinionated only works if the claims match the code. Here's where the surface is narrower than a casual reading might suggest.
 
-With complete contextual events, traditional monitoring becomes obsolete:
+### Not built
 
-**What dies**:
+- **LLM-enhanced operational summaries.** The journal's shape supports it, but no packages today produce those summaries.
+- **Self-healing / automatic remediation.** Process gives lifecycle observation, not self-healing.
+- **Fleet-backed stores.** `JournalStore` and `PhaseStore` interfaces exist; only memory implementations ship. Multi-process migration evidence needs Postgres / Datadog / CloudWatch adapters that don't exist yet.
+- **Shadow-diff evidence variant.** Designed (`shadowDiff` composes onto `journalWindow` plus strategy-event wiring), not implemented.
+- **Provider-specific connectors.** The primitive exists; Stripe / Slack / OpenAI / Twilio implementations don't.
+- **OTP-style supervision.** Node is cooperatively scheduled; real actor supervision isn't possible here in the way Erlang does it. `Process` gives lifecycle observation, not actor semantics.
 
-- Log aggregation services (Datadog, Splunk)
-- APM tools that guess what happened
-- Metric systems that measure symptoms
-- Tracing tools that try to reconstruct causality
-- Flaky test detection (tests won't be flaky)
+### Narrower than the language might imply
 
-**What emerges**:
+- **"Timeout-bounded."** Budgets are declared; `AbortSignal` is passed to `run`. Honoring it is **cooperative**. User code that doesn't thread `signal` into `fetch` / streams / subprocess doesn't get interrupted when the budget expires. Every adapter doc should say this clearly.
+- **"Race conditions eliminated by construction."** Atom / Journal / Process eliminate races at primitive boundaries. User code that composes primitives incorrectly can still race.
+- **"Resource leaks cannot happen."** The Resource primitive guarantees cleanup **if used**. Code that doesn't wrap acquisitions can still leak.
 
-- Systems that explain themselves
-- Events that contain complete stories
-- AI that transforms data into understanding
-- Production systems that handle their own issues
-- Developers who sleep through the night
-
-### LLM-Enhanced Operations
-
-AI transforms raw events into human understanding:
-
-```typescript
-// System captures this
-{
-  "name": "checkout.process",
-  "data": {
-    "attempts": [
-      { "gateway": "stripe", "error": "timeout" },
-      { "gateway": "stripe", "error": "500" },
-      { "gateway": "paypal", "status": "success" }
-    ],
-    "final_status": "success"
-  }
-}
-
-// AI explains this
-"Payment initially failed due to Stripe issues but succeeded via PayPal fallback. Customer charged successfully. I've increased Stripe monitoring for 4 hours. No action required."
-```
-
-### Production-First Development
-
-The future doesn't separate development from production:
-
-- **Same observability** from localhost to global scale
-- **Same reliability primitives** in all environments
-- **Same query interface** for local debugging and production analysis
-- **Same contextual events** whether testing or serving customers
-
-This eliminates the dev/prod gap that causes "works on my machine" issues.
-
-### Self-Healing Systems
-
-With proper primitives and complete observability:
-
-1. **Systems detect patterns** in their own behavior
-2. **AI analyzes events** to identify root causes
-3. **Automatic remediation** handles known issues
-4. **Humans get summaries** instead of alerts
-5. **Learning systems** improve their responses over time
-
-### The End State
-
-The goal isn't better debugging tools. The goal is **systems that don't need debugging** because they:
-
-- Explain what they're doing
-- Handle their own failures
-- Learn from their mistakes
-- Communicate with their operators
-- Improve their own behavior
-
-This isn't science fiction. The primitives exist today. The AI exists today. The only missing piece is the **mindset shift** from reactive debugging to proactive system design.
-
-### The Call to Action
-
-Phyxius offers escape from:
-
-- 3AM pages for known issues
-- Debugging with scattered logs
-- Race conditions that only happen in production
-- Tests that work locally but fail in CI
-- Systems that are opaque and unreliable
-
-The escape hatch is open. The wings are available.
-
-**Hey there. You, running full steam ahead on that maze. There's another way to do this.**
+These aren't bugs. They're the honest boundary of what the substrate enforces versus what user-code discipline still owns. Calling it out matters — a promise the code doesn't deliver is how a project loses credibility.
 
 ---
 
-## Conclusion: The God Who Gives Escape
+## VI. Earned principles
 
-Phyxius isn't about replacing one tool with another. It's about **transcending the entire paradigm** of systems that we operate but don't understand.
+The principles that actually drive the project, grounded in what the code does.
 
-The vision is systems that:
+### 1. Correctness over convenience
 
-- Tell you what they're trying to accomplish
-- Show you exactly what happened
-- Handle failures gracefully
-- Learn from their experiences
-- Communicate in human terms
-- Work reliably from localhost to global scale
+A foot-gun dressed as convenience isn't convenient. We refuse to ship defaults that let users skip stability decisions. The discomfort of an explicit `retry.none()` is cheaper than the cost of accidental missing retries in production.
 
-This isn't theory. This is **battle-tested architecture from other ecosystems**, adapted to JavaScript with love and scars.
+### 2. Composition over configuration
 
-We're standing on the shoulders of giants:
+Small primitives you assemble. No framework lifecycle, no global registry, no surprise behavior. `createApp` is a composition, not a container. Every framework method is a documented wiring — the source reads as "here's how you'd have written it by hand."
 
-- **Erlang's** supervision trees
-- **Haskell's** structured concurrency
-- **Go's** context propagation
-- **Clojure's** immutable atoms
-- **Datomic's** append-only architecture
+### 3. The substrate teaches itself
 
-The pieces exist. The knowledge exists. The only thing missing is the **will to escape the maze**.
+When a new primitive fits the existing shape cleanly, the substrate is right. When it almost-fits, the substrate is one concept short of what it wanted to be — and the fix is to lift the missing concept into the substrate, not to force the extension. This has happened twice so far (Connector, Migration). Each made the whole system stronger.
 
-Phyxius offers that escape. Not from work, but from **pointless work**. From debugging race conditions that shouldn't exist. From 3AM pages that could resolve themselves. From building systems we can't understand.
+### 4. Built for ourselves first
 
-**Take the wings. Leave the maze behind.**
+Express integration is a non-goal. Framework compatibility is a non-goal. Mass adoption is a non-goal. We build for the operators we've been. If those abstractions also serve others, good — but we don't write a single line thinking about hypothetical downstream users.
+
+### 5. Don't claim what you haven't built
+
+Versions of this codex used to claim LLM-enhanced ops, self-healing systems, the death of Datadog, and race-free concurrency by construction. Some of those are directional; some are marketing bravado; none belong in a document that describes the system. This version separates the earned from the aspirational, and labels the seam clearly.
 
 ---
 
-_"The god who gives escape" - Phyxius offers deliverance from the assumption that software must be painful, unreliable, and opaque. It offers flight above the complexity that keeps us crawling through debugging sessions and production incidents._
+## VII. The horizon
 
-_This is revolution disguised as a utility library._
+Not promises. Not roadmap. Honest directions the substrate is pointing.
+
+- **Fleet-backed stores** for migrations — `@phyxiusjs/migration-pg` is the first target. Postgres row-level CAS for `PhaseStore`, a `phyxius_events` table for `JournalStore`. v0.2 of migration.
+- **Shadow-diff evidence variant** — ~30 lines of helper over `journalWindow` + a small strategy-package addition to wire its events into the handler journal. ~3-4 hours of focused work. Unlocks fully-automatic versioned rollouts.
+- **Provider-specific connectors** — Stripe, Slack, OpenAI, Twilio. Each is a curated observability product for that provider, layered on the HTTP mapping helpers.
+- **Fleet-aware primitives** — once `JournalStore` / `PhaseStore` exist, distributed circuit breakers, fleet-wide rate limits, and feature flags with evidence gating all compose naturally onto them. One pattern, multiple applications.
+- **LLM-assisted incident narration** — the journal's shape is already right for it. Needs a consumer that reads the event stream and produces summaries. Open question whether it ships as a Phyxius package or as a separate tool.
+
+The discipline: build the fleet-store abstractions when the migration primitive actually needs them at scale. Build the provider connectors when a real use case demands one. Build the LLM narrator when someone's willing to operate it in production.
+
+The substrate is proving itself. The rest is patience.
 
 ---
 
-**Document Version**: 1.0  
-**Last Updated**: 2025-01-23  
-**Author**: The collective understanding of Phyxius philosophy and architecture  
-**Purpose**: Complete knowledge transfer for future development and onboarding
+_"The god who gives escape."_ Deliverance from the assumption that software must be painful, unreliable, and opaque — when the invariants are right and the primitives are small, it doesn't have to be.
+
+---
+
+**Document version:** 2.0
+**Last updated:** 2026-04-24
+**Scope:** What Phyxius currently is. What it is not. Where it's pointing.
