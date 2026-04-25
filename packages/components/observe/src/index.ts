@@ -1,16 +1,23 @@
 import { context } from "@phyxiusjs/context";
 
-// ── Pending field declarations ──────────────────────────────────────────────
+// ── Field specs — the schema-level vocabulary ──────────────────────────────
 //
-// These are "thunks" — you declare them with a type but no key; the key is
-// resolved when you pass them through `observe.fields({ ... })`. The tagged
-// `__kind` field drives runtime dispatch; the phantom type fields carry the
-// generic through to the resolved handle.
+// `FieldSpec`, `NumericFieldSpec`, and `ArrayFieldSpec` are what
+// `observe.field()`, `observe.number()`, and `observe.array()` return.
+// They carry a type but no key — the key is resolved when you pass the
+// spec bag through `observe.fields({ ... })`, which uses the property
+// names of the bag as the keys.
 //
-// Every field has a `__tier` — either `"core"` (always captured + shipped,
-// subject to sampling) or `"extra"` (captured in-scope but only serialized
-// when the runtime opts in). Extras are the breadcrumbs that matter during
-// debugging but aren't worth the log-bill in prod.
+// These types are public because they appear in the inferred return type
+// of `observe.fields(...)`. Consumers who export field bags from their
+// own packages with `declaration: true` need the spec types to be
+// nameable; you'll rarely write them by hand, but they're part of the
+// API surface for that reason.
+//
+// Every spec has a `__tier` — either `"core"` (always captured + shipped,
+// subject to sampling) or `"extra"` (captured in-scope but only
+// serialized when the runtime opts in). Extras are the breadcrumbs that
+// matter during debugging but aren't worth the log-bill in prod.
 
 /**
  * Field tier. `"core"` = always captured, always shipped through the
@@ -19,24 +26,46 @@ import { context } from "@phyxiusjs/context";
  */
 export type FieldTier = "core" | "extra";
 
-interface PendingValueField<T> {
+/**
+ * The spec returned by `observe.field<T>()` and `observe.extra<T>()`.
+ * Carries the value type for inference; the runtime methods (`set` /
+ * `get` / `has` / `delete`) are added by `observe.fields({ ... })`,
+ * which resolves the spec into a typed handle.
+ *
+ * You rarely write this by hand — `observe.field<T>()` produces it. It's
+ * exported because the inferred return type of `observe.fields(...)`
+ * names it, and downstream packages with `declaration: true` need every
+ * type in their declarations to have a public name.
+ */
+export interface FieldSpec<T> {
   readonly __kind: "value";
   readonly __tier: FieldTier;
   readonly __type?: T;
 }
 
-interface PendingNumericField {
+/**
+ * The spec returned by `observe.number()` and `observe.extraNumber()`.
+ * Resolves to a `NumericObserveField` (with `.inc()`) when passed
+ * through `observe.fields({ ... })`.
+ */
+export interface NumericFieldSpec {
   readonly __kind: "number";
   readonly __tier: FieldTier;
 }
 
-interface PendingArrayField<T> {
+/**
+ * The spec returned by `observe.array<T>()` and `observe.extraArray<T>()`.
+ * Resolves to an `ArrayObserveField<T>` (with `.push(value)`) when
+ * passed through `observe.fields({ ... })`.
+ */
+export interface ArrayFieldSpec<T> {
   readonly __kind: "array";
   readonly __tier: FieldTier;
   readonly __element?: T;
 }
 
-type AnyPendingField = PendingValueField<unknown> | PendingNumericField | PendingArrayField<unknown>;
+/** Any field spec. Useful as a constraint for generic schema types. */
+export type AnyFieldSpec = FieldSpec<unknown> | NumericFieldSpec | ArrayFieldSpec<unknown>;
 
 // ── Handle types (what call sites actually use) ─────────────────────────────
 
@@ -75,11 +104,11 @@ export interface ArrayObserveField<T> extends ObserveField<T[]> {
 // ── Resolver types ──────────────────────────────────────────────────────────
 
 type ResolveField<P> =
-  P extends PendingValueField<infer T>
+  P extends FieldSpec<infer T>
     ? ObserveField<T>
-    : P extends PendingNumericField
+    : P extends NumericFieldSpec
       ? NumericObserveField
-      : P extends PendingArrayField<infer T>
+      : P extends ArrayFieldSpec<infer T>
         ? ArrayObserveField<T>
         : never;
 
@@ -87,7 +116,7 @@ type ResolveField<P> =
  * The typed handle bag returned by `observe.fields({ ... })`. Keys match the
  * property names of the schema; each value is the resolved handle.
  */
-export type ResolvedFields<S extends Record<string, AnyPendingField>> = {
+export type ResolvedFields<S extends Record<string, AnyFieldSpec>> = {
   readonly [K in keyof S]: ResolveField<S[K]>;
 };
 
@@ -96,11 +125,11 @@ export type ResolvedFields<S extends Record<string, AnyPendingField>> = {
  * that need to type-check the accumulated data (Journal entries, reports, etc.)
  */
 export type InferShape<S> = {
-  [K in keyof S]: S[K] extends PendingValueField<infer T>
+  [K in keyof S]: S[K] extends FieldSpec<infer T>
     ? T
-    : S[K] extends PendingNumericField
+    : S[K] extends NumericFieldSpec
       ? number
-      : S[K] extends PendingArrayField<infer T>
+      : S[K] extends ArrayFieldSpec<infer T>
         ? T[]
         : S[K] extends ObserveField<infer T>
           ? T
@@ -175,14 +204,14 @@ function makeArrayHandle<T>(key: string, tier: FieldTier): ArrayObserveField<T> 
   };
 }
 
-function makeHandle(key: string, pending: AnyPendingField): unknown {
-  switch (pending.__kind) {
+function makeHandle(key: string, spec: AnyFieldSpec): unknown {
+  switch (spec.__kind) {
     case "value":
-      return makeValueHandle(key, pending.__tier);
+      return makeValueHandle(key, spec.__tier);
     case "number":
-      return makeNumericHandle(key, pending.__tier);
+      return makeNumericHandle(key, spec.__tier);
     case "array":
-      return makeArrayHandle(key, pending.__tier);
+      return makeArrayHandle(key, spec.__tier);
   }
 }
 
@@ -221,17 +250,17 @@ export const observe = {
   // an operator reconstructs the story from at 3am.
 
   /** Declare a core typed-value field. Resolved by `observe.fields()`. */
-  field<T>(): PendingValueField<T> {
+  field<T>(): FieldSpec<T> {
     return { __kind: "value", __tier: "core" };
   },
 
   /** Declare a core numeric field (gains `.inc()`). */
-  number(): PendingNumericField {
+  number(): NumericFieldSpec {
     return { __kind: "number", __tier: "core" };
   },
 
   /** Declare a core array field (gains `.push()`). */
-  array<T>(): PendingArrayField<T> {
+  array<T>(): ArrayFieldSpec<T> {
     return { __kind: "array", __tier: "core" };
   },
 
@@ -244,30 +273,30 @@ export const observe = {
   // the same handler starts (or stops) emitting them.
 
   /** Declare an extra typed-value field — captured always, shipped on opt-in. */
-  extra<T>(): PendingValueField<T> {
+  extra<T>(): FieldSpec<T> {
     return { __kind: "value", __tier: "extra" };
   },
 
   /** Declare an extra numeric field (gains `.inc()`). */
-  extraNumber(): PendingNumericField {
+  extraNumber(): NumericFieldSpec {
     return { __kind: "number", __tier: "extra" };
   },
 
   /** Declare an extra array field (gains `.push()`). */
-  extraArray<T>(): PendingArrayField<T> {
+  extraArray<T>(): ArrayFieldSpec<T> {
     return { __kind: "array", __tier: "extra" };
   },
 
   /**
-   * Resolve a schema of pending field declarations into typed handles, keyed
-   * by the property names of the schema object.
+   * Resolve a schema of field specs into typed handles, keyed by the
+   * property names of the schema object.
    */
-  fields<S extends Record<string, AnyPendingField>>(schema: S): ResolvedFields<S> {
+  fields<S extends Record<string, AnyFieldSpec>>(schema: S): ResolvedFields<S> {
     const result: Record<string, unknown> = {};
     for (const key of Object.keys(schema)) {
-      const pending = schema[key];
-      if (pending) {
-        result[key] = makeHandle(key, pending);
+      const spec = schema[key];
+      if (spec) {
+        result[key] = makeHandle(key, spec);
       }
     }
     return result as ResolvedFields<S>;
@@ -283,7 +312,7 @@ export const observe = {
    * `observe.extra*()`, which is what runtimes do in production when the
    * verbose-debug flag is off.
    */
-  snapshot<S extends Record<string, AnyPendingField>>(
+  snapshot<S extends Record<string, AnyFieldSpec>>(
     fields: ResolvedFields<S>,
     options: { includeExtra?: boolean } = {},
   ): Partial<InferShape<S>> {

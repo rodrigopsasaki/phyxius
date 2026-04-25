@@ -127,12 +127,14 @@ Any nested function can contribute. At the end, **one** journal entry contains t
 ### Declarations
 
 ```ts
-observe.field<T>(): PendingValueField<T>     // .set / .get / .has / .delete
-observe.number(): PendingNumericField        // + .inc(amount?)
-observe.array<T>(): PendingArrayField<T>     // + .push(value)
+observe.field<T>(): FieldSpec<T>          // .set / .get / .has / .delete
+observe.number(): NumericFieldSpec        // + .inc(amount?)
+observe.array<T>(): ArrayFieldSpec<T>     // + .push(value)
 ```
 
-Pending fields are declaration-only — they carry the type but not the key. The key comes from the property name when you resolve the schema.
+Field specs are declaration-only — they carry the type but not the key. The key comes from the property name when you resolve the schema.
+
+`FieldSpec`, `NumericFieldSpec`, and `ArrayFieldSpec` are public types so the inferred return type of `observe.fields(...)` names only public types — important for downstream packages that emit declarations (`tsconfig.json`'s `declaration: true`) and want to export their own field bags. You'll rarely write the spec types by hand; the constructors above produce them.
 
 ### Resolution
 
@@ -140,7 +142,7 @@ Pending fields are declaration-only — they carry the type but not the key. The
 observe.fields(schema): ResolvedFields<typeof schema>
 ```
 
-Takes a record of pending field declarations, returns a record of typed handles keyed by the same property names.
+Takes a record of field specs, returns a record of typed handles keyed by the same property names.
 
 ### Snapshot
 
