@@ -94,7 +94,7 @@ await app.start();
 app.installSignalHandlers();
 ```
 
-That's a supervised, timeout-bounded, retry-aware, circuit-broken, drift-tracked, shutdown-coordinated process. The framework wires the Drain + Stats + Config for you. You wire the domain.
+That's a supervised, budget-bounded, retry-aware, circuit-broken, drift-tracked, shutdown-coordinated process. The framework wires the Drain + Stats + Config for you. You wire the domain.
 
 ---
 

@@ -1,5 +1,8 @@
 export { defineHandler, spawn } from "./handler.js";
 
+// Named, reusable stability decisions — vocabulary instead of literals.
+export { stability, type StabilityPolicy } from "./stability.js";
+
 export type {
   // Spec
   HandlerSpec,

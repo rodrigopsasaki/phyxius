@@ -50,7 +50,7 @@ app.route({ method: "POST", path: "/orders", handler: processOrder });
 await app.start();
 ```
 
-That's a supervised, timeout-bounded, retry-aware, circuit-broken, backpressure-shaped HTTP endpoint — with deterministic sampling, rolling percentile stats, hot-reloadable config, and one structured journal entry per invocation. **Every one of those guarantees is the same value type you'd read in your logs next Tuesday at 3am**, because they all came from the same spec.
+That's a supervised, budget-bounded, retry-aware, circuit-broken, backpressure-shaped HTTP endpoint — with deterministic sampling, rolling percentile stats, hot-reloadable config, and one structured journal entry per invocation. **Every one of those guarantees is the same value type you'd read in your logs next Tuesday at 3am**, because they all came from the same spec.
 
 Put the same `processOrder` behind `app.schedule(...)` or `app.consume(...)` instead, and you'd get the exact same guarantees with the exact same journal shape. The transport is a small translator; the spec is where the work lives.
 
@@ -266,7 +266,7 @@ The framework is one composition of the primitives. Nothing stops you from dropp
 
 | Package                                                 | What it is                                                                                                             |
 | ------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
-| [`@phyxiusjs/handler`](packages/components/handler)     | **The universal work-unit.** Validated, supervised, timing-bounded, retry-aware, breaker-guarded, backpressure-shaped. |
+| [`@phyxiusjs/handler`](packages/components/handler)     | **The universal work-unit.** Validated, supervised, budget-bounded, retry-aware, breaker-guarded, backpressure-shaped. |
 | [`@phyxiusjs/connector`](packages/components/connector) | 3rd-party integration primitive. `ConnectorSpec extends HandlerSpec` + typed `ConnectorError` + HTTP deepdive.         |
 | [`@phyxiusjs/migration`](packages/components/migration) | Evidence-gated expand-and-contract. Phases require proof to advance; wrong-until-proven-otherwise by construction.     |
 | [`@phyxiusjs/db`](packages/components/db)               | Database boundary. Transaction-as-context, typed errors, driver-agnostic.                                              |

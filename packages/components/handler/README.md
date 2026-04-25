@@ -108,7 +108,74 @@ interface HandlerSpec<TInput, TOutput, TFields> {
 }
 ```
 
-This is the opposite of frameworks that hide decisions in defaults. You can't forget a timeout. You can't "add retries later." The primitive demands an answer, and the answer can be "none" — but you have to _say_ it.
+This is the opposite of frameworks that hide decisions in defaults. You can't forget a budget. You can't "add retries later." The primitive demands an answer, and the answer can be "none" — but you have to _say_ it.
+
+---
+
+## Named stability policies
+
+The "no non-decision" rule keeps the type honest. But explicitness has a long-run failure mode of its own: in a year, two hundred handlers all carry `timeout: ms(5_000), retry.exponential({ maxAttempts: 3, initialDelay: ms(200) }), cb.policy({ ... })` because they're all "interactive HTTP requests" and that's what's right for that workload. The rule held up — no handler defaulted anything — but the **intent has been smeared across two hundred sites**. A reader looking at any single handler can't tell whether the literal is "the standard interactive timeout" or "a deliberate domain-specific choice."
+
+`stability.policy` puts the meaning back. Declare archetypes once, named after what they mean, and spread them at the handler call site:
+
+```ts
+import { ms } from "@phyxiusjs/clock";
+import { cb, defineHandler, retry, stability } from "@phyxiusjs/handler";
+
+// Vocabulary, declared once.
+export const interactiveHttp = stability.policy({
+  timeout: ms(2_000),
+  concurrency: { max: 50, queueSize: 200, backpressure: "reject" },
+  retry: retry.none(),
+  circuitBreaker: cb.policy({ failureThreshold: 20, resetTimeout: ms(30_000) }),
+});
+
+export const idempotentProviderWrite = stability.policy({
+  timeout: ms(10_000),
+  concurrency: { max: 20, queueSize: 100, backpressure: "reject" },
+  retry: retry.exponential({ maxAttempts: 5, initialDelay: ms(500) }),
+  circuitBreaker: cb.policy({ failureThreshold: 10, resetTimeout: ms(30_000) }),
+});
+
+// Spread at the call site — the handler still declares its full
+// stability surface (the rule is preserved at the type level), but
+// the declaration carries a name.
+defineHandler({
+  ...interactiveHttp,
+  name: "user.lookup",
+  input,
+  output,
+  fields,
+  run,
+});
+
+defineHandler({
+  ...idempotentProviderWrite,
+  name: "stripe.refund",
+  input,
+  output,
+  fields,
+  run,
+});
+```
+
+The two practical effects:
+
+- **One source of truth.** When the team decides interactive should retry once instead of never, you change `interactiveHttp` and every site that uses it updates. No grep-and-replace across two hundred files.
+- **Decisions become semantic.** Reading a handler that spreads `interactiveHttp` tells you what archetype it is. Reading a four-line literal tells you which fields were typed; the meaning has to be inferred.
+
+The escape hatch is unchanged: a per-handler override after the spread is just a later property assignment, so "this one handler is the same archetype but needs a longer budget" is still legible:
+
+```ts
+defineHandler({
+  ...interactiveHttp,
+  timeout: ms(8_000), // override — explicitly different
+  name: "user.batch-import",
+  // ...
+});
+```
+
+The decision stays explicit. Ceremony stops accumulating.
 
 ---
 

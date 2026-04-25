@@ -158,7 +158,7 @@ Phyxius is opinionated. Opinionated only works if the claims match the code. Her
 
 ### Narrower than the language might imply
 
-- **"Timeout-bounded."** Budgets are declared; `AbortSignal` is passed to `run`. Honoring it is **cooperative**. User code that doesn't thread `signal` into `fetch` / streams / subprocess doesn't get interrupted when the budget expires. Every adapter doc should say this clearly.
+- **"Budget-bounded" still requires cooperation.** The handler declares a `Budget` (deadline + AbortSignal) and threads the signal into `run`. Honoring it is **cooperative** — Node has no preemption. User code that doesn't pass `signal` into `fetch` / streams / subprocess won't be interrupted when the deadline expires. The substrate gives you the budget; user code has to honor it. We use "budget" in conceptual prose for this reason; "timeout" is reserved for the API field name and the `TIMEOUT` outcome variant.
 - **"Race conditions eliminated by construction."** Atom / Journal / Process eliminate races at primitive boundaries. User code that composes primitives incorrectly can still race.
 - **"Resource leaks cannot happen."** The Resource primitive guarantees cleanup **if used**. Code that doesn't wrap acquisitions can still leak.
 
@@ -189,6 +189,18 @@ Express integration is a non-goal. Framework compatibility is a non-goal. Mass a
 ### 5. Don't claim what you haven't built
 
 Versions of this codex used to claim LLM-enhanced ops, self-healing systems, the death of Datadog, and race-free concurrency by construction. Some of those are directional; some are marketing bravado; none belong in a document that describes the system. This version separates the earned from the aspirational, and labels the seam clearly.
+
+### 6. `HandlerError` stays infrastructure-shaped
+
+The `HandlerError` union describes how **the substrate failed to deliver a result**: `TIMEOUT` (budget expired), `BACKPRESSURE_REJECT` (queue full), `CIRCUIT_OPEN` (breaker tripped), `RETRY_EXHAUSTED` (all attempts spent), `HANDLER_NOT_RUNNING` (lifecycle), `HANDLER_ERROR` (run threw), `VALIDATION_ERROR` (input or output failed validation), `DROPPED` (backpressure policy dropped this work).
+
+**Domain outcomes don't belong here.** Payment declined, account suspended, inventory unavailable, user not found — these are part of `TOutput`, expressed as a domain-specific `Result<Success, DomainFailure>` if the caller needs to pattern-match on them. They are not `HandlerError`.
+
+The line is load-bearing. The discriminated `HandlerError` union is what makes retry policies deterministic, dashboards groupable, and pagers fire on the right things. If domain failure modes start migrating into it, the union becomes a junk drawer and every downstream consumer gets fuzzier.
+
+A simple test: **would the substrate take a different action depending on this failure mode?** Retry, hold the breaker open, route to DLQ, abort the invocation cleanly. If yes, it might belong in `HandlerError`. If the only consumer is application code that knows what to do, it belongs in `TOutput`.
+
+The same line applies to `ConnectorError`: it describes how the **provider** failed (`UNAUTHORIZED`, `RATE_LIMITED`, `PROVIDER_ERROR`), not what the provider's domain answer was. "Stripe charge declined" is a connector success that returned a domain failure, not a `ConnectorError`.
 
 ---
 
