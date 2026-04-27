@@ -1,6 +1,6 @@
 {
   "name": "@phyxiusjs/db-pg",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Postgres driver for @phyxiusjs/db — maps pg error codes to the typed DbError union, wraps pg.Pool as the connection source",
   "type": "module",
   "main": "./dist/index.js",

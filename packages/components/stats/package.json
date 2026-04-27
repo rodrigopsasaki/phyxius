@@ -1,6 +1,6 @@
 {
   "name": "@phyxiusjs/stats",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Poor-man's APM — rolling percentiles, error rates, threshold alerts composed from Journal + Atom + Clock",
   "type": "module",
   "main": "./dist/index.js",

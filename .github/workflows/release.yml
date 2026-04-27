@@ -10,20 +10,24 @@ concurrency:
 permissions:
   contents: write
   pull-requests: write
+  id-token: write # OIDC for npm Trusted Publishing
 
 jobs:
   release:
     name: Version & Publish
     runs-on: ubuntu-latest
 
-    # Release is deliberately disabled while we iterate on the substrate.
-    # Every push in an unfinished codebase publishing to npm is the exact
-    # opposite of the "we own the timing of when this goes public" stance.
+    # Release stays gated until the bootstrap publish lands and trusted
+    # publishing is configured on each @phyxiusjs/* package on npmjs.com.
     #
-    # To enable when ready:
-    #   1. Create an automation-scoped npm token for @phyxiusjs/*.
-    #   2. Add it as repo secret NPM_TOKEN (Settings → Secrets → Actions).
-    #   3. Change the condition below to `true` (or just delete this line).
+    # Sequence to enable:
+    #   1. Bootstrap publish locally with `pnpm -r publish --access public`
+    #      after `npm login --auth-type=web`. Creates all packages on npm.
+    #   2. Configure Trusted Publisher on each package on npmjs.com,
+    #      pointing at this repo + this workflow file. (Or use the
+    #      `npm trust` CLI on npm >= 11.10.0.)
+    #   3. Delete the `if: false` line below. The job switches to OIDC —
+    #      no NPM_TOKEN needed; provenance attestations are automatic.
     if: false
 
     steps:
@@ -33,12 +37,14 @@ jobs:
           fetch-depth: 0
 
       - name: Install pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@v6
 
       - name: Setup Node.js
         uses: actions/setup-node@v5
         with:
-          node-version: 22
+          # Node 24 ships with npm CLI >= 11.5.1, required for Trusted
+          # Publishing OIDC mint at publish time.
+          node-version: 24
           cache: pnpm
           registry-url: https://registry.npmjs.org
 
@@ -60,5 +66,3 @@ jobs:
           commit: "chore: version packages"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

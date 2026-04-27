@@ -1,6 +1,6 @@
 {
   "name": "@phyxiusjs/process",
-  "version": "0.0.1",
+  "version": "0.2.0",
   "type": "module",
   "description": "Single-threaded, message-driven process with deterministic time and supervision",
   "main": "./dist/index.js",
