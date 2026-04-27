@@ -17,18 +17,11 @@ jobs:
     name: Version & Publish
     runs-on: ubuntu-latest
 
-    # Release stays gated until the bootstrap publish lands and trusted
-    # publishing is configured on each @phyxiusjs/* package on npmjs.com.
-    #
-    # Sequence to enable:
-    #   1. Bootstrap publish locally with `pnpm -r publish --access public`
-    #      after `npm login --auth-type=web`. Creates all packages on npm.
-    #   2. Configure Trusted Publisher on each package on npmjs.com,
-    #      pointing at this repo + this workflow file. (Or use the
-    #      `npm trust` CLI on npm >= 11.10.0.)
-    #   3. Delete the `if: false` line below. The job switches to OIDC —
-    #      no NPM_TOKEN needed; provenance attestations are automatic.
-    if: false
+    # Authenticated via npm Trusted Publishing (OIDC). Each @phyxiusjs/*
+    # package on npmjs.com has a trust relationship pointing at this repo
+    # + this workflow file, so the publish step mints a short-lived OIDC
+    # token at runtime — no NPM_TOKEN, no long-lived secret.
+    # Provenance attestations are automatic for public-repo + public-package.
 
     steps:
       - name: Checkout
