@@ -94,6 +94,10 @@ export function createLoader(options?: { clock?: Clock; watchPollIntervalMs?: nu
             };
           })();
 
+      // Hold the fs.watch error (if any) so the stat-polling fallback can
+      // report both failures if it also fails.
+      let watchError: unknown;
+
       // Primary: event-driven `fs.watch` (kqueue on macOS, inotify on Linux,
       // ReadDirectoryChangesW on Windows). No timer latency — changes are
       // pushed as the OS sees them.
@@ -117,7 +121,8 @@ export function createLoader(options?: { clock?: Clock; watchPollIntervalMs?: nu
             // close() can throw if already closed; ignore.
           }
         };
-      } catch {
+      } catch (e) {
+        watchError = e;
         // Fall through to stat-polling fallback below.
       }
 
@@ -129,8 +134,16 @@ export function createLoader(options?: { clock?: Clock; watchPollIntervalMs?: nu
 
       try {
         watchFile(source.path, { interval: watchPollIntervalMs, persistent: false }, handleStatChange);
-      } catch {
-        // Both watchers failed. Caller can still explicitly reload().
+      } catch (statError) {
+        // Both fs.watch and fs.watchFile failed. No watcher is active.
+        // Surface the error so the caller knows the watch is non-functional;
+        // they can still explicitly reload().
+        console.error(
+          `[@phyxiusjs/config] File watchers are inactive for "${source.path}". ` +
+            `fs.watch: ${(watchError as Error)?.message ?? String(watchError)}. ` +
+            `fs.watchFile: ${(statError as Error)?.message ?? String(statError)}. ` +
+            `Call reload() explicitly to refresh configuration.`,
+        );
         return () => {};
       }
 
