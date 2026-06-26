@@ -17,3 +17,4 @@ export type {
   AppStatus,
   CreateAppOptions,
 } from "./types.js";
+export * from "./gate.js";
