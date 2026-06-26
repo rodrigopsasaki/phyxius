@@ -110,8 +110,13 @@ function parseValue(value: string): unknown {
   // Number (including floats and negative numbers)
   if (/^-?\d+(\.\d+)?$/.test(value)) {
     const num = Number(value);
-    // Check for safe integer range
-    if (!Number.isNaN(num) && Number.isFinite(num)) {
+    // Only coerce when no precision is lost. Past 2^53-1, Number() silently
+    // rounds an integer ("9007199254740993" -> ...992), so a Snowflake / account
+    // id or large epoch-ns set in the environment would be corrupted with no
+    // error and no event. Keep such values as the original string and let a
+    // downstream schema (z.coerce.bigint, a string id) decide, rather than
+    // guessing past the point where guessing is safe. Floats are unchanged.
+    if (Number.isInteger(num) ? Number.isSafeInteger(num) : Number.isFinite(num)) {
       return num;
     }
   }
