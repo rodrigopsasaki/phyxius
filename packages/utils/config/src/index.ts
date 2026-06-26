@@ -27,7 +27,7 @@ export type {
 // Parsers (for advanced use cases)
 export { parseEnv, generateEnvExample } from "./parsers/env.js";
 export { loadFile } from "./parsers/file.js";
-export { resolveGate } from "./parsers/gate.js";
+export { resolveGate, type GateState } from "./parsers/gate.js";
 
 // Loaders (for custom implementations)
 export { createLoader, mergeConfigs, getValueAtPath } from "./loaders.js";
