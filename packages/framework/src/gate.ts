@@ -17,3 +17,5 @@ export function resolveGate(raw: string | undefined): boolean {
   if (raw === undefined) return true;
   return raw.trim().toLowerCase() !== "false";
 }
+
+// Operation gates are read fresh at call time; there is no caching.
