@@ -19,3 +19,5 @@ export function resolveGate(raw: string | undefined): boolean {
 }
 
 // Operation gates are read fresh at call time; there is no caching.
+
+// (the env name and its semantics are owned by the caller passing raw.)
