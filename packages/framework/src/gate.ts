@@ -8,3 +8,5 @@ export function resolveGate(raw: string | undefined): boolean {
   if (raw === undefined) return true;
   return raw.trim().toLowerCase() !== "false";
 }
+
+// resolveGate reads the env value fresh on each call.
