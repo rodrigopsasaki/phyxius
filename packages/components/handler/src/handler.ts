@@ -112,6 +112,28 @@ export async function spawn<TInput, TOutput, TFields>(
   }
   const queue: QueuedWork[] = [];
 
+  // ── Admission control ───────────────────────────────────────────────────
+  //
+  // Whether a fresh invocation may join the work queue. The decision is a
+  // named classification computed in one place from a single consistent read
+  // of `InternalState` — never re-derived from a second `deref()`. Separating
+  // the *classification* (this union) from the *action* (queue mutation +
+  // count accounting) keeps the read-then-act window from spanning an await,
+  // so concurrent `invoke()` calls can't disagree about capacity.
+  //
+  //   reject         — at capacity, backpressure is "reject": no enqueue.
+  //   evict-then-add — at capacity, backpressure is "drop-oldest": drop the
+  //                    front of the queue to make room, then enqueue.
+  //   admit          — below capacity: enqueue directly.
+  type Admission = { readonly kind: "reject" } | { readonly kind: "evict-then-add" } | { readonly kind: "admit" };
+
+  function classifyAdmission(s: InternalState): Admission {
+    const totalInFlight = s.activeCount + s.queuedCount;
+    const capacity = spec.concurrency.max + spec.concurrency.queueSize;
+    if (totalInFlight < capacity) return { kind: "admit" };
+    return spec.concurrency.backpressure === "reject" ? { kind: "reject" } : { kind: "evict-then-add" };
+  }
+
   // ── Internal schema for the journal entry's structured fields ───────────
   //
   // The handler's infrastructure fields are stamped via these typed handles
@@ -412,25 +434,8 @@ export async function spawn<TInput, TOutput, TFields>(
     name: spec.name,
 
     async invoke(input: TInput, meta: InvocationMeta = {}): Promise<Result<TOutput, HandlerError>> {
-      const s = state.deref();
-      if (s.status !== "running") {
+      if (state.deref().status !== "running") {
         return err({ type: "HANDLER_NOT_RUNNING" });
-      }
-
-      // Admission control: combined active + queued against queueSize.
-      const totalInFlight = s.activeCount + s.queuedCount;
-      const capacity = spec.concurrency.max + spec.concurrency.queueSize;
-
-      if (totalInFlight >= capacity) {
-        if (spec.concurrency.backpressure === "reject") {
-          return err({ type: "BACKPRESSURE_REJECT" });
-        }
-        // drop-oldest: evict the front of the queue.
-        const dropped = queue.shift();
-        if (dropped) {
-          dropped.resolve(err({ type: "DROPPED" }));
-          state.swap((prev) => ({ ...prev, queuedCount: prev.queuedCount - 1 }));
-        }
       }
 
       return new Promise<Result<TOutput, HandlerError>>((resolve) => {
@@ -441,8 +446,36 @@ export async function spawn<TInput, TOutput, TFields>(
           resolve,
         };
 
-        queue.push(work);
-        state.swap((prev) => ({ ...prev, queuedCount: prev.queuedCount + 1 }));
+        // Classify admission and apply the queue mutation in one atomic swap:
+        // the decision is read from the same `current` snapshot it mutates, so
+        // a concurrent invoke() can't slip between the capacity check and the
+        // push. The queue side-effects are the named decision's consequence.
+        let admission: Admission = { kind: "reject" };
+        state.swap((current) => {
+          admission = classifyAdmission(current);
+          switch (admission.kind) {
+            case "reject":
+              return current;
+            case "evict-then-add": {
+              // drop-oldest: evict the front, then take its slot.
+              const dropped = queue.shift();
+              queue.push(work);
+              if (dropped) {
+                dropped.resolve(err({ type: "DROPPED" }));
+                return current; // -1 evicted, +1 admitted: net queuedCount unchanged
+              }
+              return { ...current, queuedCount: current.queuedCount + 1 };
+            }
+            case "admit":
+              queue.push(work);
+              return { ...current, queuedCount: current.queuedCount + 1 };
+          }
+        });
+
+        if (admission.kind === "reject") {
+          resolve(err({ type: "BACKPRESSURE_REJECT" }));
+          return;
+        }
 
         tryDispatch();
       });

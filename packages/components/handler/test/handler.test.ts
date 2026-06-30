@@ -418,6 +418,56 @@ describe("@phyxiusjs/handler", () => {
 
       await handler.stop();
     });
+
+    it("should DROP the oldest queued work when full under drop-oldest", async () => {
+      const { runtime, clock } = setup();
+
+      const slow = defineHandler({
+        name: "slow-drop",
+        input: z.any(),
+        output: z.any(),
+        fields: echoFields,
+        timeout: ms(10_000),
+        concurrency: { max: 1, queueSize: 1, backpressure: "drop-oldest" },
+        retry: retry.none(),
+        circuitBreaker: cb.none(),
+        run: async ({ clock: c }) => {
+          await c.sleep(ms(1000));
+          return {};
+        },
+      });
+
+      const handler = await spawn(slow, runtime);
+
+      // Capacity is max(1) + queueSize(1) = 2. The first starts executing, the
+      // second sits queued. The third evicts the second (DROPPED) and takes
+      // its slot — admission classified once, queue accounting stays consistent.
+      const p1 = handler.invoke({});
+      const p2 = handler.invoke({});
+
+      // Let the first one start executing so p2 is the lone queued item.
+      await Promise.resolve();
+      await Promise.resolve();
+
+      const p3 = handler.invoke({});
+
+      const r2 = await p2;
+      expect(isErr(r2)).toBe(true);
+      if (isErr(r2)) expect(r2.error.type).toBe("DROPPED");
+
+      // queuedCount must not have drifted: one evicted, one admitted.
+      expect(handler.getMetrics().queuedCount).toBe(1);
+
+      // Drain the survivors so the handler can stop cleanly.
+      clock.advanceBy(ms(1000));
+      await clock.flush();
+      await p1;
+      clock.advanceBy(ms(1000));
+      await clock.flush();
+      await p3;
+
+      await handler.stop();
+    });
   });
 
   describe("HANDLER_NOT_RUNNING", () => {
