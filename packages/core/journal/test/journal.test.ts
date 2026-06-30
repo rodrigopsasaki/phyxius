@@ -169,6 +169,36 @@ describe("Journal", () => {
 
       journal.append("trigger");
     });
+
+    it("should emit a named reentrancy event when a subscriber appends synchronously", () => {
+      const journal = new Journal({
+        clock,
+        idGenerator,
+        emit: (event) => events.push(event),
+      });
+
+      // A subscriber that re-appends without deferring. The append is refused
+      // and the refusal surfaces as its own observable state, not as a generic
+      // subscriber error and not as a silently swallowed throw.
+      journal.subscribe(() => {
+        journal.append("reentrant");
+      });
+
+      journal.append("trigger");
+
+      const reentrancyEvent = events.find((e) => e.type === "journal:subscriber:reentrancy");
+      expect(reentrancyEvent).toBeDefined();
+      expect(reentrancyEvent?.id).toBe("id-2");
+
+      // It must NOT be misclassified as an ordinary subscriber error.
+      expect(events.some((e) => e.type === "journal:subscriber:error")).toBe(false);
+
+      // The trigger entry still landed; the journal returned to idle so the
+      // next append is admitted.
+      expect(journal.size()).toBe(1);
+      journal.append("after");
+      expect(journal.size()).toBe(2);
+    });
   });
 
   describe("overflow policies", () => {

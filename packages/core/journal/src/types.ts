@@ -89,6 +89,16 @@ export type JournalEvent =
       at: Instant;
     }
   | {
+      // A subscriber tried to append synchronously while the journal was
+      // notifying. The append was refused (JournalReentrancyError) and the
+      // subscriber should defer instead. Emitted distinctly from a generic
+      // subscriber error so this reentrancy is observable, not swallowed.
+      type: "journal:subscriber:reentrancy";
+      seq: number;
+      id: string;
+      at: Instant;
+    }
+  | {
       type: "journal:clear";
       previousSize: number;
       at: Instant;

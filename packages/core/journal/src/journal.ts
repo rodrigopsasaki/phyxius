@@ -14,6 +14,19 @@ import { JournalReentrancyError, JournalOverflowError } from "./types.js";
 const DEFAULT_MAX_ENTRIES = 10_000;
 const DEFAULT_OVERFLOW: "drop_oldest" | "error" = "drop_oldest";
 
+/**
+ * Where the journal is in its append/notify cycle. Naming these two states is
+ * the whole point: an append is only legal from `idle`. While `notifying`, the
+ * journal is walking its subscriber set, and a synchronous re-append from inside
+ * a subscriber would corrupt that walk — so it is refused, deliberately, not by
+ * accident of a bare boolean. Subscribers that want to append must defer
+ * (`queueMicrotask`/`setTimeout(0)`) so the append lands once we're `idle` again.
+ */
+type ProcessingState = { readonly kind: "idle" } | { readonly kind: "notifying" };
+
+const IDLE: ProcessingState = { kind: "idle" };
+const NOTIFYING: ProcessingState = { kind: "notifying" };
+
 export class Journal<T> {
   private readonly clock: Clock;
   private readonly idGenerator: IdGenerator;
@@ -32,7 +45,7 @@ export class Journal<T> {
   private firstSequence = 0;
   private nextSequence = 0;
   private subscribers = new Set<Subscriber<T>>();
-  private isProcessingSubscribers = false;
+  private processingState: ProcessingState = IDLE;
   private readonly journalId: string;
   private createdAt;
 
@@ -59,7 +72,10 @@ export class Journal<T> {
   }
 
   append(data: T): JournalEntry<T> {
-    if (this.isProcessingSubscribers) {
+    // Classify first: an append is only admissible from `idle`. A re-append from
+    // inside subscriber dispatch is refused as a named state transition, not as a
+    // side effect of a bare boolean — see ProcessingState.
+    if (this.processingState.kind === "notifying") {
       throw new JournalReentrancyError();
     }
 
@@ -213,24 +229,38 @@ export class Journal<T> {
   private notifySubscribers(entry: JournalEntry<T>): void {
     if (this.subscribers.size === 0) return;
 
-    this.isProcessingSubscribers = true;
+    this.processingState = NOTIFYING;
 
     try {
       for (const subscriber of this.subscribers) {
         try {
           subscriber(entry);
         } catch (error) {
-          this.emit?.({
-            type: "journal:subscriber:error",
-            seq: entry.sequence,
-            id: entry.id,
-            error,
-            at: this.clock.now(),
-          });
+          // A reentrant append is a contract violation by the subscriber, not a
+          // routine subscriber failure: it means the subscriber tried to append
+          // synchronously instead of deferring. Name it as its own event so it
+          // doesn't masquerade as an ordinary `journal:subscriber:error` and so
+          // operators can see the swallowed reentrancy that used to be invisible.
+          this.emit?.(
+            error instanceof JournalReentrancyError
+              ? {
+                  type: "journal:subscriber:reentrancy",
+                  seq: entry.sequence,
+                  id: entry.id,
+                  at: this.clock.now(),
+                }
+              : {
+                  type: "journal:subscriber:error",
+                  seq: entry.sequence,
+                  id: entry.id,
+                  error,
+                  at: this.clock.now(),
+                },
+          );
         }
       }
     } finally {
-      this.isProcessingSubscribers = false;
+      this.processingState = IDLE;
     }
   }
 }
