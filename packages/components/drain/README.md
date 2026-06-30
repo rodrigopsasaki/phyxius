@@ -133,11 +133,11 @@ Drain treats sink errors as **transient by default**. When `sink.write(batch)` t
 
 1. The batch is unshifted back to the head of the buffer.
 2. `drain:error` fires with `{ error, requeued: batch.length }`.
-3. The next flush tick (or manual `flush()`) retries.
+3. The flush enters **backoff** for `backoffMs` — automatic flushes (timer, batch-full) are held until the window elapses, so a persistently-failing sink is retried on a paced schedule, not in a hot requeue loop. A manual `flush()` forces past the backoff (a deliberate operator retry).
 
 If failures persist, the buffer fills. Overflow kicks in per policy. New failures ride on top of old re-queued batches. The operator sees both `drain:error` and `drain:overflow` — the pattern is diagnostic: transient errors show `drain:error` spikes; permanent errors show the pair.
 
-If you need per-sink retry/backoff/DLQ logic, build it into your `Sink` implementation. Drain provides the minimum guarantee — "don't lose data on one throw" — and stays out of your way.
+Backoff is paced by the injected `clock` (deterministic under a ControlledClock). Set `backoffMs: 0` to opt out and retry on the very next tick. If you need richer per-sink retry/DLQ logic, build it into your `Sink` implementation — Drain provides the minimum guarantee ("don't lose data on one throw, don't spin on a dead sink") and stays out of your way.
 
 ---
 
@@ -173,6 +173,7 @@ interface DrainOptions<T> {
   maxBufferSize?: number; // default 10_000
   overflow?: "drop_oldest" | "error"; // default "drop_oldest"
   flushIntervalMs?: Millis; // default 5000, 0 disables
+  backoffMs?: Millis; // hold after a sink failure (default 1000, 0 disables)
   emit?: (event: DrainEvent) => void;
 }
 
@@ -195,7 +196,7 @@ Construction-time validation: `batchSize` and `maxBufferSize` must both be `> 0`
 ## What Drain does NOT do
 
 - **No durability guarantees beyond re-queue.** If Node crashes between flushes, buffered entries are lost. For hard durability, sink to durable storage (disk, SQS, Kafka) and accept the batched-loss window.
-- **No per-sink retry logic.** If you need exponential backoff, DLQ, or circuit breakers specific to a sink, implement them in the sink itself.
+- **No per-sink retry policy.** Drain backs off on failure (a single fixed `backoffMs` hold), but exponential backoff, DLQ, or circuit breakers specific to a sink belong in the sink itself.
 - **No transformation.** Entries flow from Journal to Sink as-is. If you need shape changes (redaction, enrichment), compose a wrapper `Sink<T>`.
 - **No distributed coordination.** Drain is a single-process bridge. Cross-service pipelines are downstream of the sink.
 

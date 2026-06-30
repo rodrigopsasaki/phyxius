@@ -326,6 +326,93 @@ describe("createDrain", () => {
     await drain.stop();
   });
 
+  it("backoff: an automatic flush is held after a failure, then resumes once the window elapses", async () => {
+    const clock = createControlledClock({ initialTime: 0 });
+    const journal = new Journal<TestData>({ clock });
+    const events: DrainEvent[] = [];
+
+    // Fail the first write only; the batch is re-queued and the flush enters
+    // `backoff`. The automatic timer loop must NOT immediately re-fire (that
+    // was the hot requeue loop) — it must wait out the backoff window.
+    let failNextWrite = true;
+    const writes: DrainEntry<TestData>[][] = [];
+    const flakySink: Sink<TestData> = {
+      async write(entries) {
+        if (failNextWrite) {
+          failNextWrite = false;
+          throw new Error("transient");
+        }
+        writes.push([...entries]);
+      },
+    };
+
+    createDrain({
+      journal,
+      sink: flakySink,
+      clock,
+      batchSize: 1, // each append opportunistically flushes
+      flushIntervalMs: ms(100),
+      backoffMs: ms(500),
+      emit: (e) => events.push(e),
+    });
+
+    // Opportunistic flush fires on append, fails, and re-queues into backoff.
+    journal.append({ msg: "a" });
+    await new Promise((r) => setImmediate(r));
+    expect(events.some((e) => e.type === "drain:error")).toBe(true);
+    expect(writes).toHaveLength(0);
+
+    // A timer tick INSIDE the backoff window must not retry — still held.
+    clock.advanceBy(ms(100));
+    await clock.flush();
+    await new Promise((r) => setImmediate(r));
+    expect(writes).toHaveLength(0);
+
+    // Advance past the backoff deadline; the next timer tick retries and the
+    // recovered sink delivers the re-queued batch.
+    clock.advanceBy(ms(500));
+    await clock.flush();
+    await new Promise((r) => setImmediate(r));
+    expect(writes).toHaveLength(1);
+    expect(writes[0]?.[0]?.data.msg).toBe("a");
+  });
+
+  it("backoffMs=0: a failed automatic flush retries on the next tick (old behavior)", async () => {
+    const clock = createControlledClock({ initialTime: 0 });
+    const journal = new Journal<TestData>({ clock });
+
+    let failNextWrite = true;
+    const writes: DrainEntry<TestData>[][] = [];
+    const flakySink: Sink<TestData> = {
+      async write(entries) {
+        if (failNextWrite) {
+          failNextWrite = false;
+          throw new Error("transient");
+        }
+        writes.push([...entries]);
+      },
+    };
+
+    createDrain({
+      journal,
+      sink: flakySink,
+      clock,
+      batchSize: 1,
+      flushIntervalMs: ms(100),
+      backoffMs: ms(0), // opt out — no hold, immediate retry on next tick
+    });
+
+    journal.append({ msg: "a" });
+    await new Promise((r) => setImmediate(r));
+    expect(writes).toHaveLength(0);
+
+    // No backoff window: the very next timer tick retries successfully.
+    clock.advanceBy(ms(100));
+    await clock.flush();
+    await new Promise((r) => setImmediate(r));
+    expect(writes).toHaveLength(1);
+  });
+
   it("should drop_oldest when buffer reaches maxBufferSize (sink stuck)", async () => {
     const clock = createControlledClock({ initialTime: 1000 });
     const journal = new Journal<TestData>({ clock });

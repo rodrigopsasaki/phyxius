@@ -56,6 +56,16 @@ export interface DrainOptions<T> {
   /** Flush on this interval (milliseconds). Set to 0 to disable. Default: 5000. */
   readonly flushIntervalMs?: Millis;
   /**
+   * After a sink write fails, hold new flush attempts for this long before
+   * retrying the (re-queued) batch. This is what makes a persistently-failing
+   * sink back off instead of spinning a hot requeue loop. Set to 0 to retry
+   * immediately (the old behavior). Default: 1000.
+   *
+   * Backoff is paced by the injected `clock`, so it stays deterministic under
+   * a controlled clock — same discipline as `flushIntervalMs`.
+   */
+  readonly backoffMs?: Millis;
+  /**
    * Optional per-entry predicate, applied at ingress (before buffering).
    * Returning `false` drops the entry; `true` lets it through.
    *
@@ -83,6 +93,40 @@ export interface Drain {
   /** Flush remaining entries, cancel timer, unsubscribe from journal. */
   stop(): Promise<void>;
 }
+
+/**
+ * The flush lifecycle, named explicitly instead of inferred from a boolean.
+ *
+ *  - `idle`     — nothing in flight; a flush may start.
+ *  - `flushing` — a batch is being written to the sink right now. No second
+ *    flush may start (the buffer is mid-splice / mid-write).
+ *  - `backoff`  — the last write failed and the batch was re-queued. New flush
+ *    attempts are held until `until`, so a persistently-failing sink can't be
+ *    hammered in a hot requeue loop (the prior failure mode of the bare
+ *    boolean: requeue-at-head → immediate re-flush → throw → repeat).
+ *
+ * The state is a discriminated union so the failure case carries its own
+ * data (`until`) and every reader switches on `kind` instead of decoding a
+ * boolean against the buffer length and the clock.
+ */
+export type FlushState =
+  | { readonly kind: "idle" }
+  | { readonly kind: "flushing" }
+  | { readonly kind: "backoff"; readonly until: Instant };
+
+/**
+ * The classification half of the flush state machine: given the current
+ * state, buffer, and clock, what should happen — with no side effects.
+ *
+ *  - `proceed` — start a flush now.
+ *  - `skip`    — nothing to do (empty buffer, or already flushing, or still
+ *    inside a backoff window). `reason` names which, for legibility.
+ *
+ * Action (`flushBuffer`) consumes this decision; it never re-derives it.
+ */
+export type FlushDecision =
+  | { readonly action: "proceed" }
+  | { readonly action: "skip"; readonly reason: "empty" | "flushing" | "backoff" };
 
 /**
  * Structured events emitted by the drain for observability.
