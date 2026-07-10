@@ -17,7 +17,7 @@ import { observe } from "@phyxiusjs/observe";
 import { ms } from "@phyxiusjs/clock";
 import { z } from "zod";
 
-const app = await createApp({ config: "./phyxius.yaml" });
+const app = await createApp({ config: "./phyxius.json" });
 
 const orderFields = observe.fields({
   customerId: observe.field<string>(),
@@ -79,7 +79,7 @@ The payoff compounds: the same handler runs behind HTTP today and a queue tomorr
 ## What `createApp` actually does
 
 ```ts
-const app = await createApp({ config: "./phyxius.yaml" });
+const app = await createApp({ config: "./phyxius.json" });
 ```
 
 That single line wires up five primitives:
