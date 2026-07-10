@@ -1,4 +1,4 @@
-import type { Budget, Millis } from "@phyxiusjs/clock";
+import type { Budget, Instant, Millis } from "@phyxiusjs/clock";
 import { createAtom, type Atom } from "@phyxiusjs/atom";
 import { context } from "@phyxiusjs/context";
 import { observe } from "@phyxiusjs/observe";
@@ -203,7 +203,7 @@ export async function spawn<TInput, TOutput, TFields>(
           infraFields.__correlationId.set(meta.correlationId);
         }
 
-        const result = await runInvocation(input, meta);
+        const result = await runInvocation(invocationId, startedAt, input, meta);
         return {
           result: result.result,
           attempts: result.attempts,
@@ -256,8 +256,10 @@ export async function spawn<TInput, TOutput, TFields>(
    * attempts when retries were configured).
    */
   async function runInvocation(
+    invocationId: string,
+    startedAt: Instant,
     input: TInput,
-    _meta: InvocationMeta,
+    meta: InvocationMeta,
   ): Promise<{ result: Result<TOutput, HandlerError>; attempts: number }> {
     const parsedInput = validate(spec.input, input);
     if (parsedInput._tag === "Err") {
@@ -271,9 +273,17 @@ export async function spawn<TInput, TOutput, TFields>(
       };
     }
 
-    // One Budget per invocation; retries SHARE it. The budget bounds the
-    // entire operation — if it expires during a retry wait or mid-attempt,
-    // we surface TIMEOUT.
+    // One Budget per invocation; retries SHARE it. Each attempt is raced
+    // against the budget's signal individually (`raceAttempt`), so a
+    // non-cooperative `spec.run` that never settles still surfaces TIMEOUT
+    // the instant the deadline passes — the invocation doesn't wait on a
+    // body that ignores `tools.signal`. Once an attempt loses that race,
+    // `runWithRetry`'s own loop-top / inter-attempt-sleep checks see the
+    // (now aborted) signal and exit without starting another attempt — no
+    // separate cancellation of the retry loop is needed. The raced-away
+    // body keeps running regardless (Node can't preempt it); if it later
+    // settles, that's reported as an orphan-settlement journal entry, never
+    // folded back into this invocation's result.
     const budget: Budget = clock.timeout(spec.timeout);
 
     const tools: HandlerTools = {
@@ -286,12 +296,19 @@ export async function spawn<TInput, TOutput, TFields>(
     let attempts = 0;
 
     const attemptOnce = async (): Promise<TOutput> => {
-      attempts += 1;
-      const breakerResult = await breaker.execute(() => spec.run(parsedInput.value, tools));
-      if (breakerResult._tag === "Err") {
-        throw new CircuitOpenThrown(breakerResult.error);
-      }
-      return breakerResult.value;
+      const attemptNumber = ++attempts;
+
+      const work = (async (): Promise<TOutput> => {
+        const breakerResult = await breaker.execute(() => spec.run(parsedInput.value, tools));
+        if (breakerResult._tag === "Err") {
+          throw new CircuitOpenThrown(breakerResult.error);
+        }
+        return breakerResult.value;
+      })();
+
+      return raceAttempt(work, budget, (outcome) => {
+        reportOrphanSettlement(invocationId, startedAt, meta.source ?? "internal", attemptNumber, outcome);
+      });
     };
 
     let retryResult: Awaited<ReturnType<typeof runWithRetry<TOutput>>>;
@@ -318,18 +335,37 @@ export async function spawn<TInput, TOutput, TFields>(
           };
         case "REJECTED": {
           const e = retryResult.error.error;
+          if (e instanceof BudgetExpiredThrown) {
+            // The attempt lost the per-attempt race against the budget; a
+            // user `shouldRetry` predicate then declined to retry the
+            // resulting error. The root cause is still budget expiry.
+            return {
+              result: err({ type: "TIMEOUT" as const, timeoutMs: spec.timeout }),
+              attempts,
+            };
+          }
           if (e instanceof CircuitOpenThrown) {
-            return { result: err(e.asHandlerError()), attempts: attempts || 1 };
+            return { result: err(e.asHandlerError()), attempts };
           }
           return {
             result: err({ type: "HANDLER_ERROR" as const, cause: e }),
-            attempts: attempts || 1,
+            attempts,
           };
         }
         case "EXHAUSTED": {
           const last = retryResult.error.lastError;
+          if (last instanceof BudgetExpiredThrown) {
+            // The final attempt was still in flight when the budget expired
+            // — classify by root cause (TIMEOUT), not by the fact that it
+            // happened to be the last allowed attempt (RETRY_EXHAUSTED) or a
+            // generic throw (HANDLER_ERROR).
+            return {
+              result: err({ type: "TIMEOUT" as const, timeoutMs: spec.timeout }),
+              attempts,
+            };
+          }
           if (last instanceof CircuitOpenThrown) {
-            return { result: err(last.asHandlerError()), attempts: attempts || 1 };
+            return { result: err(last.asHandlerError()), attempts };
           }
           if (spec.retry.maxAttempts === 1) {
             // retry.none() — single attempt, plain handler error.
@@ -364,6 +400,61 @@ export async function spawn<TInput, TOutput, TFields>(
     }
 
     return { result: ok(validated.value), attempts };
+  }
+
+  /**
+   * Journal the late settlement of an attempt that lost its race against the
+   * budget. Node can't preempt a running promise, so a non-cooperative
+   * `spec.run` keeps executing after the invocation has already settled
+   * TIMEOUT and its concurrency slot has already been freed. This is the
+   * only place that outcome is recorded — it never touches `state` (the
+   * slot was freed once, when the invocation settled) or `work.resolve`
+   * (the caller already has its answer), so there's no way for it to
+   * double-account. Named `${spec.name}.orphan-settlement` — a distinct
+   * bucket from `spec.name` itself — so it doesn't skew that handler's
+   * latency/error-rate stats with an attempt the invocation already
+   * answered for.
+   */
+  function reportOrphanSettlement(
+    invocationId: string,
+    invocationStartedAt: Instant,
+    source: string,
+    attemptNumber: number,
+    outcome: Result<TOutput, unknown>,
+  ): void {
+    const completedAt = clock.now();
+    const baseEvent = {
+      name: `${spec.name}.orphan-settlement`,
+      invocationId,
+      source,
+      startedAt: invocationStartedAt,
+      completedAt,
+      durationMs: completedAt.monoMs - invocationStartedAt.monoMs,
+      attempts: attemptNumber,
+      observed: { timeoutMs: spec.timeout },
+    } as const;
+
+    const event: HandlerEvent =
+      outcome._tag === "Ok"
+        ? { ...baseEvent, outcome: "success" as const }
+        : { ...baseEvent, outcome: "failure" as const, error: describeThrown(outcome.error) };
+
+    // This call runs from inside `raceAttempt`'s `work.then()` handlers — a
+    // fire-and-forget path with no caller awaiting it, so a throw here has
+    // nowhere to land but an unhandled rejection. `journal.append` can throw
+    // (`JournalReentrancyError` mid-subscriber-processing, or
+    // `JournalOverflowError` under an "error" overflow policy), and this
+    // entry is best-effort, late-arriving telemetry about an attempt the
+    // invocation already answered for — its own TIMEOUT entry already
+    // carries the truth that matters. A journal that can't take one more
+    // write must cost us this supplementary event, never the process. Don't
+    // retry the append in the catch — a reentrant or full journal will
+    // reject the retry the same way.
+    try {
+      journal.append(event);
+    } catch {
+      // Dropped, deliberately — see above.
+    }
   }
 
   /**
@@ -499,6 +590,72 @@ export async function spawn<TInput, TOutput, TFields>(
 
 // ── Internals ───────────────────────────────────────────────────────────────
 
+/**
+ * Race a single attempt's work against the Budget's abort signal. If the
+ * budget fires first, the returned promise rejects immediately with
+ * `BudgetExpiredThrown` — the caller (the `runWithRetry` loop, via
+ * `attemptOnce`) sees the attempt settle right at the deadline instead of
+ * hanging on a non-cooperative body.
+ *
+ * `work` keeps running regardless — Node can't preempt a promise mid-flight.
+ * If it later settles, `onOrphanSettle` reports the late outcome exactly
+ * once; this function never resolves/rejects its own returned promise a
+ * second time for it.
+ */
+function raceAttempt<T>(
+  work: Promise<T>,
+  budget: Budget,
+  onOrphanSettle: (outcome: Result<T, unknown>) => void,
+): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    let racedAway = false;
+
+    // reject() here is synchronous with the abort event, while the work
+    // promise's settlement callbacks below are always a microtask later —
+    // so on a tie, the budget loses to work that already settled, never
+    // the reverse. Callers rely on that ordering; it's structural, not
+    // incidental.
+    const onAbort = (): void => {
+      if (racedAway) return;
+      racedAway = true;
+      reject(new BudgetExpiredThrown());
+    };
+
+    if (budget.signal.aborted) {
+      onAbort();
+    } else {
+      budget.signal.addEventListener("abort", onAbort, { once: true });
+    }
+
+    work.then(
+      (value) => {
+        if (!racedAway) {
+          budget.signal.removeEventListener("abort", onAbort);
+          resolve(value);
+          return;
+        }
+        onOrphanSettle(ok(value));
+      },
+      (error) => {
+        if (!racedAway) {
+          budget.signal.removeEventListener("abort", onAbort);
+          reject(error);
+          return;
+        }
+        onOrphanSettle(err(error));
+      },
+    );
+  });
+}
+
+/** Lets the retry loop distinguish a per-attempt budget expiry from a generic throw. */
+class BudgetExpiredThrown extends Error {
+  constructor() {
+    super("Budget expired mid-attempt");
+    this.name = "BudgetExpiredThrown";
+  }
+}
+
 /** Lets the retry loop distinguish breaker-open failures from generic throws. */
 class CircuitOpenThrown extends Error {
   readonly openedAt: number;
@@ -568,4 +725,24 @@ function describeError(error: HandlerError): {
     case "HANDLER_NOT_RUNNING":
       return { type: error.type, message: "Handler is not running" };
   }
+}
+
+/**
+ * Describe an orphaned attempt's late-thrown value for the orphan-settlement
+ * journal entry. The cause is whatever `spec.run` (or the circuit breaker
+ * wrapping it) eventually threw — not a typed `HandlerError`, since the
+ * invocation this attempt belonged to already settled TIMEOUT under a
+ * different classification. Mirrors the `HANDLER_ERROR` case of
+ * `describeError` since that's the closest existing shape.
+ */
+function describeThrown(cause: unknown): { type: "HANDLER_ERROR"; message: string; stack?: string } {
+  if (cause instanceof Error) {
+    const base: { type: "HANDLER_ERROR"; message: string; stack?: string } = {
+      type: "HANDLER_ERROR",
+      message: cause.message,
+    };
+    if (cause.stack) base.stack = cause.stack;
+    return base;
+  }
+  return { type: "HANDLER_ERROR", message: String(cause) };
 }

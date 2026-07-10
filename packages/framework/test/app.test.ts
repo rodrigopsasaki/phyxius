@@ -389,6 +389,71 @@ describe("createApp — observability.observe.include_extra", () => {
   });
 });
 
+// ── Stats threshold alerting ───────────────────────────────────────────────
+
+describe("createApp — stats threshold alerting", () => {
+  // A handler that always fails, so a single invocation drives errorRate to
+  // 1.0 — guaranteed to cross an error_rate threshold of 0.
+  const flakySpec = defineHandler({
+    name: "flaky",
+    input: z.object({ value: z.number() }),
+    output: z.object({ echoed: z.number() }),
+    fields: noopFields,
+    timeout: ms(1_000),
+    concurrency: { max: 4, queueSize: 10, backpressure: "reject" },
+    retry: retry.none(),
+    circuitBreaker: cb.none(),
+    run: async () => {
+      throw new Error("boom");
+    },
+  });
+
+  it("routes a real threshold breach into the journal as a HandlerEvent", async () => {
+    const clock = createControlledClock({ initialTime: 0 });
+    const journal = new Journal<HandlerEvent>({ clock });
+    const app = await createApp({
+      clock,
+      journal,
+      config: {
+        observability: {
+          log_drain: "none",
+          log_sampling: { ratio_of_successful_requests: 1.0, log_all_failures: true },
+          stats: {
+            window_size: 10,
+            thresholds: { flaky: { error_rate: 0 } },
+          },
+          observe: { include_extra: false },
+        },
+      },
+    });
+
+    const handler = await app.use(flakySpec);
+
+    // One failing invocation: errorRate 1.0 > limit 0 → edge-triggered breach.
+    const result = await handler.invoke({ value: 1 });
+    expect(result._tag).toBe("Err");
+
+    // The breach append is deferred to a microtask so it escapes the journal's
+    // subscriber dispatch (stats fires emit from inside it). flush() drains
+    // the microtask so the alert has landed before we assert.
+    await clock.flush();
+
+    const breaches = journal.getSnapshot().entries.filter((e) => e.data.name === "stats:threshold-breached");
+
+    expect(breaches).toHaveLength(1);
+    expect(breaches[0]?.data.outcome).toBe("failure");
+    expect(breaches[0]?.data.source).toBe("stats");
+    expect(breaches[0]?.data.observed).toMatchObject({
+      handler: "flaky",
+      field: "errorRate",
+      value: 1,
+      limit: 0,
+    });
+
+    await app.stop();
+  });
+});
+
 // ── Helpers ──────────────────────────────────────────────────────────────
 
 async function waitUntil(

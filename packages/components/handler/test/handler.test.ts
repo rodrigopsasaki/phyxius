@@ -210,8 +210,8 @@ describe("@phyxiusjs/handler", () => {
   });
 
   describe("TIMEOUT", () => {
-    it("should return TIMEOUT when run exceeds budget", async () => {
-      const { runtime, clock } = setup();
+    it("should return TIMEOUT when run exceeds budget (abort-aware body)", async () => {
+      const { runtime, journal, clock } = setup();
 
       const slow = defineHandler({
         name: "slow",
@@ -222,7 +222,7 @@ describe("@phyxiusjs/handler", () => {
         concurrency: { max: 1, queueSize: 5, backpressure: "reject" },
         retry: retry.none(),
         circuitBreaker: cb.none(),
-        run: async ({ clock: c, signal }) => {
+        run: async (_input, { clock: c, signal }) => {
           // Wait for the budget to abort.
           return new Promise<never>((_, reject) => {
             signal.addEventListener("abort", () => reject(new Error("aborted")));
@@ -243,10 +243,254 @@ describe("@phyxiusjs/handler", () => {
       await new Promise((r) => setImmediate(r));
 
       const result = await pending;
-      // Either TIMEOUT (if retry was aborted) or HANDLER_ERROR (if the work's
-      // own abort handling threw first). Both are acceptable failure modes;
-      // the important thing is failure, not hang.
+      // The invocation's own Result always classifies as TIMEOUT — the
+      // per-attempt race against the budget (see raceAttempt in handler.ts)
+      // settles the invocation itself before the body's own abort handling
+      // can ever turn its rejection into the invocation's answer.
       expect(isErr(result)).toBe(true);
+      if (isErr(result)) expect(result.error.type).toBe("TIMEOUT");
+
+      // The body's own rejection (from its `signal` listener) still lands,
+      // but only as the orphan-settlement for the attempt that lost the
+      // race — never as this invocation's own outcome. Look the entry up
+      // by name rather than by array position: whether the primary entry or
+      // the orphan entry is journaled first is unconstrained microtask
+      // ordering (both fire off the same abort tick), not a signal either
+      // way.
+      const entry = journal.getSnapshot().entries.find((e) => e.data.name === "slow")?.data;
+      expect(entry?.outcome).toBe("failure");
+      expect(entry?.error?.type).toBe("TIMEOUT");
+
+      await handler.stop();
+    });
+
+    it("should settle TIMEOUT at the deadline for a non-cooperative body that never settles", async () => {
+      const { runtime, journal, clock } = setup();
+
+      const wedged = defineHandler({
+        name: "wedged",
+        input: z.any(),
+        output: z.any(),
+        fields: echoFields,
+        timeout: ms(100),
+        concurrency: { max: 1, queueSize: 5, backpressure: "reject" },
+        retry: retry.none(),
+        circuitBreaker: cb.none(),
+        // Never resolves, never rejects, and completely ignores `signal` —
+        // the non-cooperative body the bug report describes (a wedged
+        // socket, a hung query).
+        run: () => new Promise<never>(() => {}),
+      });
+
+      const handler = await spawn(wedged, runtime);
+      const pending = handler.invoke({});
+
+      await Promise.resolve();
+      await Promise.resolve();
+
+      clock.advanceBy(ms(100));
+      await clock.flush();
+
+      const result = await pending;
+      expect(isErr(result)).toBe(true);
+      if (isErr(result)) expect(result.error.type).toBe("TIMEOUT");
+
+      const entry = journal.getSnapshot().entries[0]?.data;
+      expect(entry?.name).toBe("wedged");
+      expect(entry?.outcome).toBe("failure");
+      expect(entry?.error?.type).toBe("TIMEOUT");
+
+      await handler.stop();
+    });
+
+    it("should free the concurrency slot at timeout so a subsequent invoke is admitted", async () => {
+      const { runtime, clock } = setup();
+
+      const wedged = defineHandler({
+        name: "wedged",
+        input: z.any(),
+        output: z.any(),
+        fields: echoFields,
+        timeout: ms(100),
+        concurrency: { max: 1, queueSize: 0, backpressure: "reject" },
+        retry: retry.none(),
+        circuitBreaker: cb.none(),
+        run: () => new Promise<never>(() => {}),
+      });
+
+      const handler = await spawn(wedged, runtime);
+      const first = handler.invoke({});
+
+      await Promise.resolve();
+      await Promise.resolve();
+
+      // Capacity is max(1) + queueSize(0) = 1 — a second invoke right now
+      // would be rejected while the first is still active.
+      const busyMetrics = handler.getMetrics();
+      expect(busyMetrics.activeCount).toBe(1);
+
+      clock.advanceBy(ms(100));
+      await clock.flush();
+
+      const firstResult = await first;
+      expect(isErr(firstResult)).toBe(true);
+      if (isErr(firstResult)) expect(firstResult.error.type).toBe("TIMEOUT");
+
+      // The slot must be free now — the abandoned body is still running in
+      // the background, but it no longer holds a concurrency slot.
+      expect(handler.getMetrics().activeCount).toBe(0);
+
+      const second = handler.invoke({});
+      await Promise.resolve();
+      await Promise.resolve();
+
+      // Admitted, not BACKPRESSURE_REJECT — proves the slot was actually
+      // freed, not just eventually garbage-collected.
+      expect(handler.getMetrics().activeCount).toBe(1);
+
+      clock.advanceBy(ms(100));
+      await clock.flush();
+
+      const secondResult = await second;
+      expect(isErr(secondResult)).toBe(true);
+      if (isErr(secondResult)) expect(secondResult.error.type).toBe("TIMEOUT");
+
+      await handler.stop();
+    });
+
+    it("should journal an orphan-settlement event when the abandoned body eventually settles, without double-decrementing activeCount", async () => {
+      const { runtime, journal, clock } = setup();
+
+      const wedged = defineHandler({
+        name: "wedged",
+        input: z.any(),
+        output: z.any(),
+        fields: echoFields,
+        timeout: ms(100),
+        concurrency: { max: 1, queueSize: 5, backpressure: "reject" },
+        retry: retry.none(),
+        circuitBreaker: cb.none(),
+        // Ignores the signal, but eventually settles on its own — a slow
+        // downstream call that isn't wired to `signal`, not a truly
+        // eternal hang.
+        run: async (_input, { clock: c }) => {
+          await c.sleep(ms(10_000));
+          throw new Error("finally gave up");
+        },
+      });
+
+      const handler = await spawn(wedged, runtime);
+      const pending = handler.invoke({});
+
+      await Promise.resolve();
+      await Promise.resolve();
+
+      clock.advanceBy(ms(100));
+      await clock.flush();
+
+      const result = await pending;
+      expect(isErr(result)).toBe(true);
+      if (isErr(result)) expect(result.error.type).toBe("TIMEOUT");
+
+      // Only the invocation's own entry so far — the orphan hasn't settled.
+      expect(journal.getSnapshot().entries).toHaveLength(1);
+      expect(handler.getMetrics().activeCount).toBe(0);
+
+      // Let the abandoned body's own sleep fire and throw.
+      clock.advanceBy(ms(10_000));
+      await clock.flush();
+      await new Promise((r) => setImmediate(r));
+
+      const { entries } = journal.getSnapshot();
+      expect(entries).toHaveLength(2);
+
+      const orphanEntry = entries[1]?.data;
+      expect(orphanEntry?.name).toBe("wedged.orphan-settlement");
+      expect(orphanEntry?.invocationId).toBe(entries[0]?.data.invocationId);
+      expect(orphanEntry?.source).toBe("internal");
+      expect(orphanEntry?.outcome).toBe("failure");
+      expect(orphanEntry?.error?.message).toBe("finally gave up");
+
+      // The orphan settling must never touch activeCount again.
+      expect(handler.getMetrics().activeCount).toBe(0);
+
+      await handler.stop();
+    });
+
+    it('should drop the orphan-settlement event, not crash, when the journal can\'t take it (overflow: "error")', async () => {
+      const clock = createControlledClock({ initialTime: 0 });
+      // maxEntries: 1 — the invocation's own TIMEOUT entry fills the journal
+      // to capacity, so by the time the orphan settlement tries to append,
+      // there's no room left and overflow:"error" makes that append throw.
+      const journal = new Journal<HandlerEvent>({ clock, maxEntries: 1, overflow: "error" });
+      const runtime: HandlerRuntime = { clock, journal };
+
+      const wedged = defineHandler({
+        name: "wedged",
+        input: z.any(),
+        output: z.any(),
+        fields: echoFields,
+        timeout: ms(100),
+        concurrency: { max: 1, queueSize: 5, backpressure: "reject" },
+        retry: retry.none(),
+        circuitBreaker: cb.none(),
+        // Same shape as the orphan-settlement test above: ignores `signal`,
+        // eventually settles on its own well after the invocation has
+        // already answered TIMEOUT.
+        run: async (_input, { clock: c }) => {
+          await c.sleep(ms(10_000));
+          throw new Error("finally gave up");
+        },
+      });
+
+      const handler = await spawn(wedged, runtime);
+      const pending = handler.invoke({});
+
+      await Promise.resolve();
+      await Promise.resolve();
+
+      clock.advanceBy(ms(100));
+      await clock.flush();
+
+      const result = await pending;
+      expect(isErr(result)).toBe(true);
+      if (isErr(result)) expect(result.error.type).toBe("TIMEOUT");
+
+      // The invocation's own entry already fills the journal to its cap.
+      expect(journal.getSnapshot().entries).toHaveLength(1);
+      expect(handler.getMetrics().activeCount).toBe(0);
+
+      // Watch for the exact failure mode this test exists to rule out: a
+      // throw inside `raceAttempt`'s `work.then()` handler becoming an
+      // unhandled rejection, since nothing downstream awaits that
+      // fire-and-forget path.
+      let unhandledReason: unknown;
+      const onUnhandledRejection = (reason: unknown): void => {
+        unhandledReason = reason;
+      };
+      process.on("unhandledRejection", onUnhandledRejection);
+
+      try {
+        // Let the abandoned body's own sleep fire and throw — its orphan
+        // settlement now tries to journal.append() into a full,
+        // overflow:"error" journal.
+        clock.advanceBy(ms(10_000));
+        await clock.flush();
+        await new Promise((r) => setImmediate(r));
+        await new Promise((r) => setImmediate(r));
+      } finally {
+        process.removeListener("unhandledRejection", onUnhandledRejection);
+      }
+
+      expect(unhandledReason).toBeUndefined();
+
+      // The orphan event was dropped, not journaled — the journal never
+      // grew past its cap, and nothing about the invocation's own outcome
+      // or the handler's metrics moved.
+      expect(journal.getSnapshot().entries).toHaveLength(1);
+      expect(handler.getMetrics().activeCount).toBe(0);
+      expect(isErr(result)).toBe(true);
+      if (isErr(result)) expect(result.error.type).toBe("TIMEOUT");
 
       await handler.stop();
     });
@@ -325,6 +569,77 @@ describe("@phyxiusjs/handler", () => {
       if (isErr(result) && result.error.type === "RETRY_EXHAUSTED") {
         expect(result.error.attempts).toBe(2);
       }
+
+      await handler.stop();
+    });
+
+    it("should classify a budget expiry on the final attempt as TIMEOUT, not RETRY_EXHAUSTED or HANDLER_ERROR", async () => {
+      const { runtime, journal, clock } = setup();
+
+      let attempt = 0;
+      const flakyThenWedged = defineHandler({
+        name: "flakyThenWedged",
+        input: z.any(),
+        output: z.any(),
+        fields: echoFields,
+        timeout: ms(50),
+        concurrency: { max: 1, queueSize: 5, backpressure: "reject" },
+        retry: retry.fixed({ maxAttempts: 2, delay: ms(10) }),
+        circuitBreaker: cb.none(),
+        run: async (_input, { clock: c }) => {
+          attempt += 1;
+          if (attempt === 1) throw new Error("first attempt fails fast");
+          // Final attempt: ignores `signal` entirely and eventually throws
+          // long after the budget will have expired.
+          await c.sleep(ms(10_000));
+          throw new Error("late failure — never reaches the caller");
+        },
+      });
+
+      const handler = await spawn(flakyThenWedged, runtime);
+      const pending = handler.invoke({});
+
+      // Let attempt 1 run to completion (it fails synchronously) and
+      // register the inter-attempt retry-delay timer before advancing the
+      // clock — otherwise a same-tick advance can sweep past a timer that
+      // hasn't been registered yet, skipping straight to the budget
+      // deadline without attempt 2 ever starting.
+      await clock.flush();
+      await Promise.resolve();
+
+      // Fire the 10ms retry delay — this starts attempt 2.
+      clock.advanceBy(ms(10));
+      await clock.flush();
+      await Promise.resolve();
+
+      // Let attempt 2 register its own race against the budget (and its
+      // own 10s sleep) before advancing further.
+      await clock.flush();
+      await Promise.resolve();
+
+      // Advance past the remaining budget (50ms total) while attempt 2 is
+      // in flight — this expires the budget mid-attempt on the LAST
+      // allowed attempt, exercising the EXHAUSTED+BudgetExpiredThrown path.
+      clock.advanceBy(ms(40));
+      await clock.flush();
+      await new Promise((r) => setImmediate(r));
+
+      const result = await pending;
+      expect(isErr(result)).toBe(true);
+      if (isErr(result)) expect(result.error.type).toBe("TIMEOUT");
+
+      const entry = journal.getSnapshot().entries[0]?.data;
+      expect(entry?.error?.type).toBe("TIMEOUT");
+
+      // The orphaned final attempt eventually throws — confirm it's
+      // reported as an orphan, not folded back into the invocation result.
+      clock.advanceBy(ms(10_000));
+      await clock.flush();
+      await new Promise((r) => setImmediate(r));
+
+      const orphanEntry = journal.getSnapshot().entries[1]?.data;
+      expect(orphanEntry?.name).toBe("flakyThenWedged.orphan-settlement");
+      expect(orphanEntry?.outcome).toBe("failure");
 
       await handler.stop();
     });

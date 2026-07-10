@@ -3,7 +3,7 @@ import { createConfig, type ConfigInstance } from "@phyxiusjs/config";
 import { createDrain, stdoutSink, type Drain } from "@phyxiusjs/drain";
 import { spawn, type HandlerEvent, type HandlerSpec, type RunningHandler } from "@phyxiusjs/handler";
 import { Journal } from "@phyxiusjs/journal";
-import { createStats } from "@phyxiusjs/stats";
+import { createStats, type StatsEvent } from "@phyxiusjs/stats";
 import { z } from "zod";
 
 import { frameworkConfigSchema, type FrameworkConfig } from "./config-schema.js";
@@ -76,10 +76,27 @@ export async function createApp<TAppConfig extends Record<string, unknown> = Rec
     thresholds: toHandlerThresholds(statsConfig.thresholds),
     emit: (event) => {
       // Route threshold events back into the journal so they share the
-      // same observability stream as everything else. We cast through
-      // unknown because HandlerEvent and StatsEvent are structurally
-      // distinct; the journal is generic so mixing types works at runtime.
-      (journal as unknown as { append: (e: unknown) => void }).append(event);
+      // same observability stream as everything else.
+      //
+      // Two things make this subtle:
+      //
+      //  1. Shape. The journal is `Journal<HandlerEvent>`; a StatsEvent is a
+      //     structurally distinct value. Map it explicitly into a
+      //     HandlerEvent so the entry carries the fields downstream readers
+      //     rely on (`outcome` and `invocationId` for sampling, `source` for
+      //     filtering) instead of an opaque cast through `unknown`.
+      //
+      //  2. Reentrancy. Stats subscribes to this same journal, so `emit`
+      //     fires from *inside* the journal's subscriber dispatch. Appending
+      //     synchronously here would re-enter `Journal.append` while it's
+      //     still notifying subscribers — which throws JournalReentrancyError,
+      //     and that throw is swallowed by the subscriber try/catch, so the
+      //     alert would vanish silently. Defer the append to a microtask so
+      //     it lands after dispatch has unwound.
+      const entry = statsEventToHandlerEvent(event);
+      queueMicrotask(() => {
+        journal.append(entry);
+      });
     },
   });
 
@@ -352,6 +369,35 @@ function readServer<T>(config: ConfigInstance<T & FrameworkConfig>): FrameworkCo
   const snap = config.getAll();
   if (snap._tag !== "Ok") return undefined;
   return (snap.value as FrameworkConfig).server;
+}
+
+/**
+ * Map a StatsEvent into the HandlerEvent shape the journal carries. The
+ * journal is `Journal<HandlerEvent>`, and a threshold alert is not a handler
+ * invocation — so we synthesize a HandlerEvent whose `name` identifies the
+ * alert type, whose `observed` payload carries the breach detail, and whose
+ * `outcome` is `failure` for a breach (so default sampling always logs it)
+ * and `success` for a recovery. The `name` is the event type, not the
+ * breaching handler's name, so re-ingesting this entry doesn't pollute that
+ * handler's ring buffer or risk a recursive alert.
+ */
+function statsEventToHandlerEvent(event: StatsEvent): HandlerEvent {
+  return {
+    name: event.type,
+    invocationId: `${event.handler}:${event.field}:${event.at.wallMs}`,
+    source: "stats",
+    startedAt: event.at,
+    completedAt: event.at,
+    durationMs: 0,
+    attempts: 0,
+    outcome: event.type === "stats:threshold-breached" ? "failure" : "success",
+    observed: {
+      handler: event.handler,
+      field: event.field,
+      value: event.value,
+      limit: event.limit,
+    },
+  };
 }
 
 function toHandlerThresholds(
