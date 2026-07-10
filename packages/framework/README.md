@@ -102,13 +102,12 @@ That's a supervised, budget-bounded, retry-aware, circuit-broken, drift-tracked,
 
 Framework-reserved keys: `server` and `observability`. Users' app keys sit alongside these unchanged.
 
-```jsonc
-// phyxius.json
+```json
 {
   "server": { "port": 3000 },
 
   "observability": {
-    "log_drain": "stdout", // "stdout" | "none"
+    "log_drain": "stdout",
     "log_sampling": {
       "ratio_of_successful_requests": 1.0,
       "log_all_failures": true
@@ -122,7 +121,6 @@ Framework-reserved keys: `server` and `observability`. Users' app keys sit along
     }
   },
 
-  // Your app-specific keys start here.
   "features": { "new_pricing": true }
 }
 ```
@@ -177,7 +175,7 @@ function shouldLog(event: HandlerEvent, config: ObservabilityConfig): boolean {
 
 Stats is wired up automatically from the `observability.stats` config slice:
 
-```jsonc
+```json
 {
   "observability": {
     "stats": {
