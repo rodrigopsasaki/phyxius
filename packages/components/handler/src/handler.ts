@@ -341,15 +341,15 @@ export async function spawn<TInput, TOutput, TFields>(
             // resulting error. The root cause is still budget expiry.
             return {
               result: err({ type: "TIMEOUT" as const, timeoutMs: spec.timeout }),
-              attempts: attempts || 1,
+              attempts,
             };
           }
           if (e instanceof CircuitOpenThrown) {
-            return { result: err(e.asHandlerError()), attempts: attempts || 1 };
+            return { result: err(e.asHandlerError()), attempts };
           }
           return {
             result: err({ type: "HANDLER_ERROR" as const, cause: e }),
-            attempts: attempts || 1,
+            attempts,
           };
         }
         case "EXHAUSTED": {
@@ -361,11 +361,11 @@ export async function spawn<TInput, TOutput, TFields>(
             // generic throw (HANDLER_ERROR).
             return {
               result: err({ type: "TIMEOUT" as const, timeoutMs: spec.timeout }),
-              attempts: attempts || retryResult.error.attempts,
+              attempts,
             };
           }
           if (last instanceof CircuitOpenThrown) {
-            return { result: err(last.asHandlerError()), attempts: attempts || 1 };
+            return { result: err(last.asHandlerError()), attempts };
           }
           if (spec.retry.maxAttempts === 1) {
             // retry.none() — single attempt, plain handler error.
