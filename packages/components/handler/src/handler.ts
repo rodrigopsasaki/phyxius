@@ -611,10 +611,11 @@ function raceAttempt<T>(
     let racedAway = false;
 
     // reject() here is synchronous with the abort event, while the work
-    // promise's settlement callbacks below are always a microtask later —
-    // so on a tie, the budget loses to work that already settled, never
-    // the reverse. Callers rely on that ordering; it's structural, not
-    // incidental.
+    // promise's settlement callbacks below are always a microtask behind —
+    // so on a same-tick tie, the BUDGET wins: work that settled but whose
+    // .then hasn't run yet is raced away and reported as an orphan. Work
+    // wins only when its settlement callback already ran (an earlier tick).
+    // Callers rely on that ordering; it's structural, not incidental.
     const onAbort = (): void => {
       if (racedAway) return;
       racedAway = true;
