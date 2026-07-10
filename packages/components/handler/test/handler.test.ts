@@ -401,7 +401,7 @@ describe("@phyxiusjs/handler", () => {
       await clock.flush();
       await new Promise((r) => setImmediate(r));
 
-      const {entries} = journal.getSnapshot();
+      const { entries } = journal.getSnapshot();
       expect(entries).toHaveLength(2);
 
       const orphanEntry = entries[1]?.data;
@@ -413,6 +413,84 @@ describe("@phyxiusjs/handler", () => {
 
       // The orphan settling must never touch activeCount again.
       expect(handler.getMetrics().activeCount).toBe(0);
+
+      await handler.stop();
+    });
+
+    it('should drop the orphan-settlement event, not crash, when the journal can\'t take it (overflow: "error")', async () => {
+      const clock = createControlledClock({ initialTime: 0 });
+      // maxEntries: 1 — the invocation's own TIMEOUT entry fills the journal
+      // to capacity, so by the time the orphan settlement tries to append,
+      // there's no room left and overflow:"error" makes that append throw.
+      const journal = new Journal<HandlerEvent>({ clock, maxEntries: 1, overflow: "error" });
+      const runtime: HandlerRuntime = { clock, journal };
+
+      const wedged = defineHandler({
+        name: "wedged",
+        input: z.any(),
+        output: z.any(),
+        fields: echoFields,
+        timeout: ms(100),
+        concurrency: { max: 1, queueSize: 5, backpressure: "reject" },
+        retry: retry.none(),
+        circuitBreaker: cb.none(),
+        // Same shape as the orphan-settlement test above: ignores `signal`,
+        // eventually settles on its own well after the invocation has
+        // already answered TIMEOUT.
+        run: async (_input, { clock: c }) => {
+          await c.sleep(ms(10_000));
+          throw new Error("finally gave up");
+        },
+      });
+
+      const handler = await spawn(wedged, runtime);
+      const pending = handler.invoke({});
+
+      await Promise.resolve();
+      await Promise.resolve();
+
+      clock.advanceBy(ms(100));
+      await clock.flush();
+
+      const result = await pending;
+      expect(isErr(result)).toBe(true);
+      if (isErr(result)) expect(result.error.type).toBe("TIMEOUT");
+
+      // The invocation's own entry already fills the journal to its cap.
+      expect(journal.getSnapshot().entries).toHaveLength(1);
+      expect(handler.getMetrics().activeCount).toBe(0);
+
+      // Watch for the exact failure mode this test exists to rule out: a
+      // throw inside `raceAttempt`'s `work.then()` handler becoming an
+      // unhandled rejection, since nothing downstream awaits that
+      // fire-and-forget path.
+      let unhandledReason: unknown;
+      const onUnhandledRejection = (reason: unknown): void => {
+        unhandledReason = reason;
+      };
+      process.on("unhandledRejection", onUnhandledRejection);
+
+      try {
+        // Let the abandoned body's own sleep fire and throw — its orphan
+        // settlement now tries to journal.append() into a full,
+        // overflow:"error" journal.
+        clock.advanceBy(ms(10_000));
+        await clock.flush();
+        await new Promise((r) => setImmediate(r));
+        await new Promise((r) => setImmediate(r));
+      } finally {
+        process.removeListener("unhandledRejection", onUnhandledRejection);
+      }
+
+      expect(unhandledReason).toBeUndefined();
+
+      // The orphan event was dropped, not journaled — the journal never
+      // grew past its cap, and nothing about the invocation's own outcome
+      // or the handler's metrics moved.
+      expect(journal.getSnapshot().entries).toHaveLength(1);
+      expect(handler.getMetrics().activeCount).toBe(0);
+      expect(isErr(result)).toBe(true);
+      if (isErr(result)) expect(result.error.type).toBe("TIMEOUT");
 
       await handler.stop();
     });

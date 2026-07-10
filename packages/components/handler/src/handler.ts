@@ -439,7 +439,22 @@ export async function spawn<TInput, TOutput, TFields>(
         ? { ...baseEvent, outcome: "success" as const }
         : { ...baseEvent, outcome: "failure" as const, error: describeThrown(outcome.error) };
 
-    journal.append(event);
+    // This call runs from inside `raceAttempt`'s `work.then()` handlers — a
+    // fire-and-forget path with no caller awaiting it, so a throw here has
+    // nowhere to land but an unhandled rejection. `journal.append` can throw
+    // (`JournalReentrancyError` mid-subscriber-processing, or
+    // `JournalOverflowError` under an "error" overflow policy), and this
+    // entry is best-effort, late-arriving telemetry about an attempt the
+    // invocation already answered for — its own TIMEOUT entry already
+    // carries the truth that matters. A journal that can't take one more
+    // write must cost us this supplementary event, never the process. Don't
+    // retry the append in the catch — a reentrant or full journal will
+    // reject the retry the same way.
+    try {
+      journal.append(event);
+    } catch {
+      // Dropped, deliberately — see above.
+    }
   }
 
   /**
@@ -595,6 +610,11 @@ function raceAttempt<T>(
   return new Promise<T>((resolve, reject) => {
     let racedAway = false;
 
+    // reject() here is synchronous with the abort event, while the work
+    // promise's settlement callbacks below are always a microtask later —
+    // so on a tie, the budget loses to work that already settled, never
+    // the reverse. Callers rely on that ordering; it's structural, not
+    // incidental.
     const onAbort = (): void => {
       if (racedAway) return;
       racedAway = true;
