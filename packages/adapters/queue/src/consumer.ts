@@ -1,4 +1,4 @@
-import type { Clock } from "@phyxiusjs/clock";
+import { ms, type Clock, type Millis } from "@phyxiusjs/clock";
 import type { Result } from "@phyxiusjs/fp";
 import type { HandlerError, RunningHandler } from "@phyxiusjs/handler";
 
@@ -12,6 +12,58 @@ import type {
   QueueMessage,
   QueueOutcome,
 } from "./types.js";
+
+// ── Receive backoff ─────────────────────────────────────────────────────────
+//
+// `source.receive()` throwing (not returning null) means the source itself
+// is unhealthy — a dead connection, an unreachable broker. Retrying it
+// immediately in a `while` loop burns CPU against something that isn't
+// going to recover in the next tick. Distinct from a source's own
+// empty/idle backoff (its job, per MessageSource's contract) — this is the
+// consumer's backoff on the source failing outright.
+
+const RECEIVE_BACKOFF_INITIAL_MS = ms(100);
+const RECEIVE_BACKOFF_MAX_MS = ms(30_000);
+const RECEIVE_BACKOFF_FACTOR = 2;
+
+/**
+ * Delay before the next receive attempt, given the number of consecutive
+ * failures (1-based — includes the failure that just happened). Doubles
+ * each time starting from RECEIVE_BACKOFF_INITIAL_MS, capped at
+ * RECEIVE_BACKOFF_MAX_MS. Resets to attempt 1 the moment receive() succeeds.
+ */
+function receiveBackoffDelay(consecutiveFailures: number): Millis {
+  const delay = RECEIVE_BACKOFF_INITIAL_MS * Math.pow(RECEIVE_BACKOFF_FACTOR, consecutiveFailures - 1);
+  return Math.min(delay, RECEIVE_BACKOFF_MAX_MS) as Millis;
+}
+
+/**
+ * Clock-paced sleep that resolves early if `signal` aborts, so a paced
+ * backoff wait never blocks a graceful stop(). Same idiom as
+ * `sleepOrAbort` in `@phyxiusjs/retry` — mirrored here rather than
+ * imported since it isn't part of that package's public surface.
+ */
+function sleepUnlessAborted(clock: Clock, delayMs: Millis, signal: AbortSignal): Promise<void> {
+  if (signal.aborted) return Promise.resolve();
+
+  return new Promise<void>((resolve) => {
+    let settled = false;
+
+    const onAbort = () => {
+      if (settled) return;
+      settled = true;
+      resolve();
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+
+    void clock.sleep(delayMs).then(() => {
+      if (settled) return;
+      settled = true;
+      signal.removeEventListener("abort", onAbort);
+      resolve();
+    });
+  });
+}
 
 // ── Public surface ─────────────────────────────────────────────────────────
 
@@ -79,6 +131,11 @@ export function createQueueConsumer<TInput, TOutput>(
 
   // ── Main loop ──────────────────────────────────────────────────────────
 
+  // Consecutive source.receive() failures since the last success. Drives
+  // the backoff delay; reset to 0 the instant receive() succeeds (message
+  // or idle-null both count — only a throw is a failure).
+  let consecutiveReceiveFailures = 0;
+
   async function runLoop(): Promise<void> {
     try {
       while (status === "running") {
@@ -94,8 +151,16 @@ export function createQueueConsumer<TInput, TOutput>(
         let message: QueueMessage | null = null;
         try {
           message = await source.receive(abortController.signal);
+          consecutiveReceiveFailures = 0;
         } catch (cause) {
-          emit?.({ type: "queue:receive_error", at: clock.now(), cause });
+          consecutiveReceiveFailures += 1;
+          emit?.({
+            type: "queue:receive_error",
+            at: clock.now(),
+            cause,
+            consecutiveFailures: consecutiveReceiveFailures,
+          });
+          await sleepUnlessAborted(clock, receiveBackoffDelay(consecutiveReceiveFailures), abortController.signal);
           continue;
         }
 
@@ -151,11 +216,27 @@ export function createQueueConsumer<TInput, TOutput>(
 
     const result: Result<TOutput, HandlerError> = await handler.invoke(input, invokeMeta);
 
-    const outcome: QueueOutcome = onResult(result, message);
+    const outcome: QueueOutcome = safeOnResult(result, message);
     if (outcome.action === "ack") {
       await safeAck(message);
     } else {
       await safeNack(message, outcome.reason);
+    }
+  }
+
+  /**
+   * Settlement is decided by the handler's Result, never by whether the
+   * (possibly caller-supplied) `onResult` observer behaves. A throwing
+   * `onResult` is journaled and falls back to `defaultOnResult` — the
+   * ack/nack decision it would have gotten with no override at all —
+   * so an observer bug can never strand a message unacked.
+   */
+  function safeOnResult(result: Result<TOutput, HandlerError>, message: QueueMessage): QueueOutcome {
+    try {
+      return onResult(result, message);
+    } catch (cause) {
+      emit?.({ type: "queue:on_result_error", at: clock.now(), messageId: message.id, cause });
+      return defaultOnResult(result, message);
     }
   }
 
