@@ -1,4 +1,4 @@
-import { ms, type Clock, type Millis } from "@phyxiusjs/clock";
+import { ms, sleepOrAbort, type Clock, type Millis } from "@phyxiusjs/clock";
 import type { Result } from "@phyxiusjs/fp";
 import type { HandlerError, RunningHandler } from "@phyxiusjs/handler";
 
@@ -35,34 +35,6 @@ const RECEIVE_BACKOFF_FACTOR = 2;
 function receiveBackoffDelay(consecutiveFailures: number): Millis {
   const delay = RECEIVE_BACKOFF_INITIAL_MS * Math.pow(RECEIVE_BACKOFF_FACTOR, consecutiveFailures - 1);
   return Math.min(delay, RECEIVE_BACKOFF_MAX_MS) as Millis;
-}
-
-/**
- * Clock-paced sleep that resolves early if `signal` aborts, so a paced
- * backoff wait never blocks a graceful stop(). Same idiom as
- * `sleepOrAbort` in `@phyxiusjs/retry` — mirrored here rather than
- * imported since it isn't part of that package's public surface.
- */
-function sleepUnlessAborted(clock: Clock, delayMs: Millis, signal: AbortSignal): Promise<void> {
-  if (signal.aborted) return Promise.resolve();
-
-  return new Promise<void>((resolve) => {
-    let settled = false;
-
-    const onAbort = () => {
-      if (settled) return;
-      settled = true;
-      resolve();
-    };
-    signal.addEventListener("abort", onAbort, { once: true });
-
-    void clock.sleep(delayMs).then(() => {
-      if (settled) return;
-      settled = true;
-      signal.removeEventListener("abort", onAbort);
-      resolve();
-    });
-  });
 }
 
 // ── Public surface ─────────────────────────────────────────────────────────
@@ -160,7 +132,10 @@ export function createQueueConsumer<TInput, TOutput>(
             cause,
             consecutiveFailures: consecutiveReceiveFailures,
           });
-          await sleepUnlessAborted(clock, receiveBackoffDelay(consecutiveReceiveFailures), abortController.signal);
+          // Return value ignored: whether the wait completed or the signal
+          // won, the loop's own `status` check on the next iteration is
+          // what decides whether to keep going.
+          await sleepOrAbort(clock, receiveBackoffDelay(consecutiveReceiveFailures), abortController.signal);
           continue;
         }
 

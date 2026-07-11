@@ -4,3 +4,4 @@ export { ms } from "./types.js";
 export { createSystemClock } from "./system-clock.js";
 export { createControlledClock } from "./controlled-clock.js";
 export { formatIso } from "./format.js";
+export { sleepOrAbort } from "./sleep-or-abort.js";
