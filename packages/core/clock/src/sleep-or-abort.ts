@@ -9,8 +9,8 @@ import type { Clock, Millis } from "./types.js";
  * what an early wake means, this only reports which side won the race.
  *
  * Clock owns time, so this is the one place that pattern lives. It used
- * to be reimplemented per call site; a review on PR #20 flagged the third
- * copy (`sleepUnlessAborted` in the queue consumer) as "three sites to
+ * to be reimplemented per call site; a review flagged the third copy (added in cf814eb) as
+ * (`sleepUnlessAborted`, queue consumer) — "three sites to
  * audit if an edge case surfaces" — this consolidates the delay-based
  * copies (retry's inter-attempt wait, the queue's receive backoff) into
  * one. (The scheduler's tick wait races a wall-clock *deadline*, not a
