@@ -49,7 +49,7 @@ import { schedule } from "@phyxiusjs/scheduler";
 import { z } from "zod";
 
 const app = await createApp({
-  config: "./phyxius.yaml",
+  config: "./phyxius.json",
 });
 
 // Handler specs are exactly as @phyxiusjs/handler documents them.
@@ -102,28 +102,27 @@ That's a supervised, budget-bounded, retry-aware, circuit-broken, drift-tracked,
 
 Framework-reserved keys: `server` and `observability`. Users' app keys sit alongside these unchanged.
 
-```yaml
-# phyxius.yaml
-server:
-  port: 3000
+```json
+{
+  "server": { "port": 3000 },
 
-observability:
-  log_drain: stdout # stdout | none
-  log_sampling:
-    ratio_of_successful_requests: 1.0
-    log_all_failures: true
-  stats:
-    window_size: 1000
-    thresholds:
-      order.process:
-        p95_ms: 500
-        error_rate: 0.01
-      user.lookup:
-        p99_ms: 100
+  "observability": {
+    "log_drain": "stdout",
+    "log_sampling": {
+      "ratio_of_successful_requests": 1.0,
+      "log_all_failures": true
+    },
+    "stats": {
+      "window_size": 1000,
+      "thresholds": {
+        "order.process": { "p95_ms": 500, "error_rate": 0.01 },
+        "user.lookup": { "p99_ms": 100 }
+      }
+    }
+  },
 
-# Your app-specific keys start here.
-features:
-  new_pricing: true
+  "features": { "new_pricing": true }
+}
 ```
 
 The framework ships a Zod schema for the `server` / `observability` slice. Intersect it with your own schema via `appSchema`:
@@ -138,7 +137,7 @@ const myAppSchema = z.object({
 });
 
 const app = await createApp({
-  config: "./phyxius.yaml",
+  config: "./phyxius.json",
   appSchema: myAppSchema,
 });
 
@@ -150,7 +149,7 @@ if (cfg._tag === "Ok") {
 }
 ```
 
-The config hot-reloads from file. Change `ratio_of_successful_requests` in `phyxius.yaml` and the next log event's sampling decision picks up the new value — **no deploy, no restart**. Spend becomes a knob.
+The config hot-reloads from file. Change `ratio_of_successful_requests` in `phyxius.json` and the next log event's sampling decision picks up the new value — **no deploy, no restart**. Spend becomes a knob.
 
 ---
 
@@ -176,14 +175,17 @@ function shouldLog(event: HandlerEvent, config: ObservabilityConfig): boolean {
 
 Stats is wired up automatically from the `observability.stats` config slice:
 
-```yaml
-observability:
-  stats:
-    window_size: 1000
-    thresholds:
-      order.process:
-        p95_ms: 500
-        error_rate: 0.01
+```json
+{
+  "observability": {
+    "stats": {
+      "window_size": 1000,
+      "thresholds": {
+        "order.process": { "p95_ms": 500, "error_rate": 0.01 }
+      }
+    }
+  }
+}
 ```
 
 The framework subscribes `@phyxiusjs/stats` to the shared journal and routes threshold events back into the same journal. So when `order.process`'s p95 crosses 500ms, a `stats:threshold-breached` event lands in your log stream alongside every other event — same sink, same format, same `correlationId` machinery.
