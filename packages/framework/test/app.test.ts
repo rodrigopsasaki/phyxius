@@ -1,4 +1,6 @@
-import { describe, expect, it } from "vitest";
+import { mkdirSync, rmSync, writeFileSync } from "fs";
+import { join } from "path";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import { createControlledClock, ms } from "@phyxiusjs/clock";
@@ -449,6 +451,138 @@ describe("createApp — stats threshold alerting", () => {
       value: 1,
       limit: 0,
     });
+
+    await app.stop();
+  });
+});
+
+// ── Boot fails closed on an unusable config ─────────────────────────────────
+
+describe("createApp — boot fails closed on unusable config", () => {
+  const testDir = "/tmp/framework-app-boot-test";
+
+  beforeEach(() => {
+    rmSync(testDir, { recursive: true, force: true });
+    mkdirSync(testDir, { recursive: true });
+  });
+
+  afterEach(() => {
+    rmSync(testDir, { recursive: true, force: true });
+  });
+
+  it("rejects with the real file path when the config file doesn't exist", async () => {
+    const clock = createControlledClock({ initialTime: 0 });
+    const missingPath = join(testDir, "does-not-exist.json");
+
+    await expect(createApp({ clock, config: missingPath })).rejects.toThrow(missingPath);
+  });
+
+  it("rejects with the parse reason when the config file is malformed JSON", async () => {
+    const clock = createControlledClock({ initialTime: 0 });
+    const configPath = join(testDir, "malformed.json");
+    writeFileSync(configPath, "{ not valid json");
+
+    await expect(createApp({ clock, config: configPath })).rejects.toThrow(/PARSE_ERROR/);
+  });
+});
+
+// ── Post-boot config errors reach the journal, last-known-good is kept ──────
+
+describe("createApp — post-boot config errors", () => {
+  const testDir = "/tmp/framework-app-reload-test";
+
+  const tieredFields = observe.fields({
+    customerId: observe.field<string>(),
+    debugPrompt: observe.extra<string>(),
+  });
+
+  function makeTieredSpec() {
+    return defineHandler({
+      name: "tiered",
+      input: z.object({ customerId: z.string(), prompt: z.string() }),
+      output: z.object({ ok: z.boolean() }),
+      fields: tieredFields,
+      timeout: ms(1_000),
+      concurrency: { max: 4, queueSize: 10, backpressure: "reject" },
+      retry: retry.none(),
+      circuitBreaker: cb.none(),
+      run: async ({ customerId, prompt }) => {
+        tieredFields.customerId.set(customerId);
+        tieredFields.debugPrompt.set(prompt);
+        return { ok: true };
+      },
+    });
+  }
+
+  beforeEach(() => {
+    rmSync(testDir, { recursive: true, force: true });
+    mkdirSync(testDir, { recursive: true });
+  });
+
+  afterEach(() => {
+    rmSync(testDir, { recursive: true, force: true });
+  });
+
+  it("a failed hot-reload journals CONFIG_ERROR and keeps serving last-known-good config", async () => {
+    const clock = createControlledClock({ initialTime: 0 });
+    const journal = new Journal<HandlerEvent>({ clock });
+    const configPath = join(testDir, "reload.json");
+    writeFileSync(
+      configPath,
+      JSON.stringify({ observability: { log_drain: "none", observe: { include_extra: true } } }),
+    );
+
+    const app = await createApp({ clock, journal, config: configPath });
+    const handler = await app.use(makeTieredSpec());
+
+    await handler.invoke({ customerId: "alice", prompt: "before" });
+
+    // Corrupt the file and reload explicitly (deterministic — no waiting on
+    // the fs watcher). This must fail, not silently reset to defaults.
+    writeFileSync(configPath, "{ not valid json");
+    const reloadResult = app.config.reload();
+    expect(reloadResult._tag).toBe("Err");
+
+    // config.getAll() still reports the error — that part of the contract
+    // is unchanged; the framework layer is what must not degrade.
+    expect(app.config.getAll()._tag).toBe("Err");
+
+    // CONFIG_ERROR reached the shared journal instead of being emitted to
+    // nobody.
+    const configErrors = journal.getSnapshot().entries.filter((e) => e.data.name === "CONFIG_ERROR");
+    expect(configErrors).toHaveLength(1);
+    expect(configErrors[0]?.data.source).toBe("config");
+    expect(configErrors[0]?.data.outcome).toBe("failure");
+    expect(configErrors[0]?.data.observed).toMatchObject({ error: { type: "PARSE_ERROR" } });
+
+    // The running app kept serving the last-known-good value — include_extra
+    // stayed true — instead of reverting to the schema default (false).
+    await handler.invoke({ customerId: "alice", prompt: "after" });
+    const tieredEntries = journal.getSnapshot().entries.filter((e) => e.data.name === "tiered");
+    expect(tieredEntries).toHaveLength(2);
+    expect(tieredEntries[1]?.data.observed).toMatchObject({
+      customerId: "alice",
+      debugPrompt: "after",
+    });
+
+    await app.stop();
+  });
+
+  it("a successful hot-reload journals CONFIG_RELOADED", async () => {
+    const clock = createControlledClock({ initialTime: 0 });
+    const journal = new Journal<HandlerEvent>({ clock });
+    const configPath = join(testDir, "reload-ok.json");
+    writeFileSync(configPath, JSON.stringify({ observability: { observe: { include_extra: false } } }));
+
+    const app = await createApp({ clock, journal, config: configPath });
+
+    writeFileSync(configPath, JSON.stringify({ observability: { observe: { include_extra: true } } }));
+    const reloadResult = app.config.reload();
+    expect(reloadResult._tag).toBe("Ok");
+
+    const reloaded = journal.getSnapshot().entries.filter((e) => e.data.name === "CONFIG_RELOADED");
+    expect(reloaded).toHaveLength(1);
+    expect(reloaded[0]?.data.outcome).toBe("success");
 
     await app.stop();
   });
