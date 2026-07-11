@@ -1,7 +1,4 @@
-import { defineConfig } from "vitest/config";
+import { mergeConfig, defineConfig } from "vitest/config";
+import { baseConfig } from "../../../vitest.config.base";
 
-export default defineConfig({
-  test: {
-    environment: "node",
-  },
-});
+export default mergeConfig(baseConfig, defineConfig({}));
