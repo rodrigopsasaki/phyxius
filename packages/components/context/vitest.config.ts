@@ -1,19 +1,22 @@
-import { defineConfig } from "vitest/config";
+import { mergeConfig, defineConfig } from "vitest/config";
+import { baseConfig, coverageDefaults } from "../../../vitest.config.base";
 
-export default defineConfig({
-  test: {
-    globals: false,
-    environment: "node",
-    coverage: {
-      provider: "v8",
-      reporter: ["text", "lcov", "html"],
-      exclude: ["**/node_modules/**", "**/dist/**", "**/*.config.ts"],
-      thresholds: {
-        statements: 90,
-        branches: 90,
-        functions: 90,
-        lines: 90,
+// Thresholds match clock's (95%) — the two used to drift (90 vs 95) purely
+// because each config was hand-copied. Same shape, same bar, no reason to
+// differ; context's actual coverage clears 95% comfortably.
+export default mergeConfig(
+  baseConfig,
+  defineConfig({
+    test: {
+      coverage: {
+        ...coverageDefaults,
+        thresholds: {
+          statements: 95,
+          branches: 95,
+          functions: 95,
+          lines: 95,
+        },
       },
     },
-  },
-});
+  }),
+);
