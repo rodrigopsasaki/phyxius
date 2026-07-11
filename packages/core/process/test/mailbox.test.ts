@@ -40,6 +40,21 @@ describe("Mailbox", () => {
       const dequeued = mailbox.dequeue();
       expect(dequeued?.seq).toBe(0);
     });
+
+    it("peek shares msg contents by design — the copy boundary is the wrapper", () => {
+      const mailbox = new Mailbox<{ value: number }>(10, { type: "reject" }, processId);
+      mailbox.enqueue({ value: 1 }, 0);
+
+      const peeked = mailbox.peek();
+      peeked!.msg.value = 999;
+
+      // The wrapper (seq, enqueuedAt, the msg reference) is copied, but the
+      // copy is shallow: msg is still the exact object the mailbox holds,
+      // so mutating its contents mutates the still-queued item too. This
+      // is the boundary the peek() comment documents — made executable.
+      const dequeued = mailbox.dequeue();
+      expect(dequeued?.msg.value).toBe(999);
+    });
   });
 
   describe("getItems", () => {

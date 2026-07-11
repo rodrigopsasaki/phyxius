@@ -80,9 +80,14 @@ export class Mailbox<TMsg> {
   }
 
   // Reads the head item without removing it, so the mailbox still owns it.
-  // Returns a copy — never the stored object — so a caller mutating the
-  // result can't corrupt the item that's still queued (and will later be
-  // handed to `dequeue()`).
+  // Returns a copy of the wrapper — seq, enqueuedAt, and the msg reference
+  // are all copied, so mutating those fields on the result can't corrupt
+  // the queued item. The copy is shallow: `msg` itself is still the same
+  // object the mailbox holds. That's by design, not an oversight — the
+  // mailbox transports messages, it does not own their internals, and
+  // deep-copying every peek would tax every consumer for a protection
+  // none of them needs. Callers that mutate properties on the returned
+  // item's `msg` mutate the still-queued message too.
   peek(): MailboxItem<TMsg> | undefined {
     const head = this.items[0];
     return head ? { ...head } : undefined;
