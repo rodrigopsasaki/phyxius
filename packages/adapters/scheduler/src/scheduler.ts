@@ -191,14 +191,23 @@ export function createScheduler(options: SchedulerOptions & { readonly clock: Cl
     let input: unknown;
     try {
       input = await slot.job.input(tick);
-    } catch {
+    } catch (cause) {
       // Input construction failed — treat as if the tick produced a
-      // Handler-style failure. We synthesize a HANDLER_ERROR-shaped
-      // Result rather than invoking. No journal entry from the handler
-      // because the handler never ran; onResult still fires.
+      // Handler-style failure. We synthesize a HANDLER_ERROR-shaped Result
+      // rather than invoking, carrying the original `cause` through
+      // unaltered. No journal entry from the handler because the handler
+      // never ran, so `scheduler:input-error` is the only place the real
+      // message/stack surfaces — emit it before onResult so operators
+      // never lose the original failure.
+      emit?.({
+        type: "scheduler:input-error",
+        name: slot.job.name,
+        tickIndex: tick.tickIndex,
+        cause,
+      });
       const synthesized: Result<unknown, HandlerError> = {
         _tag: "Err",
-        error: { type: "HANDLER_ERROR", cause: new Error("input-thunk threw") },
+        error: { type: "HANDLER_ERROR", cause },
       };
       slot.job.onResult?.(synthesized, tick);
       return;
