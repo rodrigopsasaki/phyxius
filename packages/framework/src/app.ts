@@ -102,14 +102,12 @@ export async function createApp<TAppConfig extends Record<string, unknown> = Rec
       journal,
       sink: stdoutSink<HandlerEvent>(),
       clock,
-      // Sampling policy, evaluated per entry against the *current* config.
-      // The drain re-reads config on every event, so a config hot-reload
-      // takes effect on the next entry — no app restart, no deploy.
-      filter: (entry) => {
-        const snap = config.getAll();
-        if (snap._tag !== "Ok") return true; // if config read fails, err on the side of logging
-        return shouldLog(entry.data, snap.value.observability);
-      },
+      // Sampling policy, evaluated per entry against the *current* config —
+      // through the same last-known-good read every other consumer uses, so
+      // a hot-reload takes effect on the next entry and a FAILED reload
+      // keeps the standing policy instead of degrading to log-everything.
+      // currentConfig() cannot fail post-boot, so there is no error branch.
+      filter: (entry) => shouldLog(entry.data, readObservability()),
     });
   }
 
