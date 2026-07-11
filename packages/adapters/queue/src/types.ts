@@ -139,6 +139,11 @@ export interface QueueConsumerOptions<TInput, TOutput> {
   /**
    * Optional: override the default Result → QueueOutcome mapping. If
    * omitted, `defaultOnResult` is used (see README for the full table).
+   *
+   * Settlement never depends on this callback behaving: if it throws, the
+   * consumer journals a `queue:on_result_error` event and falls back to
+   * `defaultOnResult` for that message rather than letting the throw
+   * escape unacked/unnacked.
    */
   readonly onResult?: (result: Result<TOutput, HandlerError>, message: QueueMessage) => QueueOutcome;
 
@@ -166,10 +171,22 @@ export interface QueueConsumerOptions<TInput, TOutput> {
 export type QueueConsumerEvent =
   | { readonly type: "queue:started"; readonly at: Instant }
   | { readonly type: "queue:stopped"; readonly at: Instant; readonly inFlightAtStop: number }
-  | { readonly type: "queue:receive_error"; readonly at: Instant; readonly cause: unknown }
+  | {
+      readonly type: "queue:receive_error";
+      readonly at: Instant;
+      readonly cause: unknown;
+      /** Consecutive receive() failures including this one — drives the backoff delay. */
+      readonly consecutiveFailures: number;
+    }
   | { readonly type: "queue:ack_error"; readonly at: Instant; readonly messageId: string; readonly cause: unknown }
   | { readonly type: "queue:nack_error"; readonly at: Instant; readonly messageId: string; readonly cause: unknown }
-  | { readonly type: "queue:decode_error"; readonly at: Instant; readonly messageId: string; readonly cause: unknown };
+  | { readonly type: "queue:decode_error"; readonly at: Instant; readonly messageId: string; readonly cause: unknown }
+  | {
+      readonly type: "queue:on_result_error";
+      readonly at: Instant;
+      readonly messageId: string;
+      readonly cause: unknown;
+    };
 
 export type QueueConsumerStatus = "idle" | "running" | "stopping" | "stopped";
 
