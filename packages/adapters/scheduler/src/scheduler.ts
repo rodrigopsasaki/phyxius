@@ -314,29 +314,43 @@ interface JobSlot {
 }
 
 /**
- * Sleep on the clock until the target instant, or reject when the signal
- * aborts. Uses `clock.deadline` so a controlled clock can advance the test
- * deterministically.
+ * Sleep on the clock until the target instant, or resolve early when the
+ * signal aborts. Uses `clock.deadline` (not `sleepOrAbort`) so a controlled
+ * clock can advance the test deterministically and so the deadline's own
+ * drift telemetry keeps firing — this races a wall-clock *deadline*, not a
+ * relative delay, which is exactly the case `sleepOrAbort`'s doc comment
+ * carves out as staying separate.
+ *
+ * `signal` is the scheduler's own long-lived stop signal, reused across
+ * every tick for the life of the scheduler — not a fresh, tick-scoped
+ * signal. So the loser of the race must clean up after itself: when the
+ * deadline wins (every non-aborted tick), the abort listener is removed
+ * explicitly, since `{ once: true }` only retires it when abort actually
+ * fires. Same discipline as `sleepOrAbort` and `raceAttempt`.
  */
-async function sleepUntil(clock: Clock, target: Instant, signal: AbortSignal): Promise<void> {
-  if (signal.aborted) return;
+// Exported (but not re-exported from index.ts) so tests can exercise the
+// abort-listener cleanup directly, the same way scheduler.test.ts already
+// imports `createScheduler` from this file rather than the package root.
+export function sleepUntil(clock: Clock, target: Instant, signal: AbortSignal): Promise<void> {
+  if (signal.aborted) return Promise.resolve();
 
-  const deadlineP = clock.deadline(target);
-  const abortP = new Promise<void>((resolve) => {
-    if (signal.aborted) {
+  return new Promise<void>((resolve) => {
+    let settled = false;
+
+    const onAbort = (): void => {
+      if (settled) return;
+      settled = true;
       resolve();
-      return;
-    }
-    signal.addEventListener(
-      "abort",
-      () => {
-        resolve();
-      },
-      { once: true },
-    );
-  });
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
 
-  await Promise.race([deadlineP, abortP]);
+    void clock.deadline(target).then(() => {
+      if (settled) return;
+      settled = true;
+      signal.removeEventListener("abort", onAbort);
+      resolve();
+    });
+  });
 }
 
 // Prevent unused-import noise when parallelism features are re-exported

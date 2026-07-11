@@ -1,3 +1,4 @@
+import { getEventListeners } from "node:events";
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
@@ -7,7 +8,7 @@ import { Journal } from "@phyxiusjs/journal";
 import { observe } from "@phyxiusjs/observe";
 import { cb, defineHandler, retry, spawn, type HandlerEvent, type HandlerRuntime } from "@phyxiusjs/handler";
 
-import { createScheduler } from "../src/scheduler.js";
+import { createScheduler, sleepUntil } from "../src/scheduler.js";
 import { at, every, never } from "../src/schedule.js";
 import type { SchedulerEvent } from "../src/types.js";
 
@@ -70,6 +71,72 @@ async function stepClock(
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────────
+
+describe("sleepUntil — abort-listener cleanup", () => {
+  it("resolves once the deadline passes", async () => {
+    const clock = createControlledClock({ initialTime: 1_000 });
+    const controller = new AbortController();
+
+    const promise = sleepUntil(clock, { wallMs: 1_100, monoMs: 1_100 } as Instant, controller.signal);
+
+    clock.advanceBy(100 as never);
+    await expect(promise).resolves.toBeUndefined();
+  });
+
+  it("resolves early when the signal aborts before the deadline", async () => {
+    const clock = createControlledClock({ initialTime: 1_000 });
+    const controller = new AbortController();
+
+    const promise = sleepUntil(clock, { wallMs: 2_000, monoMs: 2_000 } as Instant, controller.signal);
+    controller.abort();
+
+    await expect(promise).resolves.toBeUndefined();
+  });
+
+  it("resolves immediately when the signal is already aborted on entry", async () => {
+    const clock = createControlledClock({ initialTime: 1_000 });
+    const controller = new AbortController();
+    controller.abort();
+
+    await expect(
+      sleepUntil(clock, { wallMs: 2_000, monoMs: 2_000 } as Instant, controller.signal),
+    ).resolves.toBeUndefined();
+    // Already-aborted is a fast path — no listener is ever attached.
+    expect(getEventListeners(controller.signal, "abort")).toHaveLength(0);
+  });
+
+  it("removes its abort listener once the deadline wins, leaving no listener leak", async () => {
+    const clock = createControlledClock({ initialTime: 1_000 });
+    const controller = new AbortController();
+
+    const promise = sleepUntil(clock, { wallMs: 1_100, monoMs: 1_100 } as Instant, controller.signal);
+    expect(getEventListeners(controller.signal, "abort")).toHaveLength(1);
+
+    clock.advanceBy(100 as never);
+    await promise;
+
+    expect(getEventListeners(controller.signal, "abort")).toHaveLength(0);
+  });
+
+  it("does not accumulate listeners on a long-lived signal across many non-aborted ticks", async () => {
+    // Regression for the leak flagged in the #22 PR body: the scheduler
+    // reuses one AbortController across its whole lifetime, so every tick
+    // that wins on the deadline (the normal, non-aborted case) must leave
+    // the shared signal exactly as it found it.
+    const clock = createControlledClock({ initialTime: 1_000 });
+    const controller = new AbortController();
+
+    let targetMs = clock.now().wallMs;
+    for (let tick = 0; tick < 25; tick++) {
+      targetMs += 10;
+      const promise = sleepUntil(clock, { wallMs: targetMs, monoMs: targetMs } as Instant, controller.signal);
+      clock.advanceBy(10 as never);
+      await promise;
+    }
+
+    expect(getEventListeners(controller.signal, "abort")).toHaveLength(0);
+  });
+});
 
 describe("createScheduler — basic firing", () => {
   it("fires a single job on its schedule", async () => {
