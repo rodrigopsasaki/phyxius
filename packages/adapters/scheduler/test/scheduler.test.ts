@@ -385,6 +385,49 @@ describe("onResult callback", () => {
   });
 });
 
+describe("input-thunk failure", () => {
+  it("preserves the original cause on both the emitted event and the synthesized Result", async () => {
+    const { clock, runtime } = setup();
+    const handler = await spawn(makeCounterHandler(), runtime);
+
+    const originalError = new Error("upstream credentials expired");
+    const events: SchedulerEvent[] = [];
+    const results: { tickIndex: number; cause: unknown }[] = [];
+
+    const scheduler = createScheduler({
+      clock,
+      emit: (e) => events.push(e),
+      jobs: [
+        {
+          name: "flaky-input",
+          schedule: every(ms(50)),
+          handler,
+          input: () => {
+            throw originalError;
+          },
+          onResult: (result, tick) => {
+            if (result._tag === "Err" && result.error.type === "HANDLER_ERROR") {
+              results.push({ tickIndex: tick.tickIndex, cause: result.error.cause });
+            }
+          },
+        },
+      ],
+    });
+
+    await scheduler.start();
+    await stepClock(clock, 60);
+    await scheduler.stop();
+    await handler.stop();
+
+    const inputErrors = events.filter((e) => e.type === "scheduler:input-error");
+    expect(inputErrors.length).toBeGreaterThanOrEqual(1);
+    expect(inputErrors[0]).toMatchObject({ name: "flaky-input", tickIndex: 0, cause: originalError });
+
+    expect(results.length).toBeGreaterThanOrEqual(1);
+    expect(results[0]?.cause).toBe(originalError);
+  });
+});
+
 describe("correlationId + context", () => {
   it("sets correlationId to `${jobName}:${tickIndex}` and passes scheduledAt through context", async () => {
     const { clock, journal, runtime } = setup();

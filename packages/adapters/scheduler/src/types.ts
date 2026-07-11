@@ -157,4 +157,16 @@ export type SchedulerEvent =
       readonly type: "scheduler:job-exhausted";
       readonly name: string;
       readonly at: Instant;
+    }
+  | {
+      /**
+       * `job.input(tick)` threw or rejected before the handler could be
+       * invoked. `cause` is the original thrown value, unwrapped — same
+       * convention as the queue consumer's `*_error` events — so operators
+       * see the real message/stack, not a synthesized placeholder.
+       */
+      readonly type: "scheduler:input-error";
+      readonly name: string;
+      readonly tickIndex: number;
+      readonly cause: unknown;
     };
