@@ -202,6 +202,7 @@ export function createScheduler(options: SchedulerOptions & { readonly clock: Cl
       emit?.({
         type: "scheduler:input-error",
         name: slot.job.name,
+        at: clock.now(),
         tickIndex: tick.tickIndex,
         cause,
       });

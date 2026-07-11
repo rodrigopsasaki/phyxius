@@ -205,7 +205,7 @@ type SchedulerEvent =
   | { type: "scheduler:tick-fired"; name; scheduledAt; firedAt; driftMs; tickIndex }
   | { type: "scheduler:tick-skipped"; name; scheduledAt; reason }
   | { type: "scheduler:job-exhausted"; name; at }
-  | { type: "scheduler:input-error"; name; tickIndex; cause };
+  | { type: "scheduler:input-error"; name; at; tickIndex; cause };
 ```
 
 Lifecycle events are separate from the journal on purpose: they're operator-facing, not per-invocation observability. Wire them to a metrics sink or discard them.
