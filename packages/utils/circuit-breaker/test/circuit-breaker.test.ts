@@ -173,6 +173,59 @@ describe("@phyxiusjs/circuit-breaker", () => {
     });
   });
 
+  describe("half-open admission is single-probe under concurrency", () => {
+    it("admits exactly one probe when two callers race the elapsed reset window", async () => {
+      const clock = createControlledClock({ initialTime: 0 });
+      const breaker = createCircuitBreaker({
+        policy: cb.policy({ failureThreshold: 1, resetTimeout: ms(500) }),
+        clock,
+      });
+
+      // Open the circuit.
+      await breaker
+        .execute(async () => {
+          throw new Error("fail");
+        })
+        .catch(() => {});
+      expect(breaker.snapshot().state).toBe("open");
+
+      // Elapse the reset window so both callers classify as probe-eligible.
+      clock.advanceBy(ms(500));
+
+      // A probe that parks on an external gate so both callers can claim
+      // before either resolves — this is the deref→act→swap interleaving.
+      let probeCalls = 0;
+      let releaseProbe!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        releaseProbe = resolve;
+      });
+      const probe = async () => {
+        probeCalls++;
+        await gate;
+        return "probe-ran";
+      };
+
+      // Fire both concurrently. Their synchronous classify/claim runs before
+      // any await resolves, so they genuinely race the half-open slot.
+      const first = breaker.execute(probe);
+      const second = breaker.execute(probe);
+
+      releaseProbe();
+      const [a, b] = await Promise.all([first, second]);
+
+      // Exactly one probe ran; the loser short-circuited.
+      expect(probeCalls).toBe(1);
+      const oks = [a, b].filter(isOk);
+      const errs = [a, b].filter(isErr);
+      expect(oks).toHaveLength(1);
+      expect(errs).toHaveLength(1);
+      if (isErr(errs[0]!)) expect(errs[0]!.error.type).toBe("CIRCUIT_OPEN");
+
+      // The winning probe succeeded, so the circuit is closed.
+      expect(breaker.snapshot().state).toBe("closed");
+    });
+  });
+
   describe("events", () => {
     it("should emit state transition events", async () => {
       const clock = createControlledClock({ initialTime: 0 });

@@ -85,6 +85,50 @@ export interface CircuitOpenError {
   readonly willRetryAfter: number;
 }
 
+// ── Admission ─────────────────────────────────────────────────────────────────
+
+/**
+ * What `execute` should do given the current snapshot, computed before any
+ * state mutation. Classification is kept separate from action so the
+ * deref→act→swap sequence can't smuggle in an implicit transition: we decide
+ * here, then act once.
+ *
+ *  - **pass** — closed; run `fn` directly.
+ *  - **short-circuit** — fail fast. Either open within the reset window, or
+ *    half-open with a probe already in flight (the contract admits exactly
+ *    one probe, so a second concurrent caller must not run).
+ *  - **claim-probe** — open and the reset window elapsed. Admission is granted
+ *    by atomically claiming the half-open slot (`open` → `half-open`) via CAS.
+ *    The winner runs `fn`; losers fall back to short-circuit.
+ */
+type Admission =
+  | { readonly kind: "pass" }
+  | { readonly kind: "short-circuit"; readonly openedAt: number }
+  | { readonly kind: "claim-probe"; readonly from: CircuitSnapshot };
+
+/**
+ * Pure classification: map a snapshot + current time to an admission decision.
+ * No mutation, no side effects — the caller acts on the result. Total over the
+ * three named states so a new state can't silently fall through to `pass`.
+ */
+function classify(current: CircuitSnapshot, nowMs: number, resetTimeout: number): Admission {
+  switch (current.state) {
+    case "closed":
+      return { kind: "pass" };
+    case "half-open":
+      // A probe is already in flight (some caller claimed the slot). Until it
+      // resolves to closed or open, additional callers fail fast — one probe.
+      return { kind: "short-circuit", openedAt: current.openedAt };
+    case "open": {
+      const elapsed = nowMs - current.openedAt;
+      if (elapsed < resetTimeout) {
+        return { kind: "short-circuit", openedAt: current.openedAt };
+      }
+      return { kind: "claim-probe", from: current };
+    }
+  }
+}
+
 // ── Interface ───────────────────────────────────────────────────────────────
 
 export interface CircuitBreaker {
@@ -157,19 +201,33 @@ export function createCircuitBreaker(options: CircuitBreakerOptions): CircuitBre
         return ok(value);
       }
 
-      // Before calling: check if we should transition open → half-open.
-      const current = state.deref();
-      if (current.state === "open") {
-        const elapsed = clock.now().monoMs - current.openedAt;
-        if (elapsed < policy.resetTimeout) {
+      // Classify first (pure), then act once. When the reset window has
+      // elapsed we must admit exactly one probe: claim the half-open slot with
+      // a single CAS (open → half-open). Concurrent callers race the CAS — the
+      // loser sees `false` and short-circuits, so only one trial runs.
+      const admission = classify(state.deref(), clock.now().monoMs, policy.resetTimeout);
+
+      if (admission.kind === "short-circuit") {
+        return err({
+          type: "CIRCUIT_OPEN",
+          openedAt: admission.openedAt,
+          willRetryAfter: admission.openedAt + policy.resetTimeout,
+        });
+      }
+
+      if (admission.kind === "claim-probe") {
+        const claimed = state.compareAndSet(admission.from, { ...admission.from, state: "half-open" });
+        if (!claimed) {
+          // Another caller already took the probe slot (or the state moved on);
+          // re-derive and short-circuit rather than running a second trial.
+          const now = state.deref();
+          const openedAt = now.state === "open" ? now.openedAt : admission.from.openedAt;
           return err({
             type: "CIRCUIT_OPEN",
-            openedAt: current.openedAt,
-            willRetryAfter: current.openedAt + policy.resetTimeout,
+            openedAt,
+            willRetryAfter: openedAt + policy.resetTimeout,
           });
         }
-        // Timeout elapsed — allow a probe call.
-        state.swap((s) => ({ ...s, state: "half-open" }));
       }
 
       try {
