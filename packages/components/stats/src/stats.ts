@@ -5,6 +5,50 @@ import type { Journal } from "@phyxiusjs/journal";
 import { summarize } from "./percentiles.js";
 import type { HandlerSnapshot, HandlerThreshold, Stats, StatsEvent, ThresholdField } from "./types.js";
 
+// ── Breach state ────────────────────────────────────────────────────────────
+
+/**
+ * The breach lifecycle for a single (handler, field) pair, named explicitly
+ * instead of inferred from `limit`/`isBreaching`/`wasBreaching` compared
+ * inline at each call site.
+ *
+ *  - `not-monitored` — no limit configured for this field. Nothing to check.
+ *  - `ok`             — under the limit, and wasn't breaching before. Steady state.
+ *  - `breach-active`  — still over the limit from a prior update. Edge-triggered:
+ *    no new event, the alert already fired on entry.
+ *  - `breach-entered` — just crossed over the limit. Emits `stats:threshold-breached`.
+ *  - `recovered`      — was breaching, now back under the limit. Emits
+ *    `stats:threshold-recovered`.
+ *
+ * `breach-entered` and `recovered` carry `limit` themselves — the type says
+ * "this state only exists when a limit was configured," so the emitting code
+ * never has to re-check `limit !== undefined`.
+ */
+type BreachState =
+  | { readonly kind: "not-monitored" }
+  | { readonly kind: "ok" }
+  | { readonly kind: "breach-active" }
+  | { readonly kind: "breach-entered"; readonly limit: number }
+  | { readonly kind: "recovered"; readonly limit: number };
+
+/**
+ * Pure classification: map the prior breach state plus the current
+ * value-vs-limit comparison to a named `BreachState`. No mutation, no
+ * emission — `commitBreach` acts on the result once. Same classify/commit
+ * split as `classifyFlush`/`flushBuffer` in the drain package and
+ * `classify`/`execute` in the circuit breaker.
+ */
+function classifyBreach(wasBreaching: boolean, value: number, limit: number | undefined): BreachState {
+  if (limit === undefined) return { kind: "not-monitored" };
+
+  const isBreaching = value > limit;
+
+  if (isBreaching && wasBreaching) return { kind: "breach-active" };
+  if (isBreaching) return { kind: "breach-entered", limit };
+  if (wasBreaching) return { kind: "recovered", limit };
+  return { kind: "ok" };
+}
+
 // ── Public: createStats ────────────────────────────────────────────────────
 
 /**
@@ -102,32 +146,53 @@ export function createStats(options: {
     ];
 
     for (const { field, value, limit } of checks) {
-      if (limit === undefined) continue;
+      const state = classifyBreach(buf.breaching.has(field), value, limit);
+      commitBreach(handler, field, value, buf, state);
+    }
+  }
 
-      const wasBreaching = buf.breaching.has(field);
-      const isBreaching = value > limit;
+  // ── Breach commitment ───────────────────────────────────────────────────
 
-      if (isBreaching && !wasBreaching) {
+  /**
+   * Action — consumes a classified `BreachState`; never re-derives it from
+   * `buf.breaching` or the value/limit comparison. Owns the `breaching` set
+   * mutation and the emitted event, one branch per named state so a state
+   * added later can't silently fall through unhandled.
+   */
+  function commitBreach(
+    handler: string,
+    field: ThresholdField,
+    value: number,
+    buf: HandlerBuffer,
+    state: BreachState,
+  ): void {
+    switch (state.kind) {
+      case "not-monitored":
+      case "ok":
+      case "breach-active":
+        return;
+      case "breach-entered":
         buf.breaching.add(field);
         emit?.({
           type: "stats:threshold-breached",
           handler,
           field,
           value,
-          limit,
+          limit: state.limit,
           at: clock.now(),
         });
-      } else if (!isBreaching && wasBreaching) {
+        return;
+      case "recovered":
         buf.breaching.delete(field);
         emit?.({
           type: "stats:threshold-recovered",
           handler,
           field,
           value,
-          limit,
+          limit: state.limit,
           at: clock.now(),
         });
-      }
+        return;
     }
   }
 
