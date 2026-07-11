@@ -1,5 +1,5 @@
 import { createSystemClock, type Clock } from "@phyxiusjs/clock";
-import { createConfig, type ConfigInstance } from "@phyxiusjs/config";
+import { createConfig, type ConfigError, type ConfigEvent, type ConfigInstance } from "@phyxiusjs/config";
 import { createDrain, stdoutSink, type Drain } from "@phyxiusjs/drain";
 import { spawn, type HandlerEvent, type HandlerSpec, type RunningHandler } from "@phyxiusjs/handler";
 import { Journal } from "@phyxiusjs/journal";
@@ -33,6 +33,54 @@ export async function createApp<TAppConfig extends Record<string, unknown> = Rec
 
   const config = await resolveConfig<TAppConfig>(options, clock);
 
+  // Boot fails closed. A config the caller asked for — a file path, an
+  // inline object, or a pre-built ConfigInstance — that didn't validate
+  // must never be silently replaced by schema defaults; that's the
+  // founding invariant this framework exists to hold. The one path that's
+  // exempt is "no config supplied at all", which resolves to `{}` merged
+  // with `{ type: "defaults" }` — always valid, since every framework
+  // field has a default (see frameworkConfigSchema).
+  const bootedConfig = config.getAll();
+  if (bootedConfig._tag === "Err") {
+    config.dispose();
+    throw new Error(describeBootFailure(options.config, bootedConfig.error));
+  }
+
+  // Config errors after boot are observable like every other framework
+  // event: CONFIG_ERROR / CONFIG_RELOADED map into the shared journal.
+  // CONFIG_LOADED / WATCH_STARTED / WATCH_STOPPED are deliberately not
+  // forwarded — `subscribe` replays the most recent event immediately, and
+  // the most recent event at this point is always CONFIG_LOADED (boot just
+  // succeeded), which would otherwise land a synthetic entry before the
+  // app has done anything.
+  config.subscribe((event) => {
+    if (event.type !== "CONFIG_ERROR" && event.type !== "CONFIG_RELOADED") return;
+    journal.append(configEventToHandlerEvent(event));
+  });
+
+  // Last-known-good cache. A failed hot-reload leaves `lastError` set on
+  // the config instance — by design, `getAll()` refuses to hand back a
+  // read once the most recent load failed — but the previously-validated
+  // data underneath is untouched. This mirrors that decision at the
+  // framework layer: every place *this* file reads config keeps running on
+  // the last value that validated, instead of falling back to
+  // `frameworkConfigSchema.parse({})`.
+  let lastGoodConfig: FrameworkConfig & TAppConfig = bootedConfig.value;
+
+  function currentConfig(): FrameworkConfig & TAppConfig {
+    const snap = config.getAll();
+    if (snap._tag === "Ok") lastGoodConfig = snap.value;
+    return lastGoodConfig;
+  }
+
+  function readObservability(): FrameworkConfig["observability"] {
+    return currentConfig().observability;
+  }
+
+  function readServer(): FrameworkConfig["server"] {
+    return currentConfig().server;
+  }
+
   // ── Drain + sampling ──────────────────────────────────────────────────
 
   // The drain lives regardless of `log_drain: "none"` — stats still needs
@@ -40,8 +88,7 @@ export async function createApp<TAppConfig extends Record<string, unknown> = Rec
   let drain: Drain | null = null;
 
   function buildDrain(): Drain {
-    const obs = config.getAll();
-    const mode = obs._tag === "Ok" ? obs.value.observability.log_drain : "stdout";
+    const mode = readObservability().log_drain;
 
     if (mode === "none") {
       return createDrain<HandlerEvent>({
@@ -68,7 +115,7 @@ export async function createApp<TAppConfig extends Record<string, unknown> = Rec
 
   // ── Stats ─────────────────────────────────────────────────────────────
 
-  const statsConfig = readObservability(config).stats;
+  const statsConfig = readObservability().stats;
   const stats = createStats({
     journal,
     clock,
@@ -129,7 +176,7 @@ export async function createApp<TAppConfig extends Record<string, unknown> = Rec
       // Each invocation re-reads the flag from config, so flipping
       // `observability.observe.include_extra` in phyxius.yaml hot-reloads
       // on the next handler event — no restart needed.
-      includeExtra: () => readObservability(config).observe.include_extra,
+      includeExtra: () => readObservability().observe.include_extra,
     });
     handlers.push(handler as RunningHandler<unknown, unknown>);
     return handler;
@@ -183,7 +230,11 @@ export async function createApp<TAppConfig extends Record<string, unknown> = Rec
         routes: routes as ReadonlyArray<unknown> as Parameters<typeof createHttpAdapter>[0]["routes"],
       });
 
-      const serverPort = readServer(config)?.port;
+      // `readServer()` never fails silently on a load error — boot already
+      // rejected an unusable config, and a later reload failure keeps the
+      // last-known-good value. `undefined` here can only mean the resolved
+      // config genuinely has no `server` section.
+      const serverPort = readServer()?.port;
       if (serverPort === undefined) {
         throw new Error(
           "routes registered but server.port is missing from config. Either add `server.port` to your config or don't call app.route(...).",
@@ -356,19 +407,57 @@ async function resolveConfig<TAppConfig extends Record<string, unknown>>(
   });
 }
 
-function readObservability<T>(config: ConfigInstance<T & FrameworkConfig>): FrameworkConfig["observability"] {
-  const snap = config.getAll();
-  if (snap._tag !== "Ok") {
-    // Shouldn't happen — schema validates at createConfig time.
-    return frameworkConfigSchema.parse({}).observability;
-  }
-  return (snap.value as FrameworkConfig).observability;
+/**
+ * Describe why `createApp` is refusing to boot. Includes the source the
+ * caller pointed us at (so a bad file path is visible without re-deriving
+ * it from the ConfigError) and the underlying ConfigError's own type and
+ * message (the real load/parse reason) — never a generic "config invalid".
+ */
+function describeBootFailure(requestedConfig: unknown, error: ConfigError): string {
+  const source = describeConfigSource(requestedConfig);
+  return `createApp: config failed to load from ${source} — ${error.type}: ${configErrorMessage(error)}. Refusing to boot on schema defaults.`;
 }
 
-function readServer<T>(config: ConfigInstance<T & FrameworkConfig>): FrameworkConfig["server"] {
-  const snap = config.getAll();
-  if (snap._tag !== "Ok") return undefined;
-  return (snap.value as FrameworkConfig).server;
+function describeConfigSource(requestedConfig: unknown): string {
+  if (typeof requestedConfig === "string") return `file "${requestedConfig}"`;
+  const isConfigInstance = requestedConfig !== null && typeof requestedConfig === "object" && "get" in requestedConfig;
+  return isConfigInstance ? "the supplied ConfigInstance" : "the inline config object";
+}
+
+function configErrorMessage(error: ConfigError): string {
+  switch (error.type) {
+    case "FILE_NOT_FOUND":
+      return `file not found: ${error.path}`;
+    case "PATH_NOT_FOUND":
+      return `path not found: ${error.path}`;
+    case "SOURCE_ERROR":
+      return `${error.source}: ${error.message}`;
+    case "PARSE_ERROR":
+    case "VALIDATION_ERROR":
+      return error.message;
+  }
+}
+
+/**
+ * Map a post-boot CONFIG_ERROR / CONFIG_RELOADED event into the HandlerEvent
+ * shape the journal carries — the same move `statsEventToHandlerEvent` makes
+ * for stats alerts, so config problems show up in the same observability
+ * stream instead of being emitted to a journal nobody subscribed to.
+ */
+function configEventToHandlerEvent(
+  event: Extract<ConfigEvent, { type: "CONFIG_ERROR" | "CONFIG_RELOADED" }>,
+): HandlerEvent {
+  return {
+    name: event.type,
+    invocationId: `config:${event.type}:${event.at.wallMs}`,
+    source: "config",
+    startedAt: event.at,
+    completedAt: event.at,
+    durationMs: 0,
+    attempts: 0,
+    outcome: event.type === "CONFIG_ERROR" ? "failure" : "success",
+    observed: event.type === "CONFIG_ERROR" ? { error: event.error } : { changes: event.changes },
+  };
 }
 
 /**
