@@ -59,6 +59,10 @@ export class Mailbox<TMsg> {
     return true;
   }
 
+  // Removes and returns the head item. This is the only method that hands
+  // out the mailbox's own item object: `shift()` drops it from `items` in
+  // the same step, so the mailbox retains no reference to it afterward and
+  // ownership passes entirely to the caller.
   dequeue(): MailboxItem<TMsg> | undefined {
     return this.items.shift();
   }
@@ -75,12 +79,23 @@ export class Mailbox<TMsg> {
     this.items.length = 0;
   }
 
+  // Reads the head item without removing it, so the mailbox still owns it.
+  // Returns a copy of the wrapper — seq, enqueuedAt, and the msg reference
+  // are all copied, so mutating those fields on the result can't corrupt
+  // the queued item. The copy is shallow: `msg` itself is still the same
+  // object the mailbox holds. That's by design, not an oversight — the
+  // mailbox transports messages, it does not own their internals, and
+  // deep-copying every peek would tax every consumer for a protection
+  // none of them needs. Callers that mutate properties on the returned
+  // item's `msg` mutate the still-queued message too.
   peek(): MailboxItem<TMsg> | undefined {
-    return this.items[0];
+    const head = this.items[0];
+    return head ? { ...head } : undefined;
   }
 
-  // Get all items without removing them (for testing/inspection)
+  // Snapshot of all items, still owned by the mailbox (for testing/inspection).
+  // Each item is copied for the same reason as `peek()`.
   getItems(): readonly MailboxItem<TMsg>[] {
-    return [...this.items];
+    return this.items.map((item) => ({ ...item }));
   }
 }
