@@ -124,9 +124,9 @@ export interface ScheduledMessage<TMsg> {
 }
 
 export interface MailboxItem<TMsg> {
-  msg: TMsg;
-  seq: number;
-  enqueuedAt: number;
+  readonly msg: TMsg;
+  readonly seq: number;
+  readonly enqueuedAt: number;
 }
 
 // ── Errors ──────────────────────────────────────────────────────────────────
