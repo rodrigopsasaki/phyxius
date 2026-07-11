@@ -288,6 +288,31 @@ describe("env parser", () => {
       }
     });
 
+    it("should not silently round integers beyond the safe range", () => {
+      const envVars = {
+        VALUES__SNOWFLAKE_ID: "9007199254740993", // 2^53 + 1, not a safe integer
+        VALUES__SMALL_INT: "42",
+        VALUES__FLOAT: "3.14",
+        VALUES__NEGATIVE: "-100",
+      };
+
+      const result = parseEnv(envVars, { convention: "dbt" });
+
+      expect(result._tag).toBe("Ok");
+      if (result._tag === "Ok") {
+        expect(result.value).toEqual({
+          values: {
+            // Kept as string: Number("9007199254740993") rounds to ...992, so a
+            // downstream schema (z.coerce.bigint, a string id) coerces losslessly.
+            snowflakeId: "9007199254740993",
+            smallInt: 42, // safe integers still coerce
+            float: 3.14, // floats still coerce
+            negative: -100, // negative safe integers still coerce
+          },
+        });
+      }
+    });
+
     it("should handle special characters in values", () => {
       const envVars = {
         CONFIG__URL: "https://example.com?key=value&foo=bar",
