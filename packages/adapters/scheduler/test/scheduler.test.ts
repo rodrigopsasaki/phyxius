@@ -488,7 +488,15 @@ describe("input-thunk failure", () => {
 
     const inputErrors = events.filter((e) => e.type === "scheduler:input-error");
     expect(inputErrors.length).toBeGreaterThanOrEqual(1);
-    expect(inputErrors[0]).toMatchObject({ name: "flaky-input", tickIndex: 0, cause: originalError });
+    expect(inputErrors[0]).toMatchObject({
+      name: "flaky-input",
+      // every(ms(50)) from initialTime 1_000 fires tick 0 at 1_050 — same
+      // first-tick timing asserted elsewhere in this file (see the
+      // correlationId + context test's scheduledAtWallMs: 1050).
+      at: { wallMs: 1_050, monoMs: 1_050 },
+      tickIndex: 0,
+      cause: originalError,
+    });
 
     expect(results.length).toBeGreaterThanOrEqual(1);
     expect(results[0]?.cause).toBe(originalError);

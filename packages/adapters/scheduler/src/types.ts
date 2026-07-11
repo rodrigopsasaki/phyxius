@@ -167,6 +167,7 @@ export type SchedulerEvent =
        */
       readonly type: "scheduler:input-error";
       readonly name: string;
+      readonly at: Instant;
       readonly tickIndex: number;
       readonly cause: unknown;
     };
