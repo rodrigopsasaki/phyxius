@@ -1,4 +1,4 @@
-import type { Clock, Millis } from "@phyxiusjs/clock";
+import { sleepOrAbort, type Clock, type Millis } from "@phyxiusjs/clock";
 import { ok, err, type Result } from "@phyxiusjs/fp";
 
 // ── Policy as data ──────────────────────────────────────────────────────────
@@ -193,32 +193,5 @@ export async function runWithRetry<T>(
     type: "EXHAUSTED",
     attempts: policy.maxAttempts,
     lastError,
-  });
-}
-
-async function sleepOrAbort(clock: Clock, delay: Millis, signal: AbortSignal | undefined): Promise<boolean> {
-  if (!signal) {
-    await clock.sleep(delay);
-    return false;
-  }
-  if (signal.aborted) return true;
-
-  return new Promise<boolean>((resolve) => {
-    let settled = false;
-
-    const onAbort = () => {
-      if (settled) return;
-      settled = true;
-      resolve(true);
-    };
-
-    signal.addEventListener("abort", onAbort, { once: true });
-
-    clock.sleep(delay).then(() => {
-      if (settled) return;
-      settled = true;
-      signal.removeEventListener("abort", onAbort);
-      resolve(false);
-    });
   });
 }
