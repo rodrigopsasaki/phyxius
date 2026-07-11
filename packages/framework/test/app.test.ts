@@ -484,6 +484,36 @@ describe("createApp — boot fails closed on unusable config", () => {
 
     await expect(createApp({ clock, config: configPath })).rejects.toThrow(/PARSE_ERROR/);
   });
+
+  it("rejects at boot when observability contains an unknown key, naming the key and its path", async () => {
+    const clock = createControlledClock({ initialTime: 0 });
+
+    // Deliberately malformed config — cast past the typed `config` field
+    // (like the "typed config extension" test above does) so the typo
+    // reaches the runtime parser instead of being caught by TS.
+    await expect(
+      createApp({
+        clock,
+        config: { observability: { log_sampling: { ratio_of_succesful_requests: 0.5 } } } as never,
+      }),
+    ).rejects.toThrow(/VALIDATION_ERROR.*ratio_of_succesful_requests/s);
+  });
+
+  it("rejects at boot when server contains an unknown key, naming the key and its path", async () => {
+    const clock = createControlledClock({ initialTime: 0 });
+
+    await expect(createApp({ clock, config: { server: { port: 3000, hots: "0.0.0.0" } } as never })).rejects.toThrow(
+      /VALIDATION_ERROR.*hots/s,
+    );
+  });
+
+  it("rejects at boot when a top-level key is a typo-adjacent near-miss of a reserved slice", async () => {
+    const clock = createControlledClock({ initialTime: 0 });
+
+    await expect(createApp({ clock, config: { observabilty: { log_drain: "none" } } as never })).rejects.toThrow(
+      /did you mean.*observability/,
+    );
+  });
 });
 
 // ── Post-boot config errors reach the journal, last-known-good is kept ──────
@@ -557,6 +587,53 @@ describe("createApp — post-boot config errors", () => {
 
     // The running app kept serving the last-known-good value — include_extra
     // stayed true — instead of reverting to the schema default (false).
+    await handler.invoke({ customerId: "alice", prompt: "after" });
+    const tieredEntries = journal.getSnapshot().entries.filter((e) => e.data.name === "tiered");
+    expect(tieredEntries).toHaveLength(2);
+    expect(tieredEntries[1]?.data.observed).toMatchObject({
+      customerId: "alice",
+      debugPrompt: "after",
+    });
+
+    await app.stop();
+  });
+
+  it("a hot-reload introducing an unknown key inside a reserved slice journals CONFIG_ERROR and keeps last-known-good", async () => {
+    const clock = createControlledClock({ initialTime: 0 });
+    const journal = new Journal<HandlerEvent>({ clock });
+    const configPath = join(testDir, "reload-unknown-key.json");
+    writeFileSync(
+      configPath,
+      JSON.stringify({ observability: { log_drain: "none", observe: { include_extra: true } } }),
+    );
+
+    const app = await createApp({ clock, journal, config: configPath });
+    const handler = await app.use(makeTieredSpec());
+
+    await handler.invoke({ customerId: "alice", prompt: "before" });
+
+    // Introduce a typo'd key inside the reserved `observability` slice —
+    // this must fail the same way malformed JSON does: CONFIG_ERROR
+    // journaled, last-known-good kept serving. Not silently accepted with
+    // `include_extra` reset to its schema default.
+    writeFileSync(
+      configPath,
+      JSON.stringify({ observability: { log_drain: "none", observe: { include_extraaa: true } } }),
+    );
+    const reloadResult = app.config.reload();
+    expect(reloadResult._tag).toBe("Err");
+
+    expect(app.config.getAll()._tag).toBe("Err");
+
+    const configErrors = journal.getSnapshot().entries.filter((e) => e.data.name === "CONFIG_ERROR");
+    expect(configErrors).toHaveLength(1);
+    expect(configErrors[0]?.data.source).toBe("config");
+    expect(configErrors[0]?.data.outcome).toBe("failure");
+    expect(configErrors[0]?.data.observed).toMatchObject({ error: { type: "VALIDATION_ERROR" } });
+
+    // The running app kept serving the last-known-good value — include_extra
+    // stayed true — instead of accepting the typo'd config with the flag
+    // silently stripped back down to the schema default (false).
     await handler.invoke({ customerId: "alice", prompt: "after" });
     const tieredEntries = journal.getSnapshot().entries.filter((e) => e.data.name === "tiered");
     expect(tieredEntries).toHaveLength(2);

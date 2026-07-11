@@ -1,4 +1,6 @@
-import { z } from "zod";
+import { z, type RefinementCtx } from "zod";
+
+import { findTypoOfReservedKey } from "./typo-adjacency.js";
 
 // ── Framework config slice ────────────────────────────────────────────────
 
@@ -9,8 +11,30 @@ import { z } from "zod";
  *
  * Every field has a sensible default so that a config file with just
  * `server: { port: 3000 }` is enough to get a working app.
+ *
+ * Strictness boundary: `server` and `observability` are closed worlds —
+ * every object at every nesting level inside them is `.strict()`, so an
+ * unrecognized key anywhere in there (`observabilty:` inside `server`,
+ * a misspelled field inside `log_sampling`, an extra key on a per-handler
+ * threshold) is a hard parse error naming the key and its path, not a
+ * silent strip-and-default. Absent keys are unaffected — every field here
+ * still has a default, and `.strict()` only rejects keys that are actually
+ * *present* and unrecognized. #19 already makes a parse error fatal at
+ * boot and, post-boot, journals `CONFIG_ERROR` while keeping last-known-good
+ * — this schema is the only thing that changed; that machinery is reused
+ * as-is (see app.ts).
+ *
+ * Everywhere else at the top level stays OPEN: apps put their own keys
+ * beside the reserved ones (see the README's `features` example) and
+ * `appSchema` intersects a user schema over this one, so an unrecognized
+ * top-level key is, by design, an app key — not an error. The one narrow
+ * exception is `rejectTypoAdjacentTopLevelKeys` below: a top-level key
+ * whose lowercase form is within edit distance 1 of `server` or
+ * `observability` is rejected with a "did you mean" error instead of
+ * silently riding along as inert app config while the real slice defaults
+ * underneath it.
  */
-export const frameworkConfigSchema = z.object({
+const frameworkConfigObjectSchema = z.object({
   /**
    * HTTP server configuration. Only read if any `app.route(...)` was
    * registered; pure handler / scheduler / consumer apps can omit this
@@ -26,6 +50,7 @@ export const frameworkConfigSchema = z.object({
        */
       correlation_id_headers: z.array(z.string()).optional(),
     })
+    .strict()
     .optional(),
 
   /**
@@ -61,6 +86,7 @@ export const frameworkConfigSchema = z.object({
           /** Failures are always logged unless you explicitly opt out. */
           log_all_failures: z.boolean().default(true),
         })
+        .strict()
         .default({}),
 
       /**
@@ -80,15 +106,18 @@ export const frameworkConfigSchema = z.object({
           thresholds: z
             .record(
               z.string(),
-              z.object({
-                p50_ms: z.number().optional(),
-                p95_ms: z.number().optional(),
-                p99_ms: z.number().optional(),
-                error_rate: z.number().min(0).max(1).optional(),
-              }),
+              z
+                .object({
+                  p50_ms: z.number().optional(),
+                  p95_ms: z.number().optional(),
+                  p99_ms: z.number().optional(),
+                  error_rate: z.number().min(0).max(1).optional(),
+                })
+                .strict(),
             )
             .default({}),
         })
+        .strict()
         .default({}),
 
       /**
@@ -104,9 +133,48 @@ export const frameworkConfigSchema = z.object({
         .object({
           include_extra: z.boolean().default(false),
         })
+        .strict()
         .default({}),
     })
+    .strict()
     .default({}),
 });
+
+// Single source of truth for "what's a reserved slice name" — derived from
+// the schema's own shape so `rejectTypoAdjacentTopLevelKeys` can't drift
+// from it if a slice is ever added or renamed.
+const RESERVED_SLICE_NAMES = Object.keys(frameworkConfigObjectSchema.shape);
+
+/**
+ * Preprocess hook: reject a top-level config key that's a near-miss typo
+ * of a reserved slice name, before the real schema even runs. The
+ * strictness above only ever sees keys already routed to `server` /
+ * `observability` — a key that's ALMOST "observability" never reaches it,
+ * because the (deliberately open) top level treats it as an ordinary app
+ * key and accepts it without complaint.
+ */
+function rejectTypoAdjacentTopLevelKeys(raw: unknown, ctx: RefinementCtx): unknown {
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return raw;
+
+  let foundTypo = false;
+  for (const key of Object.keys(raw as Record<string, unknown>)) {
+    const suspect = findTypoOfReservedKey(key, RESERVED_SLICE_NAMES);
+    if (suspect === undefined) continue;
+
+    foundTypo = true;
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: [key],
+      message:
+        `Unrecognized top-level config key "${key}" — did you mean "${suspect}"? ` +
+        `"${suspect}" is a framework-reserved slice; a near-miss spelling of it is ` +
+        `rejected rather than silently accepted as your own app key.`,
+    });
+  }
+
+  return foundTypo ? z.NEVER : raw;
+}
+
+export const frameworkConfigSchema = z.preprocess(rejectTypoAdjacentTopLevelKeys, frameworkConfigObjectSchema);
 
 export type FrameworkConfig = z.infer<typeof frameworkConfigSchema>;
