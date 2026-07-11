@@ -45,7 +45,7 @@ export function editDistance(a: string, b: string): number {
 export function findTypoOfReservedKey(key: string, reservedKeys: readonly string[]): string | undefined {
   for (const reserved of reservedKeys) {
     if (key === reserved) return undefined;
-    if (editDistance(key.toLowerCase(), reserved) <= 1) return reserved;
+    if (editDistance(key.toLowerCase(), reserved.toLowerCase()) <= 1) return reserved;
   }
   return undefined;
 }
