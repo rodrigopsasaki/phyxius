@@ -1,6 +1,6 @@
 {
   "name": "@phyxiusjs/circuit-breaker",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Atom-backed circuit breaker — Clock-driven state machine for fail-fast on persistent failure",
   "type": "module",
   "main": "./dist/index.js",

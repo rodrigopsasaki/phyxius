@@ -1,6 +1,6 @@
 {
   "name": "@phyxiusjs/migration",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Evidence-gated schema / infrastructure migrations — expand-and-contract as a typed value with wrong-until-proven-otherwise transitions",
   "type": "module",
   "main": "./dist/index.js",
