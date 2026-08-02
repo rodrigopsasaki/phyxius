@@ -1,5 +1,15 @@
 # @phyxiusjs/config
 
+## 1.0.0
+
+### Patch Changes
+
+- @phyxiusjs/atom@1.0.0
+- @phyxiusjs/clock@1.0.0
+- @phyxiusjs/journal@1.0.0
+- @phyxiusjs/fp@1.0.0
+- @phyxiusjs/temporal@1.0.0
+
 ## 0.1.1
 
 ### Patch Changes
