@@ -50,7 +50,7 @@
   "author": "Rodrigo Sasaki",
   "repository": {
     "type": "git",
-    "url": "https://github.com/rodrigopsasaki/phyxius.git",
+    "url": "git+https://github.com/rodrigopsasaki/phyxius.git",
     "directory": "packages/components/observe"
   },
   "keywords": [

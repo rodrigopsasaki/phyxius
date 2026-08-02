@@ -53,5 +53,10 @@
   },
   "publishConfig": {
     "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/rodrigopsasaki/phyxius.git",
+    "directory": "packages/adapters/queue"
   }
 }

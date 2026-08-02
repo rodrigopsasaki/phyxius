@@ -50,8 +50,8 @@
   "author": "Rodrigo Sasaki",
   "repository": {
     "type": "git",
-    "url": "https://github.com/rodrigopsasaki/phyxius.git",
-    "directory": "packages/atom"
+    "url": "git+https://github.com/rodrigopsasaki/phyxius.git",
+    "directory": "packages/core/atom"
   },
   "keywords": [
     "atom",
