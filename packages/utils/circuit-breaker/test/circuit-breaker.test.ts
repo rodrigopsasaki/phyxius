@@ -311,4 +311,110 @@ describe("@phyxiusjs/circuit-breaker", () => {
       expect(breaker.snapshot().consecutiveFailures).toBe(1);
     });
   });
+
+  describe("the probe's lease (the 2026-08-02 incident)", () => {
+    /** Trip the breaker open with `threshold` consecutive failures. */
+    async function tripOpen(breaker: ReturnType<typeof createCircuitBreaker>, threshold: number) {
+      for (let i = 0; i < threshold; i++) {
+        await breaker
+          .execute(async () => {
+            throw new Error("vendor down");
+          })
+          .catch(() => {});
+      }
+      expect(breaker.snapshot().state).toBe("open");
+    }
+
+    it("a hung probe loses the slot after its lease — the eternal half-open is unrepresentable", async () => {
+      // The incident, encoded: a real outage opened the circuit; the reset
+      // window elapsed; ONE probe was admitted and its socket never settled.
+      // Pre-lease, that probe held the slot forever and the breaker reported
+      // a healthy vendor as an outage for hours. Post-lease, the next caller
+      // after `probeTimeout` claims the slot, reaches the recovered vendor,
+      // and closes the circuit — the zombie is dethroned, not depended on.
+      const clock = createControlledClock();
+      const breaker = createCircuitBreaker({
+        policy: cb.policy({ failureThreshold: 1, resetTimeout: ms(1000), probeTimeout: ms(2000) }),
+        clock,
+      });
+
+      await tripOpen(breaker, 1);
+      clock.advanceBy(ms(1000)); // reset window elapses — slot claimable
+
+      // The doomed probe: claims the slot, never settles. Deliberately not
+      // awaited — it hangs exactly like the incident's socket did.
+      const zombie = breaker.execute(() => new Promise<never>(() => {}));
+      expect(breaker.snapshot().state).toBe("half-open");
+
+      // While the lease is live, the contract holds: one probe, others refused.
+      clock.advanceBy(ms(1999));
+      const refused = await breaker.execute(async () => "should-not-run");
+      expect(isErr(refused)).toBe(true);
+
+      // Lease expires — the vendor recovered long ago; the next caller gets in.
+      clock.advanceBy(ms(1));
+      const recovered = await breaker.execute(async () => "vendor answers");
+      expect(isOk(recovered)).toBe(true);
+      expect(breaker.snapshot().state).toBe("closed");
+
+      // The circuit works normally again; the zombie promise still floats,
+      // deliberately unsettled — nothing depends on it anymore.
+      const after = await breaker.execute(async () => 42);
+      expect(isOk(after)).toBe(true);
+      void zombie;
+    });
+
+    it("a dethroned probe's LATE failure lands as one ordinary closed-state failure, not a reopen spiral", async () => {
+      const clock = createControlledClock();
+      const breaker = createCircuitBreaker({
+        policy: cb.policy({ failureThreshold: 3, resetTimeout: ms(1000), probeTimeout: ms(1000) }),
+        clock,
+      });
+
+      await tripOpen(breaker, 3);
+      clock.advanceBy(ms(1000));
+
+      // The doomed probe hangs on a promise we control.
+      let rejectZombie: (err: Error) => void = () => {};
+      const zombie = breaker.execute(() => new Promise<never>((_, reject) => (rejectZombie = reject))).catch(() => {});
+
+      // Lease expires; a successor probe closes the circuit on the recovered vendor.
+      clock.advanceBy(ms(1000));
+      const recovered = await breaker.execute(async () => "ok");
+      expect(isOk(recovered)).toBe(true);
+      expect(breaker.snapshot().state).toBe("closed");
+
+      // The zombie finally dies. Aged evidence, diluted: one counted failure
+      // in closed state — the circuit stays closed, no reopen.
+      rejectZombie(new Error("ancient socket finally gave up"));
+      await zombie;
+      expect(breaker.snapshot().state).toBe("closed");
+      expect(breaker.snapshot().consecutiveFailures).toBe(1);
+    });
+
+    it("probeTimeout defaults to resetTimeout, and a fresh reclaim emits circuit:half-open again", async () => {
+      const clock = createControlledClock();
+      const events: CircuitEvent[] = [];
+      const breaker = createCircuitBreaker({
+        policy: cb.policy({ failureThreshold: 1, resetTimeout: ms(500) }),
+        clock,
+      });
+      breaker.watch((e) => events.push(e));
+
+      await tripOpen(breaker, 1);
+      clock.advanceBy(ms(500));
+      void breaker.execute(() => new Promise<never>(() => {}));
+
+      // Default lease = resetTimeout (500ms): at 499 the slot is held...
+      clock.advanceBy(ms(499));
+      expect(isErr(await breaker.execute(async () => "no"))).toBe(true);
+      // ...at 500 it's claimable, and the reclaim is VISIBLE — a second
+      // circuit:half-open event, so every admitted probe leaves a trace.
+      clock.advanceBy(ms(1));
+      expect(isOk(await breaker.execute(async () => "yes"))).toBe(true);
+      const halfOpens = events.filter((e) => e.type === "circuit:half-open").length;
+      expect(halfOpens).toBe(2);
+      expect(events.at(-1)?.type).toBe("circuit:closed");
+    });
+  });
 });

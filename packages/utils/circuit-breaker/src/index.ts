@@ -10,16 +10,26 @@ import { ok, err, type Result } from "@phyxiusjs/fp";
  *  - **closed** — calls pass through. Consecutive failures are counted.
  *  - **open** — calls fail fast with `Err({ type: "CIRCUIT_OPEN" })` until the
  *    reset timeout elapses.
- *  - **half-open** — one probe call is allowed; success closes the circuit,
- *    failure reopens it.
+ *  - **half-open** — one probe call is allowed AT A TIME, under a LEASE
+ *    (`probeTimeout`); success closes the circuit, failure reopens it, and a
+ *    probe that outlives its lease loses the slot to the next caller.
  */
 export type CircuitState = "closed" | "open" | "half-open";
 
 export interface CircuitSnapshot {
   readonly state: CircuitState;
   readonly consecutiveFailures: number;
-  /** Monotonic timestamp when the circuit was opened (only meaningful in "open"). */
+  /** Monotonic timestamp when the circuit was opened (only meaningful in "open"/"half-open"). */
   readonly openedAt: number;
+  /**
+   * Monotonic timestamp when the current probe claimed the half-open slot
+   * (only meaningful in "half-open"). THE LEASE's epoch: `classify` compares
+   * it against `probeTimeout` so a hung probe can be dethroned — before this
+   * field existed, one never-settling probe held the slot forever and the
+   * breaker reported a healthy vendor as an outage for hours (the 2026-08-02
+   * DeepSeek incident: eternal half-open was representable, so it happened).
+   */
+  readonly probeStartedAt: number;
 }
 
 // ── Policy ──────────────────────────────────────────────────────────────────
@@ -33,6 +43,15 @@ export interface CircuitSnapshot {
 export interface CircuitBreakerPolicy {
   readonly failureThreshold: number;
   readonly resetTimeout: Millis;
+  /**
+   * THE PROBE'S LEASE. How long one probe may hold the half-open slot before
+   * the slot becomes claimable again. Defaults to `resetTimeout` — the
+   * patience you grant before retrying a vendor is the patience you grant the
+   * trial itself. The expired probe is never cancelled (the breaker owns no
+   * cancellation); it is dethroned: its late settlement still lands as
+   * ordinary evidence, it just stops being the only call allowed to exist.
+   */
+  readonly probeTimeout: Millis;
   readonly enabled: boolean;
 }
 
@@ -46,6 +65,7 @@ export const cb = {
     return {
       failureThreshold: Infinity,
       resetTimeout: 0 as Millis,
+      probeTimeout: 0 as Millis,
       enabled: false,
     };
   },
@@ -57,14 +77,21 @@ export const cb = {
    *   consecutive failures. Must be ≥ 1.
    * @param options.resetTimeout - After the circuit opens, wait this long
    *   before transitioning to half-open and allowing a probe call.
+   * @param options.probeTimeout - The probe's lease on the half-open slot;
+   *   after this long a hung probe loses the slot to the next caller.
+   *   Defaults to `resetTimeout`. Must be ≥ 1 when given.
    */
-  policy(options: { failureThreshold: number; resetTimeout: Millis }): CircuitBreakerPolicy {
+  policy(options: { failureThreshold: number; resetTimeout: Millis; probeTimeout?: Millis }): CircuitBreakerPolicy {
     if (options.failureThreshold < 1) {
       throw new Error(`cb.policy: failureThreshold must be >= 1 (got ${options.failureThreshold})`);
+    }
+    if (options.probeTimeout !== undefined && options.probeTimeout < 1) {
+      throw new Error(`cb.policy: probeTimeout must be >= 1ms (got ${options.probeTimeout})`);
     }
     return {
       failureThreshold: options.failureThreshold,
       resetTimeout: options.resetTimeout,
+      probeTimeout: options.probeTimeout ?? options.resetTimeout,
       enabled: true,
     };
   },
@@ -122,11 +149,13 @@ function circuitOpenError(openedAtMono: number, nowMono: number, resetTimeout: n
  *
  *  - **pass** — closed; run `fn` directly.
  *  - **short-circuit** — fail fast. Either open within the reset window, or
- *    half-open with a probe already in flight (the contract admits exactly
- *    one probe, so a second concurrent caller must not run).
- *  - **claim-probe** — open and the reset window elapsed. Admission is granted
- *    by atomically claiming the half-open slot (`open` → `half-open`) via CAS.
- *    The winner runs `fn`; losers fall back to short-circuit.
+ *    half-open with a probe whose lease is still live (the contract admits
+ *    exactly one probe AT A TIME, so a second concurrent caller must not run).
+ *  - **claim-probe** — the slot is claimable: open with the reset window
+ *    elapsed, or half-open with the incumbent probe's lease expired. Admission
+ *    is granted by atomically claiming the slot via CAS (stamping a fresh
+ *    `probeStartedAt`). The winner runs `fn`; losers fall back to
+ *    short-circuit.
  */
 type Admission =
   | { readonly kind: "pass" }
@@ -138,17 +167,28 @@ type Admission =
  * No mutation, no side effects — the caller acts on the result. Total over the
  * three named states so a new state can't silently fall through to `pass`.
  */
-function classify(current: CircuitSnapshot, nowMs: number, resetTimeout: number): Admission {
+function classify(current: CircuitSnapshot, nowMs: number, policy: CircuitBreakerPolicy): Admission {
   switch (current.state) {
     case "closed":
       return { kind: "pass" };
-    case "half-open":
-      // A probe is already in flight (some caller claimed the slot). Until it
-      // resolves to closed or open, additional callers fail fast — one probe.
+    case "half-open": {
+      // THE LEASE. A probe holds the half-open slot for `probeTimeout`, not
+      // forever. Before this check, one never-settling probe (a hung socket,
+      // no deadline of its own) held the slot eternally and every caller
+      // short-circuited "circuit open" while the vendor sat provably healthy
+      // — the 2026-08-02 DeepSeek incident, hours of a private outage that
+      // existed only inside this state machine. An expired lease makes the
+      // slot claimable again; the incumbent is dethroned, not cancelled, and
+      // its late settlement still lands as ordinary evidence.
+      const probeAge = nowMs - current.probeStartedAt;
+      if (probeAge >= policy.probeTimeout) {
+        return { kind: "claim-probe", from: current };
+      }
       return { kind: "short-circuit", openedAt: current.openedAt };
+    }
     case "open": {
       const elapsed = nowMs - current.openedAt;
-      if (elapsed < resetTimeout) {
+      if (elapsed < policy.resetTimeout) {
         return { kind: "short-circuit", openedAt: current.openedAt };
       }
       return { kind: "claim-probe", from: current };
@@ -197,15 +237,24 @@ export function createCircuitBreaker(options: CircuitBreakerOptions): CircuitBre
       state: "closed",
       consecutiveFailures: 0,
       openedAt: 0,
+      probeStartedAt: 0,
     },
     clock,
   );
 
   const watchers = new Set<(event: CircuitEvent) => void>();
 
-  // Bridge atom state transitions into CircuitEvents.
+  // Bridge atom state transitions into CircuitEvents. A half-open→half-open
+  // change with a moved probeStartedAt is a REAL transition — an expired
+  // lease was reclaimed by a fresh probe — so it emits `circuit:half-open`
+  // again rather than being swallowed as a no-op; an operator watching
+  // events can see every probe the breaker admitted, hung ones included.
   state.watch((change: Change<CircuitSnapshot>) => {
-    if (change.from.state === change.to.state) return;
+    const leaseReclaimed =
+      change.to.state === "half-open" &&
+      change.from.state === "half-open" &&
+      change.from.probeStartedAt !== change.to.probeStartedAt;
+    if (change.from.state === change.to.state && !leaseReclaimed) return;
 
     const event = toCircuitEvent(change);
 
@@ -233,14 +282,23 @@ export function createCircuitBreaker(options: CircuitBreakerOptions): CircuitBre
       // a single CAS (open → half-open). Concurrent callers race the CAS — the
       // loser sees `false` and short-circuits, so only one trial runs.
       const nowMs = clock.now().monoMs;
-      const admission = classify(state.deref(), nowMs, policy.resetTimeout);
+      const admission = classify(state.deref(), nowMs, policy);
 
       if (admission.kind === "short-circuit") {
         return err(circuitOpenError(admission.openedAt, nowMs, policy.resetTimeout));
       }
 
       if (admission.kind === "claim-probe") {
-        const claimed = state.compareAndSet(admission.from, { ...admission.from, state: "half-open" });
+        // One CAS covers both claims: open → half-open (window elapsed) and
+        // half-open → half-open (incumbent's lease expired). Stamping
+        // probeStartedAt is what makes the second shape a real transition —
+        // the CAS fails for racers because the incumbent snapshot they read
+        // carried the OLD stamp.
+        const claimed = state.compareAndSet(admission.from, {
+          ...admission.from,
+          state: "half-open",
+          probeStartedAt: nowMs,
+        });
         if (!claimed) {
           // Another caller already took the probe slot (or the state moved on);
           // re-derive and short-circuit rather than running a second trial.
@@ -254,8 +312,10 @@ export function createCircuitBreaker(options: CircuitBreakerOptions): CircuitBre
 
       try {
         const value = await fn();
-        // Success closes the circuit from any state.
-        state.swap(() => ({ state: "closed", consecutiveFailures: 0, openedAt: 0 }));
+        // Success closes the circuit from any state — including a DETHRONED
+        // probe settling late: a response that arrived is live evidence the
+        // vendor answers, no matter how long the socket sat.
+        state.swap(() => ({ state: "closed", consecutiveFailures: 0, openedAt: 0, probeStartedAt: 0 }));
         return ok(value);
       } catch (error) {
         state.swap((s) => {
@@ -265,16 +325,21 @@ export function createCircuitBreaker(options: CircuitBreakerOptions): CircuitBre
               state: "open",
               consecutiveFailures: s.consecutiveFailures + 1,
               openedAt: clock.now().monoMs,
+              probeStartedAt: 0,
             };
           }
 
           // In closed, count the failure and open when threshold is hit.
+          // (A dethroned probe failing late lands here once a successor has
+          // closed the circuit — it counts as one ordinary failure, aged
+          // evidence diluted rather than amplified.)
           const next = s.consecutiveFailures + 1;
           if (next >= policy.failureThreshold) {
             return {
               state: "open",
               consecutiveFailures: next,
               openedAt: clock.now().monoMs,
+              probeStartedAt: 0,
             };
           }
           return { ...s, consecutiveFailures: next };
