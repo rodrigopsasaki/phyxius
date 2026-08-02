@@ -1,6 +1,6 @@
 {
   "name": "@phyxiusjs/resource",
-  "version": "0.2.0",
+  "version": "1.0.0",
   "description": "Acquire/release with guaranteed cleanup — composable resource bracketing",
   "type": "module",
   "main": "./dist/index.js",

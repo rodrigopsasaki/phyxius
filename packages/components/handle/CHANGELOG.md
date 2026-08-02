@@ -1,5 +1,15 @@
 # @phyxiusjs/handle
 
+## 1.0.0
+
+### Patch Changes
+
+- @phyxiusjs/context@1.0.0
+- @phyxiusjs/observe@1.0.0
+- @phyxiusjs/clock@1.0.0
+- @phyxiusjs/journal@1.0.0
+- @phyxiusjs/fp@1.0.0
+
 ## 0.1.0
 
 ### Minor Changes
