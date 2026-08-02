@@ -51,7 +51,7 @@
   "repository": {
     "type": "git",
     "url": "git+https://github.com/rodrigopsasaki/phyxius.git",
-    "directory": "packages/clock"
+    "directory": "packages/core/clock"
   },
   "keywords": [
     "clock",
