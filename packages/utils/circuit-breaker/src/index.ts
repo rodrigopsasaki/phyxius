@@ -79,10 +79,37 @@ export type CircuitEvent =
 
 // ── Error ───────────────────────────────────────────────────────────────────
 
+/**
+ * The refusal a short-circuited call receives. Both fields are DURATIONS
+ * relative to the refusal's own moment — never instants.
+ *
+ * The previous shape (`openedAt` / `willRetryAfter`) leaked instants from the
+ * breaker's clock, which is monotonic and process-local. An instant from that
+ * clock means nothing outside the process that minted it, and the name
+ * `willRetryAfter` read as a duration anyway — during the 2026-08-01 vendor
+ * outage a monotonic `willRetryAfter` rendered as an epoch produced a phantom
+ * multi-hour penalty in the middle of a real incident. Durations carry their
+ * own frame: there is nothing to misread and nothing to convert.
+ */
 export interface CircuitOpenError {
   readonly type: "CIRCUIT_OPEN";
-  readonly openedAt: number;
-  readonly willRetryAfter: number;
+  /** How long the circuit had been open when this call was refused. */
+  readonly openForMs: number;
+  /**
+   * How long until a probe will be admitted, from the refusal's moment.
+   * Clamped to 0 when the window has already elapsed but another caller
+   * holds the half-open probe slot — retry immediately and race the CAS.
+   */
+  readonly retryInMs: number;
+}
+
+/** The one place refusal durations are derived from monotonic instants. */
+function circuitOpenError(openedAtMono: number, nowMono: number, resetTimeout: number): CircuitOpenError {
+  return {
+    type: "CIRCUIT_OPEN",
+    openForMs: Math.max(0, nowMono - openedAtMono),
+    retryInMs: Math.max(0, openedAtMono + resetTimeout - nowMono),
+  };
 }
 
 // ── Admission ─────────────────────────────────────────────────────────────────
@@ -205,14 +232,11 @@ export function createCircuitBreaker(options: CircuitBreakerOptions): CircuitBre
       // elapsed we must admit exactly one probe: claim the half-open slot with
       // a single CAS (open → half-open). Concurrent callers race the CAS — the
       // loser sees `false` and short-circuits, so only one trial runs.
-      const admission = classify(state.deref(), clock.now().monoMs, policy.resetTimeout);
+      const nowMs = clock.now().monoMs;
+      const admission = classify(state.deref(), nowMs, policy.resetTimeout);
 
       if (admission.kind === "short-circuit") {
-        return err({
-          type: "CIRCUIT_OPEN",
-          openedAt: admission.openedAt,
-          willRetryAfter: admission.openedAt + policy.resetTimeout,
-        });
+        return err(circuitOpenError(admission.openedAt, nowMs, policy.resetTimeout));
       }
 
       if (admission.kind === "claim-probe") {
@@ -220,13 +244,11 @@ export function createCircuitBreaker(options: CircuitBreakerOptions): CircuitBre
         if (!claimed) {
           // Another caller already took the probe slot (or the state moved on);
           // re-derive and short-circuit rather than running a second trial.
+          // Fresh clock read: the CAS race took real time, and the durations
+          // are relative to THIS refusal, not the classification above.
           const now = state.deref();
           const openedAt = now.state === "open" ? now.openedAt : admission.from.openedAt;
-          return err({
-            type: "CIRCUIT_OPEN",
-            openedAt,
-            willRetryAfter: openedAt + policy.resetTimeout,
-          });
+          return err(circuitOpenError(openedAt, clock.now().monoMs, policy.resetTimeout));
         }
       }
 

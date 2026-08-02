@@ -658,21 +658,21 @@ class BudgetExpiredThrown extends Error {
 
 /** Lets the retry loop distinguish breaker-open failures from generic throws. */
 class CircuitOpenThrown extends Error {
-  readonly openedAt: number;
-  readonly willRetryAfter: number;
+  readonly openForMs: number;
+  readonly retryInMs: number;
 
-  constructor(info: { openedAt: number; willRetryAfter: number }) {
+  constructor(info: { openForMs: number; retryInMs: number }) {
     super("Circuit breaker is open");
     this.name = "CircuitOpenThrown";
-    this.openedAt = info.openedAt;
-    this.willRetryAfter = info.willRetryAfter;
+    this.openForMs = info.openForMs;
+    this.retryInMs = info.retryInMs;
   }
 
   asHandlerError(): HandlerError {
     return {
       type: "CIRCUIT_OPEN",
-      openedAt: this.openedAt,
-      willRetryAfter: this.willRetryAfter,
+      openForMs: this.openForMs,
+      retryInMs: this.retryInMs,
     };
   }
 }
@@ -716,7 +716,7 @@ function describeError(error: HandlerError): {
     case "CIRCUIT_OPEN":
       return {
         type: error.type,
-        message: `Circuit breaker is open (opened at ${error.openedAt})`,
+        message: `Circuit breaker is open (open for ${error.openForMs}ms; retry in ${error.retryInMs}ms)`,
       };
     case "BACKPRESSURE_REJECT":
       return { type: error.type, message: "Queue is full — rejected" };

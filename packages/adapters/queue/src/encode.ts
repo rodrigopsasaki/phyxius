@@ -70,7 +70,9 @@ export function defaultOnResult<T>(result: Result<T, HandlerError>, _message: Qu
     case "CIRCUIT_OPEN": {
       // Delay until the breaker's expected half-open transition. Sources
       // that don't support delay treat this as a plain retry — no harm.
-      const delayMs = Math.max(0, error.willRetryAfter - error.openedAt) as Millis;
+      // `retryInMs` is already that remainder, measured at refusal time —
+      // the old instant arithmetic re-delayed by the FULL window every time.
+      const delayMs = error.retryInMs as Millis;
       return {
         action: "nack",
         reason: {
