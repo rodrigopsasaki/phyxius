@@ -1,6 +1,6 @@
 {
   "name": "@phyxiusjs/drain",
-  "version": "1.0.0",
+  "version": "0.2.0",
   "type": "module",
   "description": "Journal log export with pluggable sinks — stdout, OTLP HTTP, file",
   "main": "./dist/index.js",

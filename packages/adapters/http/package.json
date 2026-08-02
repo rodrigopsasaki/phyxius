@@ -1,6 +1,6 @@
 {
   "name": "@phyxiusjs/http",
-  "version": "1.0.0",
+  "version": "0.2.0",
   "description": "HTTP adapter — Node http.Server → handler invocations",
   "type": "module",
   "main": "./dist/index.js",

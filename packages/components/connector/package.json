@@ -1,6 +1,6 @@
 {
   "name": "@phyxiusjs/connector",
-  "version": "1.0.0",
+  "version": "0.2.0",
   "description": "Third-party integration primitive — ConnectorSpec extends HandlerSpec, typed ConnectorError union, HTTP mapping helpers",
   "type": "module",
   "main": "./dist/index.js",
