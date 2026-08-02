@@ -128,7 +128,7 @@ export type HandlerError =
   | { readonly type: "TIMEOUT"; readonly timeoutMs: number }
   | { readonly type: "HANDLER_ERROR"; readonly cause: unknown }
   | { readonly type: "RETRY_EXHAUSTED"; readonly attempts: number; readonly lastCause: unknown }
-  | { readonly type: "CIRCUIT_OPEN"; readonly openedAt: number; readonly willRetryAfter: number }
+  | { readonly type: "CIRCUIT_OPEN"; readonly openForMs: number; readonly retryInMs: number }
   | { readonly type: "BACKPRESSURE_REJECT" }
   | { readonly type: "DROPPED" }
   | { readonly type: "HANDLER_NOT_RUNNING" };

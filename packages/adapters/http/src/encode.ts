@@ -70,7 +70,10 @@ export function defaultEncode<T>(result: Result<T, HandlerError>): HttpResponse 
       };
 
     case "CIRCUIT_OPEN": {
-      const retryAfterSec = Math.max(0, Math.ceil((error.willRetryAfter - error.openedAt) / 1000));
+      // `retryInMs` is the window's REMAINDER at refusal time — which is what
+      // Retry-After means. The old instant arithmetic here sent the FULL
+      // window length regardless of how much had already elapsed.
+      const retryAfterSec = Math.max(0, Math.ceil(error.retryInMs / 1000));
       return {
         status: 503,
         headers: {

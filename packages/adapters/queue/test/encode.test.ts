@@ -66,7 +66,7 @@ describe("defaultOnResult", () => {
 
   it("CIRCUIT_OPEN → retry with computed delay", () => {
     const outcome = defaultOnResult(
-      err({ type: "CIRCUIT_OPEN", openedAt: 1000, willRetryAfter: 6000 } as const),
+      err({ type: "CIRCUIT_OPEN", openForMs: 1000, retryInMs: 5000 } as const),
       dummyMessage,
     );
     expect(outcome.action).toBe("nack");

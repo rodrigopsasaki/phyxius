@@ -110,7 +110,12 @@ describe("@phyxiusjs/circuit-breaker", () => {
       expect(isErr(result)).toBe(true);
       if (isErr(result)) {
         expect(result.error.type).toBe("CIRCUIT_OPEN");
-        expect(result.error.willRetryAfter).toBeGreaterThan(result.error.openedAt);
+        // Durations relative to the refusal, never instants. Inside the
+        // window neither clamps, so elapsed + remaining is EXACTLY the
+        // reset window — the invariant that makes the pair trustworthy.
+        expect(result.error.retryInMs).toBeGreaterThan(0);
+        expect(result.error.openForMs).toBeGreaterThanOrEqual(0);
+        expect(result.error.openForMs + result.error.retryInMs).toBe(5000);
       }
       expect(called.yes).toBe(false);
     });

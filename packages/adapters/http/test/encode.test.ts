@@ -48,7 +48,7 @@ describe("defaultEncode", () => {
   });
 
   it("encodes CIRCUIT_OPEN as 503 with Retry-After header", () => {
-    const response = defaultEncode(err({ type: "CIRCUIT_OPEN", openedAt: 1000, willRetryAfter: 6000 } as const));
+    const response = defaultEncode(err({ type: "CIRCUIT_OPEN", openForMs: 1000, retryInMs: 5000 } as const));
     expect(response.status).toBe(503);
     expect(response.headers?.["retry-after"]).toBe("5");
     expect(response.body).toEqual({ error: "ServiceUnavailable", reason: "circuit_open" });
