@@ -1,6 +1,6 @@
 {
   "name": "@phyxiusjs/framework",
-  "version": "1.0.0",
+  "version": "0.2.0",
   "description": "The framework layer — a convenience bow over Phyxius primitives. Transports are opt-in peers, invariants are preserved, every call expressible in primitives underneath.",
   "type": "module",
   "main": "./dist/index.js",

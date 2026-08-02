@@ -1,6 +1,6 @@
 {
   "name": "@phyxiusjs/validate",
-  "version": "1.0.0",
+  "version": "0.2.0",
   "description": "Validator-agnostic runtime type validation — the contract, not the implementation",
   "type": "module",
   "main": "./dist/index.js",

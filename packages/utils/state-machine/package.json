@@ -1,6 +1,6 @@
 {
   "name": "@phyxiusjs/state-machine",
-  "version": "1.0.0",
+  "version": "0.2.0",
   "description": "Typed state machines — the graph as a primitive; transitions as strategies; no non-decision",
   "type": "module",
   "main": "./dist/index.js",
