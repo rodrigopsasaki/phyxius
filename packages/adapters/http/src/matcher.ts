@@ -116,23 +116,18 @@ export function matchRoute(compiled: CompiledRoutes, method: HttpMethod, path: s
   let pathMatchedAnyMethod = false;
 
   for (const entry of compiled.entries) {
-    // Check path first (ignoring method) to detect method-not-allowed.
-    const pathOnly = matchPattern({ ...entry.pattern, method }, method, path);
-    if (pathOnly) {
-      return { found: true, route: entry.route, params: pathOnly };
+    // The real check: this entry's OWN declared method against the request.
+    const result = matchPattern(entry.pattern, method, path);
+    if (result !== null) {
+      return { found: true, route: entry.route, params: result };
     }
 
-    // Does the path match if we ignore method?
-    if (!pathMatchedAnyMethod) {
-      const ignoreMethod: CompiledPattern = { ...entry.pattern, method };
-      const result = matchPattern(ignoreMethod, method, path);
-      if (result === null) {
-        // Try with the pattern's actual method to see if the path matched.
-        const asOriginal = matchPattern(entry.pattern, entry.pattern.method, path);
-        if (asOriginal !== null && entry.pattern.method !== method) {
-          pathMatchedAnyMethod = true;
-        }
-      }
+    // No match — was it the method, or the path? Re-check with the entry's
+    // own method (trivially true) to test the path shape alone; a path-only
+    // match on a DIFFERENT method flags 405-candidacy without ever treating
+    // this entry as a real match for the request.
+    if (!pathMatchedAnyMethod && matchPattern(entry.pattern, entry.pattern.method, path) !== null) {
+      pathMatchedAnyMethod = true;
     }
   }
 
