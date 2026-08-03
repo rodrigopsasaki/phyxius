@@ -1,3 +1,4 @@
+import { deadlineFrom, elapsedSince, hasPassed } from "@phyxiusjs/clock";
 import type { Budget, Instant, Millis } from "@phyxiusjs/clock";
 import { createAtom, type Atom } from "@phyxiusjs/atom";
 import { context } from "@phyxiusjs/context";
@@ -214,7 +215,7 @@ export async function spawn<TInput, TOutput, TFields>(
     );
 
     const completedAt = clock.now();
-    const durationMs = completedAt.monoMs - startedAt.monoMs;
+    const durationMs = elapsedSince(completedAt.monoMs, startedAt.monoMs);
 
     const baseEvent = {
       name: spec.name,
@@ -429,7 +430,7 @@ export async function spawn<TInput, TOutput, TFields>(
       source,
       startedAt: invocationStartedAt,
       completedAt,
-      durationMs: completedAt.monoMs - invocationStartedAt.monoMs,
+      durationMs: elapsedSince(completedAt.monoMs, invocationStartedAt.monoMs),
       attempts: attemptNumber,
       observed: { timeoutMs: spec.timeout },
     } as const;
@@ -563,11 +564,14 @@ export async function spawn<TInput, TOutput, TFields>(
       state.swap((s) => ({ ...s, status: "stopping" }));
 
       const drainTimeoutMs = options?.drainTimeoutMs ?? (10_000 as Millis);
-      const deadline = clock.now().monoMs + drainTimeoutMs;
+      const deadline = deadlineFrom(clock.now().monoMs, drainTimeoutMs);
 
-      // Wait for active invocations to drain.
+      // Wait for active invocations to drain. `hasPassed` is `>=`, where the
+      // original hand-rolled check was strict `>` — an at-most-one-poll (10ms)
+      // difference on a best-effort shutdown budget, traded for using the
+      // named boundary check instead of a bespoke comparison.
       while (state.deref().activeCount > 0) {
-        if (clock.now().monoMs > deadline) break;
+        if (hasPassed(clock.now().monoMs, deadline)) break;
         await clock.sleep(10 as Millis);
       }
 

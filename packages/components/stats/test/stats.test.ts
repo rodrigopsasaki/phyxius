@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { createControlledClock } from "@phyxiusjs/clock";
+import type { Instant } from "@phyxiusjs/clock";
 import type { HandlerEvent } from "@phyxiusjs/handler";
 import { Journal } from "@phyxiusjs/journal";
 
@@ -18,7 +19,9 @@ function setup() {
 
 /** Build a HandlerEvent with only the fields stats cares about. */
 function handlerEvent(name: string, durationMs: number, outcome: "success" | "failure" = "success"): HandlerEvent {
-  const now = { wallMs: 0, monoMs: 0 };
+  // Fixture instant, not a clock reading — `as Instant` is the sanctioned
+  // escape hatch for test fixtures (see @phyxiusjs/clock's MonoMs docs).
+  const now = { wallMs: 0, monoMs: 0 } as Instant;
   const base: HandlerEvent = {
     name,
     invocationId: `inv-${Math.random().toString(36).slice(2)}`,

@@ -1,3 +1,4 @@
+import { elapsedSince } from "@phyxiusjs/clock";
 import { context } from "@phyxiusjs/context";
 import { err, ok, type Result } from "@phyxiusjs/fp";
 import { resource } from "@phyxiusjs/resource";
@@ -96,7 +97,7 @@ export function createDb(options: DbOptions): Db {
           emitEvent(emit, {
             type: "db:transaction-rolled-back",
             at: rolledBackAt,
-            durationMs: rolledBackAt.monoMs - startMono,
+            durationMs: elapsedSince(rolledBackAt.monoMs, startMono),
             cause,
           });
           return err(driver.mapError(cause));
@@ -113,7 +114,7 @@ export function createDb(options: DbOptions): Db {
           emitEvent(emit, {
             type: "db:transaction-rolled-back",
             at: rolledBackAt,
-            durationMs: rolledBackAt.monoMs - startMono,
+            durationMs: elapsedSince(rolledBackAt.monoMs, startMono),
             cause,
           });
           return err(driver.mapError(cause));
@@ -123,7 +124,7 @@ export function createDb(options: DbOptions): Db {
         emitEvent(emit, {
           type: "db:transaction-committed",
           at: committedAt,
-          durationMs: committedAt.monoMs - startMono,
+          durationMs: elapsedSince(committedAt.monoMs, startMono),
         });
         return ok(fnValue);
       });

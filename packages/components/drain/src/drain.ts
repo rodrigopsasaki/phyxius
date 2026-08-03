@@ -1,4 +1,4 @@
-import { ms } from "@phyxiusjs/clock";
+import { ms, deadlineFrom, hasPassed, elapsedSince } from "@phyxiusjs/clock";
 import type { Instant, Millis } from "@phyxiusjs/clock";
 import type { Drain, DrainEntry, DrainOptions, DrainOverflowPolicy, FlushDecision, FlushState } from "./types.js";
 
@@ -136,7 +136,7 @@ export function createDrain<T>(options: DrainOptions<T>): Drain {
       case "flushing":
         return { action: "skip", reason: "flushing" };
       case "backoff":
-        return force || clock.now().monoMs >= flushState.until.monoMs
+        return force || hasPassed(clock.now().monoMs, flushState.until.monoMs)
           ? { action: "proceed" }
           : { action: "skip", reason: "backoff" };
       case "idle":
@@ -156,7 +156,7 @@ export function createDrain<T>(options: DrainOptions<T>): Drain {
     try {
       await sink.write(batch);
 
-      const durationMs = clock.now().monoMs - startTime.monoMs;
+      const durationMs = elapsedSince(clock.now().monoMs, startTime.monoMs);
       flushState = { kind: "idle" };
       emit?.({
         type: "drain:flush",
@@ -234,8 +234,13 @@ export function createDrain<T>(options: DrainOptions<T>): Drain {
  * the result is comparable under either a system or a controlled clock — the
  * same shape `sleep`/`timeout` use internally. Local because the drain is the
  * only place that needs Instant arithmetic; if a second caller appears, this
- * moves up to @phyxiusjs/clock.
+ * moves up to @phyxiusjs/clock. The `monoMs` face goes through `deadlineFrom`
+ * — @phyxiusjs/clock's own answer for "the only addition that means anything
+ * for a MonoMs" — rather than `from.monoMs + delta`, which still compiles
+ * (TypeScript doesn't check brands on `+`) but returns a bare `number` that
+ * no longer satisfies `Instant`'s `monoMs: MonoMs` field, exactly the way a
+ * hand-rolled version of this helper would have failed here.
  */
 function addMillis(from: Instant, delta: Millis): Instant {
-  return { wallMs: from.wallMs + delta, monoMs: from.monoMs + delta };
+  return { wallMs: from.wallMs + delta, monoMs: deadlineFrom(from.monoMs, delta) };
 }

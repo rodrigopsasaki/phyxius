@@ -1,4 +1,5 @@
-import type { Budget, Clock, EmitFn, Instant, TimerHandle, Millis, DeadlineTarget } from "./types.js";
+import type { Budget, Clock, EmitFn, Instant, TimerHandle, Millis, MonoMs, DeadlineTarget } from "./types.js";
+import { deadlineFrom, elapsedSince } from "./mono.js";
 
 type PendingTimeout = {
   kind: "timeout";
@@ -40,7 +41,15 @@ class ControlledClock implements Clock {
   }
 
   now(): Instant {
-    return { wallMs: this.wallMs, monoMs: this.monoMs };
+    // THE brand-construction site for ControlledClock. `this.monoMs` is a
+    // private simulated-time counter — plain `number` throughout the rest
+    // of this class, advanced by `advanceBy`/`advanceTo` and the timer
+    // engine below, all of which stay internal and never claim to BE a
+    // `MonoMs` until they're handed out here. Stamping happens at the same
+    // seam SystemClock stamps `performance.now()`: the moment a reading
+    // crosses from "this clock's own bookkeeping" to "a value the rest of
+    // the program can hold."
+    return { wallMs: this.wallMs, monoMs: this.monoMs as MonoMs };
   }
 
   async sleep(ms: Millis): Promise<void> {
@@ -77,7 +86,7 @@ class ControlledClock implements Clock {
     const start = this.now();
     const deadline: Instant = {
       wallMs: start.wallMs + ms,
-      monoMs: start.monoMs + ms,
+      monoMs: deadlineFrom(start.monoMs, ms),
     };
     const controller = new AbortController();
 
@@ -90,7 +99,12 @@ class ControlledClock implements Clock {
 
     const timer: PendingTimeout = {
       kind: "timeout",
-      fireAt: this.monoMs + ms,
+      // Reuse the already-computed deadline rather than re-deriving it —
+      // `start.monoMs` (this.monoMs, read a line above) hasn't moved, so
+      // this is the same instant `deadline.monoMs` names; recomputing it
+      // via a second `this.monoMs + ms` would just risk the two drifting
+      // apart if a future edit touches one and not the other.
+      fireAt: deadline.monoMs,
       fn: () => {
         controller.abort();
         this.emit?.({
@@ -109,8 +123,7 @@ class ControlledClock implements Clock {
       deadline,
       signal: controller.signal,
       remaining(): Millis {
-        const r = deadline.monoMs - clock.monoMs;
-        return (r < 0 ? 0 : r) as Millis;
+        return elapsedSince(deadline.monoMs, clock.now().monoMs);
       },
       expired(): boolean {
         return controller.signal.aborted;
