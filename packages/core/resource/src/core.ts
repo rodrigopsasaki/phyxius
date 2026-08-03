@@ -1,3 +1,4 @@
+import { elapsedSince } from "@phyxiusjs/clock";
 import type { Acquire, Release, Resource, ResourceEvent, ResourceOptions, UseFn } from "./types.js";
 
 // ── Public: make ───────────────────────────────────────────────────────────
@@ -107,7 +108,7 @@ async function runUse<T, R>(
       type: "resource:acquired",
       name,
       at: now,
-      durationMs: now.monoMs - acquireStartMono,
+      durationMs: elapsedSince(now.monoMs, acquireStartMono),
     });
   }
 
@@ -132,7 +133,7 @@ async function runUse<T, R>(
         type: "resource:released",
         name,
         at: now,
-        durationMs: now.monoMs - releaseStartMono,
+        durationMs: elapsedSince(now.monoMs, releaseStartMono),
       });
     }
   } catch (releaseCause) {

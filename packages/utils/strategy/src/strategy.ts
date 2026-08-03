@@ -1,3 +1,4 @@
+import { elapsedSince } from "@phyxiusjs/clock";
 import type { Clock } from "@phyxiusjs/clock";
 
 import { deepEquals } from "./equals.js";
@@ -117,7 +118,7 @@ export function run<TInput, TOutput>(
     type: "strategy:computed",
     set: strategySet.name,
     strategy: primary.name,
-    durationMs: primaryEnd.monoMs - primaryStartMono,
+    durationMs: elapsedSince(primaryEnd.monoMs, primaryStartMono),
     at: primaryEnd,
   });
 
@@ -148,7 +149,7 @@ export function run<TInput, TOutput>(
       type: "strategy:computed",
       set: strategySet.name,
       strategy: shadow.name,
-      durationMs: shadowEnd.monoMs - shadowStart.monoMs,
+      durationMs: elapsedSince(shadowEnd.monoMs, shadowStart.monoMs),
       at: shadowEnd,
     });
 

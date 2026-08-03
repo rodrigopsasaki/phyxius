@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { createControlledClock, type Millis } from "@phyxiusjs/clock";
+import { createControlledClock, type Instant, type Millis } from "@phyxiusjs/clock";
 import { err, isErr, isOk, ok } from "@phyxiusjs/fp";
 import type { HandlerEvent } from "@phyxiusjs/handler";
 import { Journal } from "@phyxiusjs/journal";
@@ -21,6 +21,15 @@ function makeRuntime() {
   const journal = new Journal<HandlerEvent>({ clock });
   const journalStore = createMemoryJournalStore({ journal, clock });
   return { clock, journal, journalStore };
+}
+
+/**
+ * Test-only fixture: an Instant with both faces set to the same number.
+ * `as Instant` is the sanctioned escape hatch for fabricating one outside a
+ * real clock reading — see @phyxiusjs/clock's MonoMs docs.
+ */
+function instant(ms: number): Instant {
+  return { wallMs: ms, monoMs: ms } as Instant;
 }
 
 // The canonical 4-phase shape. These tests exercise the full expand-and-
@@ -352,8 +361,8 @@ describe("advance — journalWindow evidence", () => {
       name: "test.handler",
       invocationId: "inv-x",
       source: "test",
-      startedAt: { wallMs: 0, monoMs: 0 },
-      completedAt: { wallMs: 0, monoMs: 0 },
+      startedAt: instant(0),
+      completedAt: instant(0),
       durationMs: 0,
       attempts: 1,
       outcome: "success",
@@ -368,7 +377,7 @@ describe("advance — journalWindow evidence", () => {
     // The journal has events, just not of the legacy type.
     appendEvent(journal, {
       name: "order.create-new",
-      completedAt: { wallMs: 999_500, monoMs: 999_500 },
+      completedAt: instant(999_500),
     });
 
     const spec = defineMigration({
@@ -403,7 +412,7 @@ describe("advance — journalWindow evidence", () => {
     // A single legacy write in the window — enough to refuse.
     appendEvent(journal, {
       name: "order.create-legacy",
-      completedAt: { wallMs: 999_500, monoMs: 999_500 },
+      completedAt: instant(999_500),
     });
 
     const spec = defineMigration({
@@ -444,12 +453,12 @@ describe("advance — journalWindow evidence", () => {
     appendEvent(journal, {
       name: "order.create",
       observed: { salesDocumentId: "sd_1" },
-      completedAt: { wallMs: 999_500, monoMs: 999_500 },
+      completedAt: instant(999_500),
     });
     appendEvent(journal, {
       name: "order.create",
       observed: { salesDocumentId: "sd_2" },
-      completedAt: { wallMs: 999_600, monoMs: 999_600 },
+      completedAt: instant(999_600),
     });
 
     const spec = defineMigration({

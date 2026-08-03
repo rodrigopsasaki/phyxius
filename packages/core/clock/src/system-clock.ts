@@ -1,5 +1,6 @@
 import { performance } from "node:perf_hooks";
-import type { Budget, Clock, EmitFn, Instant, TimerHandle, Millis, DeadlineTarget } from "./types.js";
+import type { Budget, Clock, EmitFn, Instant, TimerHandle, Millis, MonoMs, DeadlineTarget } from "./types.js";
+import { deadlineFrom, elapsedSince } from "./mono.js";
 
 /**
  * Real system clock implementation using Node.js timers
@@ -14,7 +15,12 @@ class SystemClock implements Clock {
   }
 
   now(): Instant {
-    const monoMs = performance.now() - this.startTime;
+    // THE brand-construction site for SystemClock: `performance.now()` is a
+    // raw, un-owned number the moment it comes back from Node. This is the
+    // one place it's stamped into a `MonoMs` — everywhere else in this
+    // file, a `MonoMs` is either this fresh read or something derived from
+    // it via `deadlineFrom`/`elapsedSince`, never another raw cast.
+    const monoMs = (performance.now() - this.startTime) as MonoMs;
     const wallMs = Date.now();
     return { wallMs, monoMs };
   }
@@ -37,7 +43,7 @@ class SystemClock implements Clock {
     this.emit?.({
       type: "time:sleep:end",
       durationMs: ms,
-      actualMs: endTime.monoMs - startTime.monoMs,
+      actualMs: elapsedSince(endTime.monoMs, startTime.monoMs),
       at: endTime,
     });
   }
@@ -46,7 +52,7 @@ class SystemClock implements Clock {
     const start = this.now();
     const deadline: Instant = {
       wallMs: start.wallMs + ms,
-      monoMs: start.monoMs + ms,
+      monoMs: deadlineFrom(start.monoMs, ms),
     };
     const controller = new AbortController();
 
@@ -75,8 +81,7 @@ class SystemClock implements Clock {
       deadline,
       signal: controller.signal,
       remaining(): Millis {
-        const r = deadline.monoMs - clock.now().monoMs;
-        return (r < 0 ? 0 : r) as Millis;
+        return elapsedSince(deadline.monoMs, clock.now().monoMs);
       },
       expired(): boolean {
         return controller.signal.aborted;

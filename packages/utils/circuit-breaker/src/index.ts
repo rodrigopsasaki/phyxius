@@ -1,4 +1,5 @@
-import type { Clock, Instant, Millis } from "@phyxiusjs/clock";
+import type { Clock, Instant, Millis, MonoMs } from "@phyxiusjs/clock";
+import { deadlineFrom, elapsedSince, hasPassed } from "@phyxiusjs/clock";
 import { createAtom, type Atom, type Change } from "@phyxiusjs/atom";
 import { ok, err, type Result } from "@phyxiusjs/fp";
 
@@ -19,8 +20,16 @@ export type CircuitState = "closed" | "open" | "half-open";
 export interface CircuitSnapshot {
   readonly state: CircuitState;
   readonly consecutiveFailures: number;
-  /** Monotonic timestamp when the circuit was opened (only meaningful in "open"/"half-open"). */
-  readonly openedAt: number;
+  /**
+   * Monotonic timestamp when the circuit was opened (only meaningful in
+   * "open"/"half-open"). `MonoMs`, not `number` or `Millis` — this is a
+   * READING, not a duration, and the type now says so: it can only have
+   * come from this breaker's `clock.now()`, never from a literal or from
+   * another clock's timeline. `classify` and `circuitOpenError` are the
+   * only code that may turn it into a duration, and only via
+   * `elapsedSince`/`deadlineFrom`.
+   */
+  readonly openedAt: MonoMs;
   /**
    * Monotonic timestamp when the current probe claimed the half-open slot
    * (only meaningful in "half-open"). THE LEASE's epoch: `classify` compares
@@ -29,7 +38,7 @@ export interface CircuitSnapshot {
    * breaker reported a healthy vendor as an outage for hours (the 2026-08-02
    * DeepSeek incident: eternal half-open was representable, so it happened).
    */
-  readonly probeStartedAt: number;
+  readonly probeStartedAt: MonoMs;
 }
 
 // ── Policy ──────────────────────────────────────────────────────────────────
@@ -130,12 +139,22 @@ export interface CircuitOpenError {
   readonly retryInMs: number;
 }
 
-/** The one place refusal durations are derived from monotonic instants. */
-function circuitOpenError(openedAtMono: number, nowMono: number, resetTimeout: number): CircuitOpenError {
+/**
+ * The one place refusal durations are derived from monotonic instants —
+ * both via `elapsedSince`, never `-` by hand. `openForMs` is the plain
+ * case: how long ago `openedAtMono` was, as of `nowMono`. `retryInMs`
+ * reads backwards from that at first glance (`elapsedSince` measured
+ * FORWARD from a FUTURE deadline back to `nowMono`), but it's the same
+ * question asked the other way: "as of the reset deadline, how much time
+ * will have elapsed since now" is exactly the wait remaining. Two
+ * `elapsedSince` calls, never a fourth helper — see @phyxiusjs/clock's
+ * `mono.ts` for why the set stays at three.
+ */
+function circuitOpenError(openedAtMono: MonoMs, nowMono: MonoMs, resetTimeout: Millis): CircuitOpenError {
   return {
     type: "CIRCUIT_OPEN",
-    openForMs: Math.max(0, nowMono - openedAtMono),
-    retryInMs: Math.max(0, openedAtMono + resetTimeout - nowMono),
+    openForMs: elapsedSince(nowMono, openedAtMono),
+    retryInMs: elapsedSince(deadlineFrom(openedAtMono, resetTimeout), nowMono),
   };
 }
 
@@ -159,15 +178,21 @@ function circuitOpenError(openedAtMono: number, nowMono: number, resetTimeout: n
  */
 type Admission =
   | { readonly kind: "pass" }
-  | { readonly kind: "short-circuit"; readonly openedAt: number }
+  | { readonly kind: "short-circuit"; readonly openedAt: MonoMs }
   | { readonly kind: "claim-probe"; readonly from: CircuitSnapshot };
 
 /**
  * Pure classification: map a snapshot + current time to an admission decision.
  * No mutation, no side effects — the caller acts on the result. Total over the
  * three named states so a new state can't silently fall through to `pass`.
+ *
+ * Both timing checks below read as `hasPassed(now, deadlineFrom(start,
+ * window))` rather than `now - start >= window` — not just brand hygiene:
+ * asking "has this deadline passed" is the actual question being asked,
+ * where the subtracted form computes a duration nobody looks at on the
+ * way to a boolean nobody named.
  */
-function classify(current: CircuitSnapshot, nowMs: number, policy: CircuitBreakerPolicy): Admission {
+function classify(current: CircuitSnapshot, nowMs: MonoMs, policy: CircuitBreakerPolicy): Admission {
   switch (current.state) {
     case "closed":
       return { kind: "pass" };
@@ -180,15 +205,15 @@ function classify(current: CircuitSnapshot, nowMs: number, policy: CircuitBreake
       // existed only inside this state machine. An expired lease makes the
       // slot claimable again; the incumbent is dethroned, not cancelled, and
       // its late settlement still lands as ordinary evidence.
-      const probeAge = nowMs - current.probeStartedAt;
-      if (probeAge >= policy.probeTimeout) {
+      const leaseExpiry = deadlineFrom(current.probeStartedAt, policy.probeTimeout);
+      if (hasPassed(nowMs, leaseExpiry)) {
         return { kind: "claim-probe", from: current };
       }
       return { kind: "short-circuit", openedAt: current.openedAt };
     }
     case "open": {
-      const elapsed = nowMs - current.openedAt;
-      if (elapsed < policy.resetTimeout) {
+      const resetDeadline = deadlineFrom(current.openedAt, policy.resetTimeout);
+      if (!hasPassed(nowMs, resetDeadline)) {
         return { kind: "short-circuit", openedAt: current.openedAt };
       }
       return { kind: "claim-probe", from: current };
@@ -232,12 +257,20 @@ export interface CircuitBreakerOptions {
 export function createCircuitBreaker(options: CircuitBreakerOptions): CircuitBreaker {
   const { policy, clock } = options;
 
+  // Both fields are "only meaningful in open/half-open" (see CircuitSnapshot's
+  // docs) — closed state never reads them. They still need a real MonoMs,
+  // not a bare `0`: `MonoMs` has no literal, by design (a literal instant
+  // is exactly the thing this brand refuses to represent). One clock read
+  // at construction stamps both with the breaker's own birth time, which is
+  // as meaningless-but-honest a placeholder as the old `0` was, minted the
+  // sanctioned way instead of cast.
+  const bornAt = clock.now().monoMs;
   const state: Atom<CircuitSnapshot> = createAtom<CircuitSnapshot>(
     {
       state: "closed",
       consecutiveFailures: 0,
-      openedAt: 0,
-      probeStartedAt: 0,
+      openedAt: bornAt,
+      probeStartedAt: bornAt,
     },
     clock,
   );
@@ -314,18 +347,28 @@ export function createCircuitBreaker(options: CircuitBreakerOptions): CircuitBre
         const value = await fn();
         // Success closes the circuit from any state — including a DETHRONED
         // probe settling late: a response that arrived is live evidence the
-        // vendor answers, no matter how long the socket sat.
-        state.swap(() => ({ state: "closed", consecutiveFailures: 0, openedAt: 0, probeStartedAt: 0 }));
+        // vendor answers, no matter how long the socket sat. `openedAt`/
+        // `probeStartedAt` go meaningless again on this transition; a fresh
+        // read stamps them rather than reaching for a bare `0` (see the
+        // construction-time comment above — same reasoning, same non-choice).
+        const closedAt = clock.now().monoMs;
+        state.swap(() => ({ state: "closed", consecutiveFailures: 0, openedAt: closedAt, probeStartedAt: closedAt }));
         return ok(value);
       } catch (error) {
         state.swap((s) => {
           // In half-open, ANY failure reopens the circuit immediately.
           if (s.state === "half-open") {
+            // One read stamps both fields: `openedAt` because the circuit
+            // is opening NOW, and `probeStartedAt` because it goes back to
+            // meaningless the instant we leave half-open — reusing the same
+            // reading for both is cheaper than a second clock call for a
+            // value nothing will read.
+            const openedAt = clock.now().monoMs;
             return {
               state: "open",
               consecutiveFailures: s.consecutiveFailures + 1,
-              openedAt: clock.now().monoMs,
-              probeStartedAt: 0,
+              openedAt,
+              probeStartedAt: openedAt,
             };
           }
 
@@ -335,11 +378,16 @@ export function createCircuitBreaker(options: CircuitBreakerOptions): CircuitBre
           // evidence diluted rather than amplified.)
           const next = s.consecutiveFailures + 1;
           if (next >= policy.failureThreshold) {
+            // Same one-read-stamps-both reasoning as the half-open branch
+            // above: `probeStartedAt` is meaningless outside half-open, so
+            // it gets the same `MonoMs` as `openedAt` rather than a second
+            // clock call.
+            const openedAt = clock.now().monoMs;
             return {
               state: "open",
               consecutiveFailures: next,
-              openedAt: clock.now().monoMs,
-              probeStartedAt: 0,
+              openedAt,
+              probeStartedAt: openedAt,
             };
           }
           return { ...s, consecutiveFailures: next };

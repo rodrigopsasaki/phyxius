@@ -7,7 +7,8 @@
  * accumulate sleep handles.
  */
 
-import type { Budget, Clock, Millis } from "@phyxiusjs/clock";
+import { deadlineFrom, elapsedSince } from "@phyxiusjs/clock";
+import type { Budget, Clock, Millis, MonoMs } from "@phyxiusjs/clock";
 
 /**
  * Debounce a function. The wrapped function fires once, after `delayMs` have
@@ -54,7 +55,7 @@ export function throttle<A extends unknown[]>(
   delayMs: Millis,
   clock: Clock,
 ): (...args: A) => void {
-  let lastCallMono: number | null = null;
+  let lastCallMono: MonoMs | null = null;
   // At most one trailing budget is in flight at any time. Subsequent calls
   // within the window update the trailing args without rescheduling.
   let trailing: { budget: Budget; args: A } | null = null;
@@ -62,7 +63,7 @@ export function throttle<A extends unknown[]>(
   return (...args: A) => {
     const now = clock.now().monoMs;
 
-    if (lastCallMono === null || now - lastCallMono >= delayMs) {
+    if (lastCallMono === null || elapsedSince(now, lastCallMono) >= delayMs) {
       // Outside the window — execute immediately and reset.
       lastCallMono = now;
       // A previously-scheduled trailing call is now obsolete; release it.
@@ -78,7 +79,11 @@ export function throttle<A extends unknown[]>(
       return;
     }
 
-    const remainingDelay = (delayMs - (now - lastCallMono)) as Millis;
+    // Remaining delay: how long until `delayMs` have passed since
+    // lastCallMono, from here — the window's own deadline, `elapsedSince`'d
+    // against `now`. Same shape as the circuit breaker's `retryInMs`: a
+    // FUTURE deadline measured back against the present.
+    const remainingDelay = elapsedSince(deadlineFrom(lastCallMono, delayMs), now);
     const budget = clock.timeout(remainingDelay);
     const entry = { budget, args };
     trailing = entry;

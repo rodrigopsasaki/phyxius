@@ -1,3 +1,4 @@
+import { deadlineFrom } from "@phyxiusjs/clock";
 import type { Instant, Millis } from "@phyxiusjs/clock";
 
 import type { Schedule } from "./types.js";
@@ -23,7 +24,12 @@ export function every(intervalMs: Millis): Schedule {
     nextTick(after: Instant): Instant {
       return {
         wallMs: after.wallMs + (intervalMs as number),
-        monoMs: after.monoMs + (intervalMs as number),
+        // `deadlineFrom` — not `after.monoMs + intervalMs` — because the raw
+        // addition compiles (TS doesn't check the `MonoMs` brand on `+`) but
+        // returns a bare `number`, which then fails right here against
+        // `Instant`'s `monoMs: MonoMs` field instead of failing where the
+        // mistake was made.
+        monoMs: deadlineFrom(after.monoMs, intervalMs),
       };
     },
   };

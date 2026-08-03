@@ -4,13 +4,52 @@
 export type Millis = number & { readonly __brand: "millis" };
 
 /**
+ * Branded type for a monotonic clock reading — the `monoMs` face of an
+ * `Instant`. A `MonoMs` is a POINT, not a distance: meaningless in
+ * isolation, and meaningful only relative to another `MonoMs` from the
+ * same process's clock (`SystemClock` anchors it to `performance.now()` at
+ * process start; `ControlledClock` anchors it to whatever `initialTime` a
+ * test chose). It is never an epoch and never portable across a process —
+ * two different processes' `MonoMs` readings share no common origin.
+ *
+ * Distinct from `Millis` on purpose, and deliberately NOT assignable to it.
+ * `Millis` is a duration: safe to add, compare, serialize, and send over a
+ * wire. `MonoMs` is an instant: the raw material a duration is measured
+ * from, not a duration itself. Before this brand existed, that distinction
+ * lived only in a variable name — `CircuitOpenError`'s old `willRetryAfter`
+ * field was a monotonic instant with a name that read like a duration, and
+ * during the 2026-08-01 vendor outage it was stored and rendered as an
+ * epoch, producing 8.6 phantom hours on a customer PR and 1970 dates in ops
+ * logs. `MonoMs` makes that specific misreading a compile error instead of
+ * an incident.
+ *
+ * Raw `+`/`-` on two `MonoMs` values still "compiles" — TypeScript's
+ * arithmetic operators check that both operands are number-like, not that
+ * they share a brand — but the RESULT is a bare `number`, stripped of every
+ * brand involved. That plain `number` doesn't satisfy `Millis` or `MonoMs`
+ * at the next assignment, so the leak surfaces there instead of silently
+ * riding along as a mistyped duration. The only sanctioned operations are
+ * the named helpers in `mono.ts` (`elapsedSince`, `deadlineFrom`,
+ * `hasPassed`) — each documents which raw operator it replaces and why.
+ *
+ * A `MonoMs` value is minted in exactly two ways: reading `clock.now()`, or
+ * deriving one from an existing reading via `deadlineFrom`. There is no
+ * public constructor from a bare number — unlike `ms()` below for `Millis`,
+ * where a literal duration (`ms(10_000)`) is a meaningful, freely-writable
+ * constant, there is no such thing as a meaningful literal *instant*: "the
+ * monotonic clock read 10,000" means nothing without a clock that actually
+ * read it.
+ */
+export type MonoMs = number & { readonly __brand: "monoMs" };
+
+/**
  * Represents a point in time with both wall clock and monotonic time
  */
 export interface Instant {
   /** Wall clock time in milliseconds since epoch (can jump due to system changes) */
   readonly wallMs: number;
-  /** Monotonic time in milliseconds for measuring intervals (never goes backwards) */
-  readonly monoMs: number;
+  /** Monotonic time for measuring intervals (never goes backwards). See `MonoMs`. */
+  readonly monoMs: MonoMs;
 }
 
 /**

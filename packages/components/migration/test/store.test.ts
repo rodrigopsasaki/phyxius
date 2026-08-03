@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { createControlledClock, type Millis } from "@phyxiusjs/clock";
+import { createControlledClock, type Instant, type Millis } from "@phyxiusjs/clock";
 import { isErr, isOk } from "@phyxiusjs/fp";
 import type { HandlerEvent } from "@phyxiusjs/handler";
 import { Journal } from "@phyxiusjs/journal";
@@ -9,13 +9,22 @@ import { createMemoryJournalStore, createMemoryPhaseStore } from "../src/store.j
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
+/**
+ * Test-only fixture: an Instant with both faces set to the same number.
+ * `as Instant` is the sanctioned escape hatch for fabricating one outside a
+ * real clock reading — see @phyxiusjs/clock's MonoMs docs.
+ */
+function instant(ms: number): Instant {
+  return { wallMs: ms, monoMs: ms } as Instant;
+}
+
 function makeEvent(overrides: Partial<HandlerEvent>): HandlerEvent {
   return {
     name: "test.handler",
     invocationId: "inv-1",
     source: "test",
-    startedAt: { wallMs: 0, monoMs: 0 },
-    completedAt: { wallMs: 0, monoMs: 0 },
+    startedAt: instant(0),
+    completedAt: instant(0),
     durationMs: 0,
     attempts: 1,
     outcome: "success",
@@ -31,8 +40,8 @@ describe("createMemoryJournalStore", () => {
     const clock = createControlledClock({ initialTime: 1000 });
     const journal = new Journal<HandlerEvent>({ clock });
 
-    journal.append(makeEvent({ completedAt: { wallMs: 900, monoMs: 900 } }));
-    journal.append(makeEvent({ completedAt: { wallMs: 950, monoMs: 950 } }));
+    journal.append(makeEvent({ completedAt: instant(900) }));
+    journal.append(makeEvent({ completedAt: instant(950) }));
 
     const store = createMemoryJournalStore({ journal, clock });
     const events = await store.query({}, 200 as Millis);
@@ -44,9 +53,9 @@ describe("createMemoryJournalStore", () => {
     const clock = createControlledClock({ initialTime: 1000 });
     const journal = new Journal<HandlerEvent>({ clock });
 
-    journal.append(makeEvent({ completedAt: { wallMs: 500, monoMs: 500 } })); // out
-    journal.append(makeEvent({ completedAt: { wallMs: 850, monoMs: 850 } })); // in
-    journal.append(makeEvent({ completedAt: { wallMs: 950, monoMs: 950 } })); // in
+    journal.append(makeEvent({ completedAt: instant(500) })); // out
+    journal.append(makeEvent({ completedAt: instant(850) })); // in
+    journal.append(makeEvent({ completedAt: instant(950) })); // in
 
     const store = createMemoryJournalStore({ journal, clock });
     const events = await store.query({}, 200 as Millis);
@@ -59,9 +68,9 @@ describe("createMemoryJournalStore", () => {
     const clock = createControlledClock({ initialTime: 1000 });
     const journal = new Journal<HandlerEvent>({ clock });
 
-    journal.append(makeEvent({ name: "order.create", completedAt: { wallMs: 900, monoMs: 900 } }));
-    journal.append(makeEvent({ name: "order.cancel", completedAt: { wallMs: 900, monoMs: 900 } }));
-    journal.append(makeEvent({ name: "order.create", completedAt: { wallMs: 950, monoMs: 950 } }));
+    journal.append(makeEvent({ name: "order.create", completedAt: instant(900) }));
+    journal.append(makeEvent({ name: "order.cancel", completedAt: instant(900) }));
+    journal.append(makeEvent({ name: "order.create", completedAt: instant(950) }));
 
     const store = createMemoryJournalStore({ journal, clock });
     const events = await store.query({ name: "order.create" }, 200 as Millis);
@@ -74,8 +83,8 @@ describe("createMemoryJournalStore", () => {
     const clock = createControlledClock({ initialTime: 1000 });
     const journal = new Journal<HandlerEvent>({ clock });
 
-    journal.append(makeEvent({ outcome: "success", completedAt: { wallMs: 900, monoMs: 900 } }));
-    journal.append(makeEvent({ outcome: "failure", completedAt: { wallMs: 900, monoMs: 900 } }));
+    journal.append(makeEvent({ outcome: "success", completedAt: instant(900) }));
+    journal.append(makeEvent({ outcome: "failure", completedAt: instant(900) }));
 
     const store = createMemoryJournalStore({ journal, clock });
     const events = await store.query({ outcome: "failure" }, 200 as Millis);
@@ -91,13 +100,13 @@ describe("createMemoryJournalStore", () => {
     journal.append(
       makeEvent({
         observed: { table: "legacy_users" },
-        completedAt: { wallMs: 900, monoMs: 900 },
+        completedAt: instant(900),
       }),
     );
     journal.append(
       makeEvent({
         observed: { table: "users" },
-        completedAt: { wallMs: 900, monoMs: 900 },
+        completedAt: instant(900),
       }),
     );
 
@@ -112,7 +121,7 @@ describe("createMemoryJournalStore", () => {
     const journal = new Journal<HandlerEvent>({ clock });
 
     for (let i = 0; i < 10; i++) {
-      journal.append(makeEvent({ completedAt: { wallMs: 900 + i, monoMs: 900 + i } }));
+      journal.append(makeEvent({ completedAt: instant(900 + i) }));
     }
 
     const store = createMemoryJournalStore({ journal, clock });

@@ -5,8 +5,13 @@ import type { Instant } from "@phyxiusjs/clock";
 
 import { at, every, never, schedule } from "../src/schedule.js";
 
+// Test-only fixture: fabricates an Instant from bare numbers instead of a
+// clock reading. `as Instant` is the sanctioned escape hatch for exactly
+// this — same pattern `scheduler.test.ts` in this package already uses —
+// scoped to test fixtures, since production code mints MonoMs only via
+// `clock.now()` or `deadlineFrom`.
 function instant(wallMs: number, monoMs = wallMs): Instant {
-  return { wallMs, monoMs };
+  return { wallMs, monoMs } as Instant;
 }
 
 describe("schedule.every", () => {

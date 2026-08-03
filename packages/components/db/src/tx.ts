@@ -1,3 +1,4 @@
+import { elapsedSince } from "@phyxiusjs/clock";
 import type { Clock, Millis } from "@phyxiusjs/clock";
 import { err, ok, type Result } from "@phyxiusjs/fp";
 import { validate, type Validator } from "@phyxiusjs/validate";
@@ -47,7 +48,7 @@ export function makeTx(options: {
       }
 
       const { rows, rowCount } = result.value;
-      const durationMs = clock.now().monoMs - startMono;
+      const durationMs = elapsedSince(clock.now().monoMs, startMono);
       emitEvent(emit, {
         type: "db:query-completed",
         at: clock.now(),

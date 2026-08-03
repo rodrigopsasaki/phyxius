@@ -3,11 +3,14 @@ import { describe, expect, it } from "vitest";
 import { hashToRatio, shouldLog } from "../src/sampling.js";
 import { frameworkConfigSchema } from "../src/config-schema.js";
 import type { HandlerEvent } from "@phyxiusjs/handler";
+import type { Instant } from "@phyxiusjs/clock";
 
 // ── Fixtures ──────────────────────────────────────────────────────────────
 
 function event(overrides: Partial<HandlerEvent>): HandlerEvent {
-  const instant = { wallMs: 0, monoMs: 0 };
+  // Fixture instant, not a clock reading — `as Instant` is the sanctioned
+  // escape hatch for test fixtures (see @phyxiusjs/clock's MonoMs docs).
+  const instant = { wallMs: 0, monoMs: 0 } as Instant;
   return {
     name: "x",
     invocationId: "inv-default",

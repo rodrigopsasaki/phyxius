@@ -1,7 +1,7 @@
 import { context } from "@phyxiusjs/context";
 import { observe } from "@phyxiusjs/observe";
 import { ok, err } from "@phyxiusjs/fp";
-import type { Budget, Millis } from "@phyxiusjs/clock";
+import type { Budget, Millis, MonoMs } from "@phyxiusjs/clock";
 import type {
   CreateHandlerOptions,
   Handler,
@@ -189,7 +189,13 @@ function snapshotLog(): CanonicalLog {
 class TimeoutError extends Error {
   constructor(
     readonly handlerName: string,
-    readonly deadlineMonoMs: number,
+    // MonoMs, not number: this is `budget.deadline.monoMs`, a clock
+    // reading, not a duration — captured for potential debugging even
+    // though `toHandleError` below only reads `timeoutMs`/`handlerName`
+    // today. Naming it `number` would have been exactly the kind of
+    // instant-wearing-a-duration's-clothes this whole exercise exists to
+    // catch, even fully contained in a private, unexported class.
+    readonly deadlineMonoMs: MonoMs,
     readonly timeoutMs: number,
   ) {
     super(`Handler '${handlerName}' timed out`);
