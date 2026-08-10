@@ -28,7 +28,7 @@ export function getContext<T = Record<string, unknown>>(): PhyxiusContext<T> {
  * @example
  * ```typescript
  * // Untyped context (default)
- * const result = await contextScope(async () => {
+ * const result = await createContextScope(async () => {
  *   const ctx = getContext();
  *   console.log(ctx.data); // Record<string, unknown>
  *   return "completed";
@@ -40,13 +40,13 @@ export function getContext<T = Record<string, unknown>>(): PhyxiusContext<T> {
  *   permissions: string[];
  * }
  *
- * await contextScope<UserSession>(async () => {
+ * await createContextScope<UserSession>(async () => {
  *   const ctx = getContext<UserSession>();
  *   console.log(ctx.data.userId); // string (typed!)
  * }, { initial: { userId: "user123", permissions: ["read"] } });
  * ```
  */
-export async function contextScope<T = Record<string, unknown>, R = unknown>(
+export async function createContextScope<T = Record<string, unknown>, R = unknown>(
   callback: () => Promise<R> | R,
   options?: ContextScopeOptions<T>,
 ): Promise<R> {
