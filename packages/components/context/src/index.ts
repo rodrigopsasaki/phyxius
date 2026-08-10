@@ -1,5 +1,5 @@
 // Core functions
-import { getContext, contextScope } from "./core/context.js";
+import { getContext, createContextScope } from "./core/context.js";
 import { getCurrentContext } from "./core/global.js";
 
 // Type exports
@@ -60,5 +60,5 @@ export const context = {
    * @param options - Options for creating the new context
    * @returns The result of the callback function
    */
-  scope: contextScope,
+  scope: createContextScope,
 };
