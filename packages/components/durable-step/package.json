@@ -1,0 +1,69 @@
+{
+  "name": "@phyxiusjs/durable-step",
+  "version": "0.0.0",
+  "description": "EXPLORATORY (find-shape): the composition of state-machine legality, migration-style evidence, and the handler into one durable step.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "test": "vitest run",
+    "test:watch": "vitest watch",
+    "test:coverage": "vitest run --coverage",
+    "typecheck": "tsc --noEmit",
+    "clean": "rm -rf dist coverage"
+  },
+  "keywords": [
+    "durable-step",
+    "state-machine",
+    "migration",
+    "handler",
+    "phyxius",
+    "exploratory"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "@phyxiusjs/atom": "workspace:*",
+    "@phyxiusjs/clock": "workspace:*",
+    "@phyxiusjs/fp": "workspace:*",
+    "@phyxiusjs/handler": "workspace:*",
+    "@phyxiusjs/journal": "workspace:*",
+    "@phyxiusjs/migration": "workspace:*",
+    "@phyxiusjs/observe": "workspace:*",
+    "@phyxiusjs/retry": "workspace:*",
+    "@phyxiusjs/state-machine": "workspace:*",
+    "@phyxiusjs/validate": "workspace:*"
+  },
+  "devDependencies": {
+    "@phyxiusjs/circuit-breaker": "workspace:*",
+    "@types/node": "^22.10.2",
+    "@vitest/coverage-v8": "^2.1.8",
+    "tsup": "^8.3.5",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8",
+    "zod": "^3.22.0"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/rodrigopsasaki/phyxius.git",
+    "directory": "packages/components/durable-step"
+  }
+}
