@@ -1,0 +1,15 @@
+
+> @phyxiusjs/durable-step@0.1.0 test /Users/rodrigosasaki/dev/private/phyxius/packages/components/durable-step
+> vitest run "retry-budget"
+
+
+ RUN  v2.1.9 /Users/rodrigosasaki/dev/private/phyxius/packages/components/durable-step
+
+ ✓ test/retry-budget/round-0-baseline.test.ts (3 tests) 560ms
+   ✓ round 0 — baseline: createRetryLedger, unchanged, published on main > [HEADROOM PROBE, item 3] two independent OS processes each mint their own full budget for 'the same' operation 527ms
+
+ Test Files  1 passed (1)
+      Tests  3 passed (3)
+   Start at  14:04:00
+   Duration  4.69s (transform 291ms, setup 0ms, collect 334ms, tests 560ms, environment 1ms, prepare 1.01s)
+

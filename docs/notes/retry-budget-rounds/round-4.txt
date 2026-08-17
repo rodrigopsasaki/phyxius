@@ -1,0 +1,14 @@
+
+> @phyxiusjs/durable-step@0.1.0 test /Users/rodrigosasaki/dev/private/phyxius/packages/components/durable-step
+> vitest run "retry-budget/round-4"
+
+
+ RUN  v2.1.9 /Users/rodrigosasaki/dev/private/phyxius/packages/components/durable-step
+
+ ✓ test/retry-budget/round-4-outage-scale.test.ts (2 tests) 22ms
+
+ Test Files  1 passed (1)
+      Tests  2 passed (2)
+   Start at  14:20:19
+   Duration  378ms (transform 80ms, setup 0ms, collect 107ms, tests 22ms, environment 0ms, prepare 34ms)
+
