@@ -1,0 +1,18 @@
+
+> @phyxiusjs/durable-step@0.0.0 test /Users/rodrigosasaki/dev/private/phyxius/packages/components/durable-step
+> vitest run "--reporter=verbose"
+
+
+ RUN  v2.1.9 /Users/rodrigosasaki/dev/private/phyxius/packages/components/durable-step
+
+ ✓ test/round-0-baseline.test.ts > round 0 — infer-standards, expressed with today's three primitives, unchanged > FINDING 1 (pass, free): duration is attributable with zero author effort
+ ✓ test/round-0-baseline.test.ts > round 0 — infer-standards, expressed with today's three primitives, unchanged > FINDING 2 (fail, sharp): spend is not merely unattributed by default — it has no vocabulary to attribute it WITH
+ ✓ test/round-0-baseline.test.ts > round 0 — infer-standards, expressed with today's three primitives, unchanged > FINDING 3 (fail): state-machine legality is a disconnected island from the handler's own invocation
+ ✓ test/round-0-baseline.test.ts > round 0 — infer-standards, expressed with today's three primitives, unchanged > FINDING 4 (fail, sharp): migration's evidence gate can express proof-of-completion only by contortion, and the handler's own success is not coupled to it
+ ✓ test/round-0-baseline.test.ts > round 0 — infer-standards, expressed with today's three primitives, unchanged > FINDING 5 (fail, the hardest case): work between two declared steps is invisible by construction — nothing here can even notice it, let alone forbid it
+
+ Test Files  1 passed (1)
+      Tests  5 passed (5)
+   Start at  09:10:56
+   Duration  313ms (transform 66ms, setup 0ms, collect 80ms, tests 5ms, environment 0ms, prepare 31ms)
+

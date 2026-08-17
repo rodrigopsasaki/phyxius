@@ -3,18 +3,9 @@ import { err, isErr, ok, type Result } from "@phyxiusjs/fp";
 import type { HandlerEvent } from "@phyxiusjs/handler";
 import type { Journal } from "@phyxiusjs/journal";
 
+import { runEvidenceBag } from "./evidence-runner.js";
 import { createMemoryPhaseStore, type JournalStore, type PhaseStore } from "./store.js";
-import type {
-  Advanced,
-  AdvanceError,
-  EvidenceBag,
-  EvidenceFailure,
-  EvidenceSnapshot,
-  EvidenceSource,
-  MigrationSpec,
-  PhaseName,
-  RunningMigration,
-} from "./types.js";
+import type { Advanced, AdvanceError, EvidenceBag, MigrationSpec, PhaseName, RunningMigration } from "./types.js";
 
 // ── defineMigration ─────────────────────────────────────────────────────────
 
@@ -99,69 +90,13 @@ export function createMigration<TPhases extends Readonly<Record<string, import("
     return next ?? null;
   }
 
-  // ── Internal: run every evidence source in a bag ─────────────────────────
-  //
-  // Returns one of three shapes:
-  //   - all-ok: evidence satisfied, snapshot is the { label → value } bag
-  //   - some-failed: predicates returned Err
-  //   - some-errored: evidence source threw / store unreachable
-  //
-  // A mixed outcome (one failed, one errored) is reported as `EVIDENCE_ERRORED`
-  // with errors including the failures — errors are the more urgent signal,
-  // and distinguishing them preserves the auditability we care about.
-
-  interface EvidenceRunResult {
-    readonly snapshot: EvidenceSnapshot;
-    readonly failures: Record<string, EvidenceFailure>;
-    readonly errors: Record<string, unknown>;
-  }
-
-  async function runEvidence(bag: EvidenceBag): Promise<EvidenceRunResult> {
-    const snapshot: Record<string, unknown> = {};
-    const failures: Record<string, EvidenceFailure> = {};
-    const errors: Record<string, unknown> = {};
-
-    const labels = Object.keys(bag);
-
-    const results = await Promise.all(
-      labels.map(async (label) => {
-        const source = bag[label]!;
-        try {
-          const value = await runOneEvidenceSource(source);
-          return { label, result: value };
-        } catch (cause) {
-          return { label, result: "threw" as const, cause };
-        }
-      }),
-    );
-
-    for (const entry of results) {
-      if (entry.result === "threw") {
-        errors[entry.label] = entry.cause;
-        continue;
-      }
-      if (isErr(entry.result)) {
-        failures[entry.label] = entry.result.error;
-        continue;
-      }
-      snapshot[entry.label] = entry.result.value;
-    }
-
-    return { snapshot, failures, errors };
-  }
-
-  async function runOneEvidenceSource(source: EvidenceSource): Promise<Result<unknown, EvidenceFailure>> {
-    switch (source.type) {
-      case "journal-window": {
-        const events = await runtime.journalStore.query(source.query, source.windowMs);
-        return source.predicate(events);
-      }
-      case "schema-applied":
-        return source.check();
-      case "attestation":
-        return source.check();
-    }
-  }
+  // Evidence-running is delegated to `runEvidenceBag` (evidence-runner.ts) —
+  // lifted out from here so `@phyxiusjs/durable-step`'s proof-of-completion
+  // gate can run the exact same "collect Ok/failed/errored across a bag"
+  // logic without any phase or CAS semantics attached. See that file's
+  // header comment for the shape-fits reasoning. Behavior here is
+  // unchanged — this is a relocation, not a rewrite.
+  const runEvidence = (bag: EvidenceBag) => runEvidenceBag(bag, { journalStore: runtime.journalStore });
 
   // ── Internal: write a journal entry for an advance attempt ──────────────
 

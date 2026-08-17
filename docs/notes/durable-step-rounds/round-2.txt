@@ -1,0 +1,25 @@
+
+> @phyxiusjs/durable-step@0.0.0 test /Users/rodrigosasaki/dev/private/phyxius/packages/components/durable-step
+> vitest run "--reporter=verbose"
+
+
+ RUN  v2.1.9 /Users/rodrigosasaki/dev/private/phyxius/packages/components/durable-step
+
+ ✓ test/round-0-baseline.test.ts > round 0 — infer-standards, expressed with today's three primitives, unchanged > FINDING 1 (pass, free): duration is attributable with zero author effort
+ ✓ test/round-0-baseline.test.ts > round 0 — infer-standards, expressed with today's three primitives, unchanged > FINDING 2 (fail, sharp): spend is not merely unattributed by default — it has no vocabulary to attribute it WITH
+ ✓ test/round-0-baseline.test.ts > round 0 — infer-standards, expressed with today's three primitives, unchanged > FINDING 3 (fail): state-machine legality is a disconnected island from the handler's own invocation
+ ✓ test/round-0-baseline.test.ts > round 0 — infer-standards, expressed with today's three primitives, unchanged > FINDING 4 (fail, sharp): migration's evidence gate can express proof-of-completion only by contortion, and the handler's own success is not coupled to it
+ ✓ test/round-0-baseline.test.ts > round 0 — infer-standards, expressed with today's three primitives, unchanged > FINDING 5 (fail, the hardest case): work between two declared steps is invisible by construction — nothing here can even notice it, let alone forbid it
+ ✓ test/round-1-state-fusion.test.ts > round 1 — state-machine fused into the handler invocation > closes FINDING 3: the journal entry carries fromState/toState/event with zero per-invocation author code
+ ✓ test/round-1-state-fusion.test.ts > round 1 — state-machine fused into the handler invocation > an illegal transition is a typed pre-flight refusal, not a silent success — spec.run never executes
+ ✓ test/round-1-state-fusion.test.ts > round 1 — state-machine fused into the handler invocation > honest limit AS CAPTURED AT ROUND 1: FINDING 2 (spend) was still not attributable — round 1 didn't touch it
+ ✓ test/round-2-spend-attribution.test.ts > round 2 — spend is required, and an unattributed cent refuses to complete > closes the sharp half of FINDING 2: a metered step that records its spend journals spendTotal/spendUnit for free
+ ✓ test/round-2-spend-attribution.test.ts > round 2 — spend is required, and an unattributed cent refuses to complete > the sharp test itself: a metered step that forgets to record spend is REFUSED, not silently shipped
+ ✓ test/round-2-spend-attribution.test.ts > round 2 — spend is required, and an unattributed cent refuses to complete > symmetry: spend.none() contradicted by a record() call is refused, not silently accepted either way
+ ✓ test/round-2-spend-attribution.test.ts > round 2 — spend is required, and an unattributed cent refuses to complete > honest limit, unchanged from round 0: FINDING 4 (proof-of-completion) is still decoupled — spend and correctness are different claims
+
+ Test Files  3 passed (3)
+      Tests  12 passed (12)
+   Start at  09:20:26
+   Duration  303ms (transform 124ms, setup 0ms, collect 270ms, tests 19ms, environment 0ms, prepare 111ms)
+
