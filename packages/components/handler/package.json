@@ -1,6 +1,6 @@
 {
   "name": "@phyxiusjs/handler",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "The universal work-unit primitive — typed, supervised, decision-forcing",
   "type": "module",
   "main": "./dist/index.js",
