@@ -1,0 +1,247 @@
+// ── Round 0 — baseline (ARCHIVED, ran against the pre-round-1 package) ────
+//
+// This file ran successfully inside
+// `packages/components/durable-step/test/retry-budget/` (with
+// `legacy-retry-ledger.ts` and `workers/naive-ledger-worker.mjs` as
+// siblings) against the durable-step package as published on main
+// (0.1.0/0.1.1), BEFORE round 1 replaced `RetryLedger` with
+// `DurableRetryLedger` and changed `DurableStepDeps.retryLedger`'s type.
+// Moved here, out of the live test tree, once round 1 landed: it can no
+// longer compile against the current `defineDurableStep` (a sync ledger no
+// longer satisfies the deps type), and that is round 1's own proof point,
+// not a bug to fix. The raw output this file produced is frozen in
+// `../round-0.txt`. Kept here in full (not just the log) so the exact
+// mechanism under test stays inspectable. Import paths below are exactly
+// as they were at the original location and will not resolve if this file
+// is moved back into a live test tree without its two sibling files.
+//
+// `createRetryLedger` exactly as published on `main` (0.1.0/0.1.1),
+// UNCHANGED. Formally scored against corpus item 1 (flat parent, sibling
+// children — the shape the prior find-shape's round 3 already proved).
+//
+// Two headroom probes ride alongside using the SAME unchanged mechanism —
+// no source touched — because the skill's own instruction is to let round
+// 0's data reveal the headroom, and the headroom here is not visible from
+// item 1 alone. Both probes are real, measured corpus exercises (corpus
+// items 2 and 3), not speculation.
+
+import { fork } from "node:child_process";
+import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
+import { describe, expect, it } from "vitest";
+import { z } from "zod";
+
+import { createControlledClock, ms } from "@phyxiusjs/clock";
+import { isErr, isOk } from "@phyxiusjs/fp";
+import { retry, cb, spawn, type HandlerEvent, type HandlerRuntime } from "@phyxiusjs/handler";
+import { Journal } from "@phyxiusjs/journal";
+import { createMemoryJournalStore, type JournalStore } from "@phyxiusjs/migration";
+import { machine } from "@phyxiusjs/state-machine";
+import { observe } from "@phyxiusjs/observe";
+
+import { createMemoryStateStore, createRetryLedger, defineDurableStep, spend } from "../../src/index.js";
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+
+function setup() {
+  const clock = createControlledClock({ initialTime: 0 });
+  const journal = new Journal<HandlerEvent>({ clock, maxEntries: 200 });
+  const journalStore = createMemoryJournalStore({ journal, clock });
+  const runtime: HandlerRuntime = { clock, journal };
+  return { clock, journal, journalStore, runtime };
+}
+
+type ItemState = { kind: "pending" } | { kind: "done" };
+type ItemEvent = { type: "complete" };
+
+const itemMachine = machine.define<ItemState, ItemEvent>({
+  name: "convention-item",
+  transitions: {
+    pending: { complete: () => ({ kind: "done" }) },
+    done: {},
+  },
+});
+
+function makeFlakyItem(opts: {
+  clock: ReturnType<typeof createControlledClock>;
+  journalStore: JournalStore;
+  retryLedger: ReturnType<typeof createRetryLedger>;
+  name: string;
+  failTimes: number;
+}) {
+  const stateStore = createMemoryStateStore({ initial: { kind: "pending" } as ItemState, clock: opts.clock });
+  let attemptsSoFar = 0;
+
+  const spec = defineDurableStep(
+    itemMachine,
+    {
+      name: opts.name,
+      eventType: "complete",
+      toEvent: (): ItemEvent => ({ type: "complete" }),
+      input: z.object({}),
+      output: z.object({ ok: z.boolean() }),
+      fields: observe.fields({}),
+      timeout: ms(5_000),
+      concurrency: { max: 1, queueSize: 0, backpressure: "reject" },
+      retry: retry.fixed({ maxAttempts: 3, delay: ms(0) }),
+      circuitBreaker: cb.none(),
+      spend: spend.none(),
+      proof: {},
+      run: async () => {
+        attemptsSoFar += 1;
+        if (attemptsSoFar <= opts.failTimes) {
+          throw new Error(`${opts.name}: transient failure #${attemptsSoFar}`);
+        }
+        return { ok: true };
+      },
+    },
+    { clock: opts.clock, stateStore, retryLedger: opts.retryLedger, journalStore: opts.journalStore },
+  );
+
+  return { spec, stateStore };
+}
+
+describe("round 0 — baseline: createRetryLedger, unchanged, published on main", () => {
+  // ── Corpus item 1 — formally scored ─────────────────────────────────────
+
+  it("[SCORED, item 1] flat siblings sharing one ledger conserve capacity — confirms the prior find-shape's own result", async () => {
+    const { clock, journal, journalStore } = setup();
+    const sharedLedger = createRetryLedger(3);
+
+    const a = makeFlakyItem({ clock, journalStore, retryLedger: sharedLedger, name: "item-a", failTimes: 2 });
+    const b = makeFlakyItem({ clock, journalStore, retryLedger: sharedLedger, name: "item-b", failTimes: 2 });
+    const c = makeFlakyItem({ clock, journalStore, retryLedger: sharedLedger, name: "item-c", failTimes: 2 });
+
+    const runtime: HandlerRuntime = { clock, journal };
+    const ha = await spawn(a.spec, runtime);
+    const ra = await ha.invoke({});
+    await ha.stop();
+    const hb = await spawn(b.spec, runtime);
+    const rb = await hb.invoke({});
+    await hb.stop();
+    const hc = await spawn(c.spec, runtime);
+    const rc = await hc.invoke({});
+    await hc.stop();
+
+    expect(isOk(ra)).toBe(true);
+    expect(isErr(rb)).toBe(true);
+    expect(isErr(rc)).toBe(true);
+    expect(sharedLedger.remaining()).toBe(0);
+
+    // FITNESS: could a nested step draw capacity it wasn't granted, here?
+    // No — three siblings sharing ONE object reference, in ONE process,
+    // never exceed the declared 3. This is the case the prior run already
+    // closed; round 0 reconfirms it under this run's own harness.
+  });
+
+  // ── Corpus item 2 headroom probe — same process, one function call deep ─
+  //
+  // NOT scored as part of round 0's baseline result (the instruction scopes
+  // round 0 to item 1) — but run with the SAME unchanged mechanism, because
+  // the whole point of a baseline is to reveal where the next round should
+  // go, and that isn't visible from item 1 alone.
+
+  it("[HEADROOM PROBE, item 2] a nested child that constructs its OWN ledger mints capacity — one ordinary function call is enough", async () => {
+    const { clock, journal, journalStore } = setup();
+
+    // The parent's intent: ONE shared budget of 3 extra attempts for the
+    // whole discipline-synthesis-shaped fan-out.
+    const sharedLedger = createRetryLedger(3);
+
+    const siblingUnderSharedBudget = makeFlakyItem({
+      clock,
+      journalStore,
+      retryLedger: sharedLedger,
+      name: "conserved-item",
+      failTimes: 2,
+    });
+
+    // The mistake: a nested child, written by someone who didn't (or
+    // couldn't, two call-frames deep) get a handle on `sharedLedger`,
+    // reaches for the same public factory everyone else used to get
+    // started — `createRetryLedger(...)`. Nothing in the type signature,
+    // the function name, or the runtime distinguishes this from the
+    // correct call. This is not a contrived misuse; it is the ONE-LINE
+    // difference between "thread the reference" and "construct a fresh
+    // one," and the published API cannot tell them apart.
+    const freshLedgerMintedByMistake = createRetryLedger(3);
+    const mintedChild = makeFlakyItem({
+      clock,
+      journalStore,
+      retryLedger: freshLedgerMintedByMistake,
+      name: "minted-child",
+      failTimes: 2,
+    });
+
+    const runtime: HandlerRuntime = { clock, journal };
+    const h1 = await spawn(siblingUnderSharedBudget.spec, runtime);
+    const r1 = await h1.invoke({});
+    await h1.stop();
+    const h2 = await spawn(mintedChild.spec, runtime);
+    const r2 = await h2.invoke({});
+    await h2.stop();
+
+    // Both succeed — each drew 2 extra attempts from what it BELIEVES is
+    // its budget. Combined, 4 extra attempts were granted against an
+    // operation whose owner declared 3 total. Capacity was minted by
+    // nothing more exotic than one extra `createRetryLedger(...)` call.
+    expect(isOk(r1)).toBe(true);
+    expect(isOk(r2)).toBe(true);
+    expect(sharedLedger.remaining()).toBe(1); // 3 - 2 = 1, correctly conserved for the ledger that WAS shared
+    expect(freshLedgerMintedByMistake.remaining()).toBe(1); // a SECOND, independent 1 left over — should not exist
+    // FITNESS: capacity minted, via a plain function call, same process,
+    // no async trickery required. `unknown` is not the right word here —
+    // this is a certainty: the published interface has no way to prevent
+    // or even detect this at either compile time or runtime.
+  });
+
+  // ── Corpus item 3 headroom probe — genuine process hop ──────────────────
+  //
+  // Two REAL, independent Node processes (`child_process.fork`, no shared
+  // V8 heap, no shared memory of any kind) each import the actual built
+  // `@phyxiusjs/durable-step` artifact and construct
+  // `createRetryLedger(3)`, simulating a step interrupted mid-flight and
+  // "revived" by a different worker. Communication back to this test is
+  // over the fork's own IPC channel and carries only each process's
+  // computed result (a number) — never the ledger object itself, which is
+  // impossible to send over IPC in the first place (it closes over a
+  // function).
+
+  it("[HEADROOM PROBE, item 3] two independent OS processes each mint their own full budget for 'the same' operation", async () => {
+    const workerPath = join(__dirname, "workers", "naive-ledger-worker.mjs");
+
+    function runWorker(
+      totalExtraAttempts: number,
+      want: number,
+    ): Promise<{ pid: number; granted: number; remaining: number }> {
+      return new Promise((resolve, reject) => {
+        const child = fork(workerPath, [String(totalExtraAttempts), String(want)], { stdio: "pipe" });
+        child.on("message", (msg) => resolve(msg as { pid: number; granted: number; remaining: number }));
+        child.on("error", reject);
+        child.on("exit", (code) => {
+          if (code !== 0) reject(new Error(`worker exited with code ${code}`));
+        });
+      });
+    }
+
+    // "Worker A" starts the operation, draws its full request.
+    const workerA = await runWorker(3, 3);
+    // "Worker B" — a different process entirely — is handed the SAME
+    // intent ("this operation's conserved budget is 3, I need up to 3
+    // extra attempts") because that is genuinely all the current API lets
+    // a revived step express: there is no operation identity to look up,
+    // no store to query, nothing but the constructor's own arguments.
+    const workerB = await runWorker(3, 3);
+
+    expect(workerA.pid).not.toBe(workerB.pid); // genuinely different OS processes
+    expect(workerA.granted).toBe(3);
+    expect(workerB.granted).toBe(3); // NOT 0 — the fitness question's sharp edge
+
+    // FITNESS: capacity minted across a real process hop — deterministically,
+    // every single time, not a race or an edge case. And the "no budget
+    // declared vs unlimited" half of the fitness question can't even be
+    // asked here: there is no channel through which worker B could learn
+    // "0 remain" OR "unknown, nothing was ever declared" — every revival
+    // looks identical to a fresh start.
+  });
+});
