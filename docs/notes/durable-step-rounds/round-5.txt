@@ -1,0 +1,35 @@
+
+> @phyxiusjs/durable-step@0.0.0 test /Users/rodrigosasaki/dev/private/phyxius/packages/components/durable-step
+> vitest run "--reporter=verbose"
+
+
+ RUN  v2.1.9 /Users/rodrigosasaki/dev/private/phyxius/packages/components/durable-step
+
+ ✓ test/round-0-baseline.test.ts > round 0 — infer-standards, expressed with today's three primitives, unchanged > FINDING 1 (pass, free): duration is attributable with zero author effort
+ ✓ test/round-0-baseline.test.ts > round 0 — infer-standards, expressed with today's three primitives, unchanged > FINDING 2 (fail, sharp): spend is not merely unattributed by default — it has no vocabulary to attribute it WITH
+ ✓ test/round-0-baseline.test.ts > round 0 — infer-standards, expressed with today's three primitives, unchanged > FINDING 3 (fail): state-machine legality is a disconnected island from the handler's own invocation
+ ✓ test/round-0-baseline.test.ts > round 0 — infer-standards, expressed with today's three primitives, unchanged > FINDING 4 (fail, sharp): migration's evidence gate can express proof-of-completion only by contortion, and the handler's own success is not coupled to it
+ ✓ test/round-0-baseline.test.ts > round 0 — infer-standards, expressed with today's three primitives, unchanged > FINDING 5 (fail, the hardest case): work between two declared steps is invisible by construction — nothing here can even notice it, let alone forbid it
+ ✓ test/round-5-climb-unaccounted-time.test.ts > round 5 — the invisible minute becomes a journaled number, not a prevention > reproduces corpus item 3 exactly: a 35-minute climb with 10 minutes of declared stages journals 25 unaccounted minutes
+ ✓ test/round-5-climb-unaccounted-time.test.ts > round 5 — the invisible minute becomes a journaled number, not a prevention > a climb built entirely from declared steps has zero unaccounted time — the good case, verified
+ ✓ test/round-5-climb-unaccounted-time.test.ts > round 5 — the invisible minute becomes a journaled number, not a prevention > honest limit: unaccountedMs names the SIZE of the gap, not what happened inside it
+ ✓ test/round-3-retry-conservation.test.ts > round 3 — retry allowance is drawn from a conserved, shared parent budget > decomposition cannot mint retry capacity: three flaky items share ONE ledger of 3 extra attempts, and the third is capped below its own declared ceiling
+ ✓ test/round-3-retry-conservation.test.ts > round 3 — retry allowance is drawn from a conserved, shared parent budget > attributability: retryBudgeted/retryGranted/retryAttemptsUsed land in the journal with zero extra author code
+ ✓ test/round-3-retry-conservation.test.ts > round 3 — retry allowance is drawn from a conserved, shared parent budget > honest limit: the underlying HandlerEvent.attempts field is no longer informative once retry moved into this layer
+ ✓ test/round-4-proof-of-completion.test.ts > round 4 — a step's output claim and its proof become the same fact > closes FINDING 4: a step whose declared proof resolves Ok completes, and the snapshot lands in the journal for free
+ ✓ test/round-4-proof-of-completion.test.ts > round 4 — a step's output claim and its proof become the same fact > the sharp test itself: a step whose output claims success but whose proof fails is REFUSED — the state never advances
+ ✓ test/round-4-proof-of-completion.test.ts > round 4 — a step's output claim and its proof become the same fact > an empty proof bag is the explicit, auditable 'no proof required' declaration — not an omission
+ ✓ test/round-4-proof-of-completion.test.ts > round 4 — a step's output claim and its proof become the same fact > honest limit, unchanged: nothing yet stops an author from skipping this whole composition for a phase of a durable action
+ ✓ test/round-2-spend-attribution.test.ts > round 2 — spend is required, and an unattributed cent refuses to complete > closes the sharp half of FINDING 2: a metered step that records its spend journals spendTotal/spendUnit for free
+ ✓ test/round-2-spend-attribution.test.ts > round 2 — spend is required, and an unattributed cent refuses to complete > the sharp test itself: a metered step that forgets to record spend is REFUSED, not silently shipped
+ ✓ test/round-2-spend-attribution.test.ts > round 2 — spend is required, and an unattributed cent refuses to complete > symmetry: spend.none() contradicted by a record() call is refused, not silently accepted either way
+ ✓ test/round-2-spend-attribution.test.ts > round 2 — spend is required, and an unattributed cent refuses to complete > honest limit, unchanged from round 0: FINDING 4 (proof-of-completion) is still decoupled — spend and correctness are different claims
+ ✓ test/round-1-state-fusion.test.ts > round 1 — state-machine fused into the handler invocation > closes FINDING 3: the journal entry carries fromState/toState/event with zero per-invocation author code
+ ✓ test/round-1-state-fusion.test.ts > round 1 — state-machine fused into the handler invocation > an illegal transition is a typed pre-flight refusal, not a silent success — spec.run never executes
+ ✓ test/round-1-state-fusion.test.ts > round 1 — state-machine fused into the handler invocation > honest limit AS CAPTURED AT ROUND 1: FINDING 2 (spend) was still not attributable — round 1 didn't touch it
+
+ Test Files  6 passed (6)
+      Tests  22 passed (22)
+   Start at  09:34:32
+   Duration  337ms (transform 204ms, setup 0ms, collect 594ms, tests 38ms, environment 0ms, prepare 237ms)
+
