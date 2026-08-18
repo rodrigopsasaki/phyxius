@@ -5,11 +5,11 @@ import { createMemoryStateStore } from "../src/store.js";
 
 /**
  * `StateStore.trySet` documents that on success it COMMITS `to`. A store that
- * returns `ok` while keeping the old value is a silent false-success — the
+ * returns `ok` while keeping the old value is a silent false-success: the
  * exact failure this package exists to refuse, so it must not appear in the
  * store the package ships.
  */
-describe("createMemoryStateStore — success means committed", () => {
+describe("createMemoryStateStore: success means committed", () => {
   it("commits a same-kind transition that carries a new payload", async () => {
     const clock = createSystemClock();
     const store = createMemoryStateStore<{ kind: string; attempt: number }>({

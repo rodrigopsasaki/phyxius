@@ -9,7 +9,7 @@ interface TestData {
 }
 
 /**
- * A sink whose first write blocks until released — the only way to hold the
+ * A sink whose first write blocks until released: the only way to hold the
  * drain in its `flushing` state across a `stop()` call.
  */
 function createBlockingSink(): Sink<TestData> & {

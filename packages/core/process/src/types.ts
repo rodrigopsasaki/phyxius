@@ -16,7 +16,7 @@ export type StopReason = "normal" | "shutdown" | "error";
 
 /**
  * Why a decided restart did not happen. A boolean could say only "not
- * restarting" — never which of these it was, so two of the three left no
+ * restarting", never which of these it was, so two of the three left no
  * trace at all. `restart-budget-exhausted` keeps its own long-standing
  * `supervisor:giveup` event; the other two are why
  * `supervisor:restart:abandoned` exists.

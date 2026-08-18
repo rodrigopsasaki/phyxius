@@ -10,7 +10,7 @@ interface TestEvent {
 
 /**
  * Event-driven rather than sleep-driven on purpose. A fixed delay here would
- * be load-bearing — it has to outlast failure → decide → backoff — and a
+ * be load-bearing: it has to outlast failure → decide → backoff, and a
  * loaded runner that missed the window would pass this test by never observing
  * the failure at all, which is the worst way for a test about silent drops to
  * go green.
@@ -39,7 +39,7 @@ function eventWaiter(): {
   };
 }
 
-describe("Supervisor — a restart abandoned mid-backoff", () => {
+describe("Supervisor: a restart abandoned mid-backoff", () => {
   it("records the abandonment instead of dropping it silently", async () => {
     const clock = createSystemClock();
     const watcher = eventWaiter();
@@ -66,7 +66,7 @@ describe("Supervisor — a restart abandoned mid-backoff", () => {
     await process.send({ type: "test" });
 
     // `supervisor:restart` fires in getRestartDelay, immediately before the
-    // backoff sleep — so once it is visible the restart is decided and its
+    // backoff sleep, so once it is visible the restart is decided and its
     // budget is already spent.
     await watcher.waitFor("supervisor:restart");
     await supervisor.stop();

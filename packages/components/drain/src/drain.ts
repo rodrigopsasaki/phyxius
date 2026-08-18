@@ -145,10 +145,10 @@ export function createDrain<T>(options: DrainOptions<T>): Drain {
   }
 
   // The write currently in the sink, held so shutdown can await it. Without
-  // this handle `stop()` could only ask `classifyFlush` — which skips while
+  // this handle `stop()` could only ask `classifyFlush`, which skips while
   // `flushing` holds, because `force` bypasses a backoff hold and never a live
-  // write — so a shutdown racing a flush skipped its own final drain and
-  // dropped whatever had arrived meanwhile, silently.
+  // write. That gap meant a shutdown racing a flush skipped its own final
+  // drain and dropped whatever had arrived meanwhile, silently.
   let inFlight: Promise<void> | null = null;
 
   // Action — consumes a decision; never re-derives it. Owns the splice, the
@@ -241,7 +241,7 @@ export function createDrain<T>(options: DrainOptions<T>): Drain {
       // stop() raced a flush.
       await inFlight;
 
-      // Final drain — every batch, not one. `stop()` promises to flush what is
+      // Final drain: every batch, not one. `stop()` promises to flush what is
       // buffered; flushing a single batch kept that promise only when the
       // buffer happened to fit in one. Same no-progress guard `flush()` uses:
       // a failing sink re-queues its batch, and one non-shrinking pass ends
@@ -252,7 +252,7 @@ export function createDrain<T>(options: DrainOptions<T>): Drain {
         if (buffer.length >= sizeBefore) break;
       }
 
-      // What shutdown could NOT deliver — not what it happened to be holding
+      // What shutdown could NOT deliver, not what it happened to be holding
       // when it began. The old value was the pre-drain buffer size, so a clean
       // shutdown that delivered every entry still announced a non-zero
       // `remaining`, reading as loss that had not occurred.

@@ -6,27 +6,27 @@ import type { MachineState } from "@phyxiusjs/state-machine";
 import type { StateStore } from "./types.js";
 
 /**
- * In-process `StateStore`, backed by an `@phyxiusjs/atom` — which is exactly
+ * In-process `StateStore`, backed by an `@phyxiusjs/atom`, which is exactly
  * what this needs and already exists: a cell with a compare-and-set keyed on a
  * caller-supplied equality. This was a bare `let` with the comparison written
  * out by hand, which is that primitive rebuilt a second time, less observably.
  * Sufficient for single-container deployments and tests. Fleet deployments
  * swap this for a Postgres-backed store the same way `@phyxiusjs/migration`'s
- * `PhaseStore` does — the pattern is identical on purpose.
+ * `PhaseStore` does: the pattern is identical on purpose.
  *
  * Why the atom is not enough on its own, and `StateStore` stays async and
  * `Result`-returning: an atom is in-process and synchronous, and durable state
- * has to outlive the process that wrote it — a revived step reads what a dead
+ * has to outlive the process that wrote it: a revived step reads what a dead
  * worker left behind. A boolean also cannot say WHICH state won a race, and
  * `STATE_RACE_LOST` has to name it. So the atom implements this store; it
  * cannot be the interface.
  *
  * Equality stays the atom's default (reference), and deliberately so. A
- * kind-based `equals` looks right — the contract compares kinds — but in
+ * kind-based `equals` looks right: the contract compares kinds. But in
  * `createAtom` that predicate does double duty: it decides the CAS AND it
  * decides whether `swap` considers the write a change at all. Under kind
  * equality a same-kind transition carrying a NEW payload is read as "nothing
- * changed", the commit is skipped, and `compareAndSet` returns true anyway —
+ * changed", the commit is skipped, and `compareAndSet` returns true anyway,
  * so `trySet` answered `ok` while the cell kept the old value. That is a
  * silent false success, in the store belonging to the package whose entire
  * subject is that silence must never read as success. The kind comparison the
@@ -42,7 +42,7 @@ export function createMemoryStateStore<S extends MachineState>(opts: { initial: 
     async trySet(from, to) {
       const observed = cell.deref();
       // `compareAndSet` wants a value to compare, and the contract hands us a
-      // kind — the observed cell IS that value when the kinds agree, so this
+      // kind: the observed cell IS that value when the kinds agree, so this
       // asks the atom the same question the caller asked us.
       if (observed.kind !== from) {
         return err({ actual: observed.kind });

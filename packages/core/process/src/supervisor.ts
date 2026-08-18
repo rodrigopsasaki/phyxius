@@ -175,14 +175,14 @@ export class Supervisor {
    * Decide whether a failed child is restarted, and when it is not, say which
    * of the three reasons it was. This returned a bare boolean: "no" was
    * indistinguishable across a policy of never restarting, a shutdown already
-   * under way, and a spent restart budget — and only the last of those emitted
+   * under way, and a spent restart budget. Only the last of those emitted
    * anything, so the other two ended a child's life with no record at all.
    * `ProcessEvent`'s own contract is that a state transition a consumer would
    * care about MUST produce an event; two of these three did not.
    *
    * Emitting stays with the caller (the `supervisor:giveup` event this used to
    * fire from in here now fires there), so this function decides and the
-   * caller acts — the same classify-then-act split `@phyxiusjs/drain` uses for
+   * caller acts: the same classify-then-act split `@phyxiusjs/drain` uses for
    * its flush. The restart-window bookkeeping deliberately stays here: it is
    * the accounting the decision is made from, not a consequence of it.
    */
@@ -230,7 +230,7 @@ export class Supervisor {
     const timestamp = this.clock.now().wallMs;
 
     if (declined.because === "restart-budget-exhausted") {
-      // Unchanged in name and payload — existing consumers of the give-up
+      // Unchanged in name and payload: existing consumers of the give-up
       // signal keep reading exactly what they read before.
       this.emit?.({
         type: "supervisor:giveup",
@@ -338,7 +338,7 @@ export class Supervisor {
 
       // Shutdown can land inside that sleep. The restart was already decided
       // and its budget already spent, so returning here silently retired a
-      // child on a decision that says the opposite — the one drop in this
+      // child on a decision that says the opposite: the one drop in this
       // method that left no trace of itself.
       if (this.stopped) {
         this.emitDeclinedRestart(processId, { kind: "declined", because: "supervisor-stopping" });
