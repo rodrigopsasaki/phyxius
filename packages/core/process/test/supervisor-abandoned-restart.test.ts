@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { createSystemClock } from "@phyxiusjs/clock";
+import { createSystemClock, ms } from "@phyxiusjs/clock";
 import { Supervisor } from "../src/index.js";
 import type { ProcessSpec } from "../src/index.js";
 
@@ -56,9 +56,9 @@ describe("Supervisor: a restart abandoned mid-backoff", () => {
       emit: watcher.emit,
       strategy: {
         type: "one-for-one",
-        maxRestarts: { count: 3, within: 10_000 as never },
+        maxRestarts: { count: 3, within: ms(10_000) },
         // Long enough that shutdown lands inside the backoff rather than after it.
-        backoff: { initial: 300 as never, max: 300 as never, factor: 1 },
+        backoff: { initial: ms(300), max: ms(300), factor: 1 },
       },
     });
 
