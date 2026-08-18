@@ -5,7 +5,7 @@ import type { EvidenceBag, JournalStore } from "@phyxiusjs/migration";
 import type { MachineEvent, MachineState } from "@phyxiusjs/state-machine";
 import type { Validator } from "@phyxiusjs/validate";
 
-import type { RetryLedger } from "./retry-ledger.js";
+import type { DurableRetryLedger } from "./retry-ledger.js";
 
 // ── StateStore — the write side of a durable step's machine state ──────────
 //
@@ -152,6 +152,17 @@ export type StepRefusal =
       /** One or more `spec.proof` evidence sources threw or timed out. Mirrors `AdvanceError.EVIDENCE_ERRORED` — errors trump failures in urgency, same reasoning as migration's. */
       readonly type: "PROOF_ERRORED";
       readonly errors: Readonly<Record<string, unknown>>;
+    }
+  | {
+      /**
+       * `deps.retryLedger` has no durable record for its own
+       * `operationId` — nobody ever declared this operation's conserved
+       * budget on the backing store. Refusing here is what keeps
+       * "unknown" from being silently read as "unlimited": a step that
+       * can't tell how much budget it has cannot spend any of it.
+       */
+      readonly type: "LEDGER_NOT_INITIALIZED";
+      readonly operationId: string;
     };
 
 // ── Runtime wiring ───────────────────────────────────────────────────────────
@@ -162,12 +173,14 @@ export interface DurableStepDeps<S extends MachineState> {
 
   /**
    * The conserved retry budget this step draws its EXTRA attempts (beyond
-   * its guaranteed first try) from. Mandatory — no non-decision: a step
-   * that isn't part of any shared budget still names that explicitly via
-   * `createRetryLedger(Number.POSITIVE_INFINITY)`, the same way `retry.none()`
-   * names "no retry" instead of leaving the field unset.
+   * its guaranteed first try) from — bound to the operation's own durable
+   * identity, not to an in-memory object. Mandatory — no non-decision: a
+   * step that isn't part of any shared budget still names that explicitly
+   * by initializing its store with `Number.POSITIVE_INFINITY`, the same
+   * way `retry.none()` names "no retry" instead of leaving the field
+   * unset. See `createDurableRetryLedger`.
    */
-  readonly retryLedger: RetryLedger;
+  readonly retryLedger: DurableRetryLedger;
 
   /** Where `spec.proof`'s `journal-window` evidence sources read from. Reused verbatim from `@phyxiusjs/migration` — see `runEvidenceBag`. */
   readonly journalStore: JournalStore;
@@ -176,4 +189,4 @@ export interface DurableStepDeps<S extends MachineState> {
 // Re-exported so call sites can name `Machine<S, E>` without a second
 // import from `@phyxiusjs/state-machine`.
 export type { Machine, MachineEvent, MachineState } from "@phyxiusjs/state-machine";
-export type { RetryLedger } from "./retry-ledger.js";
+export type { DurableRetryLedger } from "./retry-ledger.js";
