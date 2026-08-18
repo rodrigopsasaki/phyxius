@@ -1,5 +1,11 @@
 # @phyxiusjs/scheduler
 
+## 0.3.1
+
+### Patch Changes
+
+- @phyxiusjs/handler@0.4.1
+
 ## 0.3.0
 
 ### Minor Changes
