@@ -28,3 +28,12 @@ compare over a bare `let` — the atom was already a declared dependency of the
 package and imported by nothing. `StateStore` stays async and `Result`-returning
 because durable state must outlive its process and a race has to name its winner;
 the atom implements the store, it cannot be the interface.
+
+Follow-up from Preston's review of this PR: the memory state store keeps the
+atom's default reference equality. A kind-based `equals` looked right, but in
+`createAtom` that predicate decides the CAS _and_ whether `swap` treats the
+write as a change — so a same-kind transition carrying a new payload was read
+as "nothing changed", the commit was skipped, and `trySet` returned `ok` over a
+stale value. A silent false success, in the store belonging to the package
+whose subject is that silence must not read as success. The kind comparison the
+contract wants already happens in `trySet`, before the CAS.

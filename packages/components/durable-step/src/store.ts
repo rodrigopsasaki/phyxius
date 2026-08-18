@@ -21,14 +21,19 @@ import type { StateStore } from "./types.js";
  * `STATE_RACE_LOST` has to name it. So the atom implements this store; it
  * cannot be the interface.
  *
- * Equality is by state NAME, matching the `trySet(from, to)` contract: the
- * caller compares kinds, never whole state objects, so structural payload
- * differences must not decide a CAS.
+ * Equality stays the atom's default (reference), and deliberately so. A
+ * kind-based `equals` looks right — the contract compares kinds — but in
+ * `createAtom` that predicate does double duty: it decides the CAS AND it
+ * decides whether `swap` considers the write a change at all. Under kind
+ * equality a same-kind transition carrying a NEW payload is read as "nothing
+ * changed", the commit is skipped, and `compareAndSet` returns true anyway —
+ * so `trySet` answered `ok` while the cell kept the old value. That is a
+ * silent false success, in the store belonging to the package whose entire
+ * subject is that silence must never read as success. The kind comparison the
+ * contract actually wants already happens in `trySet` below, before the CAS.
  */
 export function createMemoryStateStore<S extends MachineState>(opts: { initial: S; clock: Clock }): StateStore<S> {
-  const cell = createAtom<S>(opts.initial, opts.clock, {
-    equals: (a, b) => a.kind === b.kind,
-  });
+  const cell = createAtom<S>(opts.initial, opts.clock);
 
   return {
     async current() {
