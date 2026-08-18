@@ -1,4 +1,12 @@
-import type { SupervisionStrategy, ProcessId, EmitFn, ProcessRef, ProcessSpec, ProcessEvent } from "./types.js";
+import type {
+  SupervisionStrategy,
+  ProcessId,
+  EmitFn,
+  ProcessRef,
+  ProcessSpec,
+  ProcessEvent,
+  RestartDeclined,
+} from "./types.js";
 import type { Clock, Millis } from "@phyxiusjs/clock";
 import { ProcessImpl } from "./process.js";
 import { createProcessId } from "./process-id.js";
@@ -9,6 +17,21 @@ export interface RestartWindow {
 }
 
 export type SupervisionAction = "restart" | "stop" | "escalate";
+
+/**
+ * A declined restart, carrying its reason. The budget case also carries what
+ * the budget had recorded, so the caller can emit the give-up event without
+ * re-deriving numbers the decision already computed.
+ */
+export type RestartDeclinedDecision =
+  | { kind: "declined"; because: Exclude<RestartDeclined, "restart-budget-exhausted"> }
+  | {
+      kind: "declined";
+      because: "restart-budget-exhausted";
+      spent: { attempts: number; withinMs: number };
+    };
+
+export type RestartDecision = { kind: "restart" } | RestartDeclinedDecision;
 
 /**
  * A flat supervisor: it owns a set of children, restarts them on failure
@@ -148,13 +171,32 @@ export class Supervisor {
 
   // ── Private ───────────────────────────────────────────────────────────────
 
-  private shouldRestart(processId: ProcessId): boolean {
-    if (this.strategy.type === "none" || this.stopped) {
-      return false;
+  /**
+   * Decide whether a failed child is restarted, and when it is not, say which
+   * of the three reasons it was. This returned a bare boolean: "no" was
+   * indistinguishable across a policy of never restarting, a shutdown already
+   * under way, and a spent restart budget — and only the last of those emitted
+   * anything, so the other two ended a child's life with no record at all.
+   * `ProcessEvent`'s own contract is that a state transition a consumer would
+   * care about MUST produce an event; two of these three did not.
+   *
+   * Emitting stays with the caller (the `supervisor:giveup` event this used to
+   * fire from in here now fires there), so this function decides and the
+   * caller acts — the same classify-then-act split `@phyxiusjs/drain` uses for
+   * its flush. The restart-window bookkeeping deliberately stays here: it is
+   * the accounting the decision is made from, not a consequence of it.
+   */
+  private decideRestart(processId: ProcessId): RestartDecision {
+    if (this.strategy.type === "none") {
+      return { kind: "declined", because: "strategy-none" };
+    }
+
+    if (this.stopped) {
+      return { kind: "declined", because: "supervisor-stopping" };
     }
 
     if (!this.strategy.maxRestarts) {
-      return true; // no limit
+      return { kind: "restart" }; // no limit
     }
 
     const now = this.clock.now().wallMs;
@@ -162,7 +204,7 @@ export class Supervisor {
 
     if (!window) {
       this.restartWindows.set(processId, { startTime: now, restarts: 1 });
-      return true;
+      return { kind: "restart" };
     }
 
     const windowElapsed = now - window.startTime;
@@ -170,24 +212,44 @@ export class Supervisor {
     if (windowElapsed > this.strategy.maxRestarts.within) {
       // Window expired — fresh budget.
       this.restartWindows.set(processId, { startTime: now, restarts: 1 });
-      return true;
+      return { kind: "restart" };
     }
 
     if (window.restarts >= this.strategy.maxRestarts.count) {
+      const spent = { attempts: window.restarts, withinMs: windowElapsed };
+      this.restartWindows.delete(processId);
+      return { kind: "declined", because: "restart-budget-exhausted", spent };
+    }
+
+    window.restarts++;
+    return { kind: "restart" };
+  }
+
+  /** The one place a declined restart becomes an event. */
+  private emitDeclinedRestart(processId: ProcessId, declined: RestartDeclinedDecision): void {
+    const timestamp = this.clock.now().wallMs;
+
+    if (declined.because === "restart-budget-exhausted") {
+      // Unchanged in name and payload — existing consumers of the give-up
+      // signal keep reading exactly what they read before.
       this.emit?.({
         type: "supervisor:giveup",
         supervisorId: this.id,
         processId,
-        attempts: window.restarts,
-        withinMs: windowElapsed,
-        timestamp: now,
+        attempts: declined.spent.attempts,
+        withinMs: declined.spent.withinMs,
+        timestamp,
       });
-      this.restartWindows.delete(processId);
-      return false;
+      return;
     }
 
-    window.restarts++;
-    return true;
+    this.emit?.({
+      type: "supervisor:restart:abandoned",
+      supervisorId: this.id,
+      processId,
+      because: declined.because,
+      timestamp,
+    });
   }
 
   private getRestartDelay(processId: ProcessId): Millis {
@@ -262,13 +324,26 @@ export class Supervisor {
 
     await this.cleanupProcess(processId);
 
-    if (action === "restart" && this.shouldRestart(processId)) {
+    if (action === "restart") {
+      const decision = this.decideRestart(processId);
+      if (decision.kind === "declined") {
+        this.emitDeclinedRestart(processId, decision);
+        return;
+      }
+
       const delay = this.getRestartDelay(processId);
       if (delay > 0) {
         await this.clock.sleep(delay);
       }
 
-      if (this.stopped) return;
+      // Shutdown can land inside that sleep. The restart was already decided
+      // and its budget already spent, so returning here silently retired a
+      // child on a decision that says the opposite — the one drop in this
+      // method that left no trace of itself.
+      if (this.stopped) {
+        this.emitDeclinedRestart(processId, { kind: "declined", because: "supervisor-stopping" });
+        return;
+      }
 
       try {
         const newProcess = await this.createSupervisedProcess(spec, ctx);
@@ -294,14 +369,20 @@ export class Supervisor {
           timestamp: this.clock.now().wallMs,
         });
       }
-    } else if (action === "stop") {
+      return;
+    }
+
+    if (action === "stop") {
       this.emit?.({
         type: "supervisor:child:stopped",
         supervisorId: this.id,
         processId,
         timestamp: this.clock.now().wallMs,
       });
-    } else if (action === "escalate") {
+      return;
+    }
+
+    if (action === "escalate") {
       this.emit?.({
         type: "supervisor:escalated",
         supervisorId: this.id,

@@ -144,11 +144,31 @@ export function createDrain<T>(options: DrainOptions<T>): Drain {
     }
   }
 
+  // The write currently in the sink, held so shutdown can await it. Without
+  // this handle `stop()` could only ask `classifyFlush` — which skips while
+  // `flushing` holds, because `force` bypasses a backoff hold and never a live
+  // write — so a shutdown racing a flush skipped its own final drain and
+  // dropped whatever had arrived meanwhile, silently.
+  let inFlight: Promise<void> | null = null;
+
   // Action — consumes a decision; never re-derives it. Owns the splice, the
   // sink write, and the state transition (idle → flushing → idle | backoff).
   async function flushBuffer(force = false): Promise<void> {
     if (classifyFlush(force).action !== "proceed") return;
 
+    const run = writeOneBatch();
+    inFlight = run;
+    try {
+      await run;
+    } finally {
+      if (inFlight === run) inFlight = null;
+    }
+  }
+
+  // The splice-and-write itself. Split out of `flushBuffer` only so the
+  // promise above is capturable; its synchronous prefix still sets `flushing`
+  // before the first await, so a concurrent caller sees the state it must.
+  async function writeOneBatch(): Promise<void> {
     flushState = { kind: "flushing" };
     const batch = buffer.splice(0, Math.min(batchSize, buffer.length));
     const startTime = clock.now();
@@ -216,13 +236,29 @@ export function createDrain<T>(options: DrainOptions<T>): Drain {
       stopped = true;
       unsubscribe();
 
-      // Final drain attempt — one batch, best effort, forced past any backoff.
-      const remaining = buffer.length;
-      await flushBuffer(true);
+      // A write already in the sink is part of this shutdown, so wait for it.
+      // Skipping this is what made the "final drain" below a no-op whenever
+      // stop() raced a flush.
+      await inFlight;
 
+      // Final drain — every batch, not one. `stop()` promises to flush what is
+      // buffered; flushing a single batch kept that promise only when the
+      // buffer happened to fit in one. Same no-progress guard `flush()` uses:
+      // a failing sink re-queues its batch, and one non-shrinking pass ends
+      // the attempt rather than spinning.
+      while (buffer.length > 0) {
+        const sizeBefore = buffer.length;
+        await flushBuffer(true);
+        if (buffer.length >= sizeBefore) break;
+      }
+
+      // What shutdown could NOT deliver — not what it happened to be holding
+      // when it began. The old value was the pre-drain buffer size, so a clean
+      // shutdown that delivered every entry still announced a non-zero
+      // `remaining`, reading as loss that had not occurred.
       emit?.({
         type: "drain:stop",
-        remaining,
+        remaining: buffer.length,
         at: clock.now(),
       });
     },
