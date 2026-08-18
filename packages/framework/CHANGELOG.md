@@ -1,5 +1,17 @@
 # @phyxiusjs/framework
 
+## 2.0.1
+
+### Patch Changes
+
+- Updated dependencies [6c6fafd]
+  - @phyxiusjs/drain@0.4.0
+  - @phyxiusjs/handler@0.4.1
+  - @phyxiusjs/http@0.3.2
+  - @phyxiusjs/queue@0.3.2
+  - @phyxiusjs/scheduler@0.3.1
+  - @phyxiusjs/stats@0.2.3
+
 ## 2.0.0
 
 ### Patch Changes

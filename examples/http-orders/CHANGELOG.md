@@ -1,5 +1,14 @@
 # @phyxiusjs/example-http-orders
 
+## 0.0.3
+
+### Patch Changes
+
+- Updated dependencies [6c6fafd]
+  - @phyxiusjs/drain@0.4.0
+  - @phyxiusjs/handler@0.4.1
+  - @phyxiusjs/http@0.3.2
+
 ## 0.0.2
 
 ### Patch Changes
