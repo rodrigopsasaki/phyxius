@@ -14,6 +14,15 @@ export type ProcessStatus = "starting" | "running" | "stopping" | "stopped" | "f
 
 export type StopReason = "normal" | "shutdown" | "error";
 
+/**
+ * Why a decided restart did not happen. A boolean could say only "not
+ * restarting", never which of these it was, so two of the three left no
+ * trace at all. `restart-budget-exhausted` keeps its own long-standing
+ * `supervisor:giveup` event; the other two are why
+ * `supervisor:restart:abandoned` exists.
+ */
+export type RestartDeclined = "strategy-none" | "supervisor-stopping" | "restart-budget-exhausted";
+
 // ── Supervision ─────────────────────────────────────────────────────────────
 
 export interface SupervisionStrategy {
@@ -109,6 +118,7 @@ export interface ProcessEvent {
   oldProcessId?: ProcessId;
   newProcessId?: ProcessId;
   strategy?: string;
+  because?: RestartDeclined;
   timestamp?: number;
 }
 

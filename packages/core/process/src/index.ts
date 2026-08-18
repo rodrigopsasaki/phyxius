@@ -14,6 +14,7 @@ export type {
   SupervisionStrategy,
   ProcessEvent,
   EmitFn,
+  RestartDeclined,
   ScheduledMessage,
   MailboxItem,
 } from "./types.js";
