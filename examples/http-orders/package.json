@@ -1,6 +1,6 @@
 {
   "name": "@phyxiusjs/example-http-orders",
-  "version": "0.0.2",
+  "version": "0.0.3",
   "private": true,
   "description": "End-to-end example: HTTP adapter + handler + journal + stdout drain",
   "type": "module",

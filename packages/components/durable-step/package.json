@@ -1,6 +1,6 @@
 {
   "name": "@phyxiusjs/durable-step",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "EXPLORATORY (find-shape): the composition of state-machine legality, migration-style evidence, and the handler into one durable step.",
   "type": "module",
   "main": "./dist/index.js",

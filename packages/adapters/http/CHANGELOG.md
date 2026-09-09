@@ -1,5 +1,11 @@
 # @phyxiusjs/http
 
+## 0.3.2
+
+### Patch Changes
+
+- @phyxiusjs/handler@0.4.1
+
 ## 0.3.1
 
 ### Patch Changes

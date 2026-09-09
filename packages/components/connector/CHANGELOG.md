@@ -1,5 +1,11 @@
 # @phyxiusjs/connector
 
+## 0.2.3
+
+### Patch Changes
+
+- @phyxiusjs/handler@0.4.1
+
 ## 0.2.2
 
 ### Patch Changes
