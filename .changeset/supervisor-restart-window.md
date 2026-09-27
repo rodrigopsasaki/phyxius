@@ -27,10 +27,20 @@ ref keeps reaching the child across restarts instead of reading back a
 permanently `"failed"` status after the first one.
 
 Backoff jitter took its randomness from `Math.random`, against this
-package's own "time and randomness are injected" rule. `Supervisor` now takes
-an optional `random` in its constructor options, defaulting to `Math.random`
-for real deployments; a test can inject a fixed source and get a deterministic
-delay back.
+package's own "time and randomness are injected" rule. `Supervisor`'s
+constructor is now overloaded on the strategy it's given: a strategy whose
+backoff has no jitter, or jitter pinned to the literal `0`, needs no
+`random`. The moment a strategy's backoff declares a real, nonzero jitter
+magnitude, the only overload that accepts it also requires
+`random: () => number` — there is no default, and nothing in this package's
+source reads the global `Math.random` anymore.
+
+Breaking, at the type level: a caller who built a jittered strategy without
+injecting `random` compiled before (and silently drew jitter from
+`Math.random` at runtime) and does not compile now. The fix is to inject the
+same `random` this package already asks for everywhere else time and
+randomness matter. Nothing changes for a strategy with no jitter, including
+the constructor's own default strategy, which has none.
 
 Behavior note for existing consumers: `processId` (and the bare `id` on
 `supervisor:restart`) on every supervisor-level event, that is

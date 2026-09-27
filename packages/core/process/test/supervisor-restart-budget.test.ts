@@ -1,12 +1,7 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { createControlledClock, ms } from "@phyxiusjs/clock";
 import { Supervisor } from "../src/index.js";
-import type { ProcessSpec } from "../src/index.js";
-
-interface TestEvent {
-  type: string;
-  [key: string]: unknown;
-}
+import type { ProcessSpec, ProcessEvent } from "../src/index.js";
 
 /**
  * Event-driven rather than sleep-driven, same rationale as
@@ -17,12 +12,12 @@ interface TestEvent {
  * before the second restart it's meant to observe has even happened.
  */
 function eventWaiter(): {
-  emit: (event: unknown) => void;
-  events: TestEvent[];
+  emit: (event: ProcessEvent) => void;
+  events: ProcessEvent[];
   waitForCount: (type: string, count: number) => Promise<void>;
   countOf: (type: string) => number;
 } {
-  const events: TestEvent[] = [];
+  const events: ProcessEvent[] = [];
   const watchers: Array<{ type: string; count: number; resolve: () => void }> = [];
 
   const countOf = (type: string) => events.filter((e) => e.type === type).length;
@@ -30,8 +25,8 @@ function eventWaiter(): {
   return {
     events,
     countOf,
-    emit: (event: unknown) => {
-      events.push(event as TestEvent);
+    emit: (event: ProcessEvent) => {
+      events.push(event);
       for (const watcher of [...watchers]) {
         if (countOf(watcher.type) >= watcher.count) {
           watchers.splice(watchers.indexOf(watcher), 1);
@@ -124,16 +119,16 @@ describe("Supervisor: restart budget and backoff follow the supervised child", (
     const ref = await supervisor.spawn(spec);
 
     const expectedDelays = [10, 20, 40, 80]; // initial * factor^(n-1), capped at max on the 4th
-    for (let i = 0; i < expectedDelays.length; i++) {
+    for (const [i, expectedDelay] of expectedDelays.entries()) {
       const attempt = i + 1;
       await ref.send({ type: "poke" });
       await watcher.waitForCount("supervisor:restart", attempt);
 
       const restartEvent = watcher.events.filter((e) => e.type === "supervisor:restart").at(-1);
       expect(restartEvent?.attempt).toBe(attempt);
-      expect(restartEvent?.delayMs).toBe(expectedDelays[i]);
+      expect(restartEvent?.delayMs).toBe(expectedDelay);
 
-      clock.advanceBy(ms(expectedDelays[i] as number));
+      clock.advanceBy(ms(expectedDelay));
       await watcher.waitForCount("supervisor:child:restarted", attempt);
     }
 
@@ -366,5 +361,20 @@ describe("Supervisor: restart budget and backoff follow the supervised child", (
     await watcher.waitForCount("supervisor:child:restarted", 1);
 
     await supervisor.stop();
+  });
+
+  it("a strategy with real jitter does not typecheck without an injected random source", () => {
+    const clock = createControlledClock();
+
+    // @ts-expect-error — backoff.jitter is a nonzero magnitude, so the
+    // constructor overload that accepts this strategy also requires
+    // `random`. Omitting it is a compile error, not a Math.random fallback.
+    new Supervisor({
+      clock,
+      strategy: {
+        type: "one-for-one",
+        backoff: { initial: ms(20), max: ms(20), factor: 1, jitter: 50 },
+      },
+    });
   });
 });

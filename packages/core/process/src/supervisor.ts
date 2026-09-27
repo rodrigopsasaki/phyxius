@@ -36,6 +36,49 @@ export type RestartDeclinedDecision =
 
 export type RestartDecision = { kind: "restart" } | RestartDeclinedDecision;
 
+type Backoff = NonNullable<SupervisionStrategy["backoff"]>;
+
+/**
+ * A backoff whose jitter is absent, or pinned to the literal `0` — an
+ * explicit "off", not an absence left to default. Computing it never
+ * touches randomness, so a supervisor built with one needs no injected
+ * `random`.
+ */
+type NoJitterBackoff = Backoff & { jitter?: 0 };
+
+/**
+ * A backoff whose jitter is a real, nonzero magnitude. There is no way to
+ * turn "jitter: 50" into an actual delay without a source of randomness.
+ */
+type JitteredBackoff = Backoff & { jitter: number };
+
+/**
+ * `random` stays optional exactly when the strategy's backoff cannot draw on
+ * it. See `SupervisorOptionsWithJitter` below for the strategy shape that
+ * requires it.
+ */
+interface SupervisorOptionsNoJitter {
+  id?: ProcessId;
+  clock: Clock;
+  emit?: EmitFn;
+  strategy?: SupervisionStrategy & { backoff?: NoJitterBackoff };
+  random?: () => number;
+}
+
+/**
+ * The moment a strategy's backoff declares real jitter, this is the only
+ * constructor overload that matches it, and it makes `random` required —
+ * "jitter but no injected random" is a compile error here, not a silent
+ * fallback to the runtime's own global RNG.
+ */
+interface SupervisorOptionsWithJitter {
+  id?: ProcessId;
+  clock: Clock;
+  emit?: EmitFn;
+  strategy: SupervisionStrategy & { backoff: JitteredBackoff };
+  random: () => number;
+}
+
 /**
  * The address a caller holds for a supervised child. `id` is minted once,
  * at `spawn` time, and never changes: it names the *slot* ("the thing this
@@ -107,9 +150,15 @@ export class Supervisor {
   private readonly strategy: SupervisionStrategy;
   private readonly clock: Clock;
   private readonly emit?: EmitFn;
-  /** Jitter's source of entropy. Injected so backoff stays deterministic
-   * under a ControlledClock; defaults to `Math.random` for real deployments,
-   * the one place in this class that name is allowed to appear. */
+  /**
+   * Jitter's source of entropy. Injected so backoff stays deterministic
+   * under a ControlledClock. The constructor overloads below make a
+   * strategy with real jitter uncompilable without one, so by the time a
+   * jittered `getRestartDelay` reads this field it is always the caller's
+   * own source — never the runtime's own global RNG. A strategy with no
+   * jitter never reads it; the throwing stub the constructor stores in
+   * that case exists only to fail loudly if that guarantee is ever bypassed.
+   */
   private readonly random: () => number;
   private readonly restartWindows = new Map<ProcessId, RestartWindow>();
   private readonly restartCounts = new Map<ProcessId, number>();
@@ -120,6 +169,8 @@ export class Supervisor {
   private readonly restarting = new Set<ProcessId>();
   private stopped = false;
 
+  constructor(options: SupervisorOptionsNoJitter);
+  constructor(options: SupervisorOptionsWithJitter);
   constructor(options: {
     id?: ProcessId;
     clock: Clock;
@@ -130,7 +181,13 @@ export class Supervisor {
     this.id = options.id ?? createProcessId();
     this.clock = options.clock;
     if (options.emit) this.emit = options.emit;
-    this.random = options.random ?? Math.random;
+    this.random =
+      options.random ??
+      (() => {
+        throw new Error(
+          "Supervisor: backoff jitter needs an injected `random`; this strategy declared none, so jitter is never computed and this call is unreachable by construction.",
+        );
+      });
     this.strategy = options.strategy ?? {
       type: "one-for-one",
       maxRestarts: { count: 3, within: 10_000 as Millis },
@@ -168,7 +225,7 @@ export class Supervisor {
     const slotId = createProcessId();
 
     try {
-      const process = await this.createSupervisedProcess(spec, ctx as TCtx, slotId);
+      const process = await this.createSupervisedProcess(spec, ctx, slotId);
       const ref = new SupervisedRef<TMsg>(slotId, process);
 
       this.slots.set(slotId, { ref, spec, ctx, action: "restart" });
