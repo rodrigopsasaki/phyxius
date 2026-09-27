@@ -5,14 +5,17 @@ import type {
   ProcessRef,
   ProcessSpec,
   ProcessEvent,
+  ProcessStatus,
+  StopReason,
   RestartDeclined,
 } from "./types.js";
-import type { Clock, Millis } from "@phyxiusjs/clock";
+import type { Clock, Millis, MonoMs } from "@phyxiusjs/clock";
+import { elapsedSince } from "@phyxiusjs/clock";
 import { ProcessImpl } from "./process.js";
 import { createProcessId } from "./process-id.js";
 
 export interface RestartWindow {
-  startTime: number;
+  startTime: MonoMs;
   restarts: number;
 }
 
@@ -34,6 +37,66 @@ export type RestartDeclinedDecision =
 export type RestartDecision = { kind: "restart" } | RestartDeclinedDecision;
 
 /**
+ * The address a caller holds for a supervised child. `id` is minted once,
+ * at `spawn` time, and never changes: it names the *slot* ("the thing this
+ * caller is supervising"), not whichever `ProcessImpl` incarnation happens
+ * to be running behind it. `current` is swapped in place on every successful
+ * restart, so `send` / `ask` / `stop` / `status` always reach the live
+ * incarnation instead of freezing on the one that failed.
+ *
+ * This is the fix for "the ref returned by spawn goes stale after the first
+ * restart". Without it, a caller's only way back to a running child after
+ * a restart was `supervisor.getChildren()`, which silently made the ref
+ * `spawn` returned a footgun.
+ */
+class SupervisedRef<TMsg> implements ProcessRef<TMsg> {
+  // Untyped in TMsg on purpose: the supervisor's own bookkeeping stores
+  // `SupervisedRef<unknown>` for every slot regardless of what message type
+  // the caller spawned it with, and swaps this field to each freshly created
+  // incarnation. Typing it `ProcessRef<TMsg>` would make that storage need a
+  // cast; typing it `ProcessRef<unknown>` needs none, because every message
+  // this class's own `send`/`ask` methods hand it is trivially a `TMsg`
+  // widened to `unknown`, never the other way around.
+  current: ProcessRef<unknown>;
+
+  constructor(
+    readonly id: ProcessId,
+    current: ProcessRef<unknown>,
+  ) {
+    this.current = current;
+  }
+
+  status(): ProcessStatus {
+    return this.current.status();
+  }
+
+  send(msg: TMsg): Promise<boolean> {
+    return this.current.send(msg);
+  }
+
+  ask<TResp>(build: (reply: (r: TResp) => void) => TMsg, timeout?: Millis): Promise<TResp> {
+    return this.current.ask(build, timeout);
+  }
+
+  stop(reason?: StopReason): Promise<void> {
+    return this.current.stop(reason);
+  }
+}
+
+/**
+ * Everything the supervisor tracks about one supervised child, keyed by the
+ * child's stable slot id (`SupervisedRef.id`) rather than by any single
+ * incarnation's `ProcessId`. `spec` and `ctx` are kept here so a restart can
+ * re-spawn the same shape after the failed instance is cleaned up.
+ */
+interface Slot {
+  readonly ref: SupervisedRef<unknown>;
+  readonly spec: ProcessSpec<unknown, unknown, unknown>;
+  readonly ctx: unknown;
+  action: SupervisionAction;
+}
+
+/**
  * A flat supervisor: it owns a set of children, restarts them on failure
  * (per strategy), and stops them on shutdown. Hierarchical nesting is done
  * explicitly by creating nested supervisors — there is no implicit
@@ -44,20 +107,30 @@ export class Supervisor {
   private readonly strategy: SupervisionStrategy;
   private readonly clock: Clock;
   private readonly emit?: EmitFn;
+  /** Jitter's source of entropy. Injected so backoff stays deterministic
+   * under a ControlledClock; defaults to `Math.random` for real deployments,
+   * the one place in this class that name is allowed to appear. */
+  private readonly random: () => number;
   private readonly restartWindows = new Map<ProcessId, RestartWindow>();
-  private readonly children: ProcessRef<unknown>[] = [];
-  private readonly supervisionActions = new Map<ProcessId, SupervisionAction>();
-  // Kept so a restart can re-spawn the same shape after the failed instance
-  // is cleaned up. Supervisor, not Process, owns restart bookkeeping.
-  private readonly processSpecs = new Map<ProcessId, ProcessSpec<unknown, unknown, unknown>>();
-  private readonly processCtxs = new Map<ProcessId, unknown>();
   private readonly restartCounts = new Map<ProcessId, number>();
+  private readonly slots = new Map<ProcessId, Slot>();
+  /** Slot ids currently inside their own restart-retry loop. Guards against
+   * the re-entrant `process:fail` a failed re-init raises through the very
+   * failure monitor that loop is already handling. See `handleProcessFailure`. */
+  private readonly restarting = new Set<ProcessId>();
   private stopped = false;
 
-  constructor(options: { id?: ProcessId; clock: Clock; emit?: EmitFn; strategy?: SupervisionStrategy }) {
+  constructor(options: {
+    id?: ProcessId;
+    clock: Clock;
+    emit?: EmitFn;
+    strategy?: SupervisionStrategy;
+    random?: () => number;
+  }) {
     this.id = options.id ?? createProcessId();
     this.clock = options.clock;
     if (options.emit) this.emit = options.emit;
+    this.random = options.random ?? Math.random;
     this.strategy = options.strategy ?? {
       type: "one-for-one",
       maxRestarts: { count: 3, within: 10_000 as Millis },
@@ -65,17 +138,18 @@ export class Supervisor {
     };
   }
 
-  /** Number of times the supervisor has restarted this process. */
+  /** Number of times the supervisor has successfully restarted this child. */
   getRestartCount(processId: ProcessId): number {
     return this.restartCounts.get(processId) ?? 0;
   }
 
   getChildren(): ProcessRef<unknown>[] {
-    return [...this.children];
+    return [...this.slots.values()].map((slot) => slot.ref);
   }
 
   /**
-   * Spawn a supervised child. Returns a running ref.
+   * Spawn a supervised child. Returns a ref that keeps addressing the
+   * current incarnation across restarts.
    */
   async spawn<TMsg, TState = void, TCtx = void>(
     spec: ProcessSpec<TMsg, TState, TCtx>,
@@ -91,16 +165,18 @@ export class Supervisor {
       timestamp: this.clock.now().wallMs,
     });
 
-    try {
-      const process = await this.createSupervisedProcess(spec, ctx as TCtx);
+    const slotId = createProcessId();
 
-      this.children.push(process as ProcessRef<unknown>);
-      this.supervisionActions.set(process.id, "restart");
+    try {
+      const process = await this.createSupervisedProcess(spec, ctx as TCtx, slotId);
+      const ref = new SupervisedRef<TMsg>(slotId, process);
+
+      this.slots.set(slotId, { ref, spec, ctx, action: "restart" });
 
       this.emit?.({
         type: "supervisor:supervising",
         supervisorId: this.id,
-        processId: process.id,
+        processId: slotId,
         strategy: "restart",
         timestamp: this.clock.now().wallMs,
       });
@@ -108,11 +184,11 @@ export class Supervisor {
       this.emit?.({
         type: "supervisor:spawned",
         supervisorId: this.id,
-        processId: process.id,
+        processId: slotId,
         timestamp: this.clock.now().wallMs,
       });
 
-      return process;
+      return ref;
     } catch (error) {
       this.emit?.({
         type: "supervisor:spawn:failed",
@@ -125,7 +201,9 @@ export class Supervisor {
   }
 
   supervise<TMsg>(process: ProcessRef<TMsg>, action: SupervisionAction): void {
-    this.supervisionActions.set(process.id, action);
+    const slot = this.slots.get(process.id);
+    if (slot) slot.action = action;
+
     this.emit?.({
       type: "supervisor:supervising",
       supervisorId: this.id,
@@ -145,14 +223,14 @@ export class Supervisor {
       timestamp: this.clock.now().wallMs,
     });
 
-    const stopPromises = this.children.map(async (child) => {
+    const stopPromises = [...this.slots.values()].map(async (slot) => {
       try {
-        await child.stop();
+        await slot.ref.stop();
       } catch (error) {
         this.emit?.({
           type: "supervisor:child:stop:error",
           supervisorId: this.id,
-          processId: child.id,
+          processId: slot.ref.id,
           error,
           timestamp: this.clock.now().wallMs,
         });
@@ -160,7 +238,7 @@ export class Supervisor {
     });
 
     await Promise.all(stopPromises);
-    this.children.length = 0;
+    this.slots.clear();
 
     this.emit?.({
       type: "supervisor:stopped",
@@ -185,8 +263,15 @@ export class Supervisor {
    * caller acts: the same classify-then-act split `@phyxiusjs/drain` uses for
    * its flush. The restart-window bookkeeping deliberately stays here: it is
    * the accounting the decision is made from, not a consequence of it.
+   *
+   * Keyed by `slotId`, the stable address `spawn` handed the caller, and
+   * measured on the clock's monotonic reading. Keying by each incarnation's
+   * own fresh `ProcessId` (the original defect) meant every restart looked up
+   * an empty window and started over at `restarts = 1`, so the budget never
+   * accumulated and never tripped. Measuring on `wallMs` (the other original
+   * defect) meant a wall-clock jump could open or close the window on its own.
    */
-  private decideRestart(processId: ProcessId): RestartDecision {
+  private decideRestart(slotId: ProcessId): RestartDecision {
     if (this.strategy.type === "none") {
       return { kind: "declined", because: "strategy-none" };
     }
@@ -199,25 +284,25 @@ export class Supervisor {
       return { kind: "restart" }; // no limit
     }
 
-    const now = this.clock.now().wallMs;
-    const window = this.restartWindows.get(processId);
+    const now = this.clock.now().monoMs;
+    const window = this.restartWindows.get(slotId);
 
     if (!window) {
-      this.restartWindows.set(processId, { startTime: now, restarts: 1 });
+      this.restartWindows.set(slotId, { startTime: now, restarts: 1 });
       return { kind: "restart" };
     }
 
-    const windowElapsed = now - window.startTime;
+    const windowElapsed = elapsedSince(now, window.startTime);
 
     if (windowElapsed > this.strategy.maxRestarts.within) {
       // Window expired — fresh budget.
-      this.restartWindows.set(processId, { startTime: now, restarts: 1 });
+      this.restartWindows.set(slotId, { startTime: now, restarts: 1 });
       return { kind: "restart" };
     }
 
     if (window.restarts >= this.strategy.maxRestarts.count) {
       const spent = { attempts: window.restarts, withinMs: windowElapsed };
-      this.restartWindows.delete(processId);
+      this.restartWindows.delete(slotId);
       return { kind: "declined", because: "restart-budget-exhausted", spent };
     }
 
@@ -226,7 +311,7 @@ export class Supervisor {
   }
 
   /** The one place a declined restart becomes an event. */
-  private emitDeclinedRestart(processId: ProcessId, declined: RestartDeclinedDecision): void {
+  private emitDeclinedRestart(slotId: ProcessId, declined: RestartDeclinedDecision): void {
     const timestamp = this.clock.now().wallMs;
 
     if (declined.because === "restart-budget-exhausted") {
@@ -235,7 +320,7 @@ export class Supervisor {
       this.emit?.({
         type: "supervisor:giveup",
         supervisorId: this.id,
-        processId,
+        processId: slotId,
         attempts: declined.spent.attempts,
         withinMs: declined.spent.withinMs,
         timestamp,
@@ -246,16 +331,16 @@ export class Supervisor {
     this.emit?.({
       type: "supervisor:restart:abandoned",
       supervisorId: this.id,
-      processId,
+      processId: slotId,
       because: declined.because,
       timestamp,
     });
   }
 
-  private getRestartDelay(processId: ProcessId): Millis {
+  private getRestartDelay(slotId: ProcessId): Millis {
     if (!this.strategy.backoff) return 0 as Millis;
 
-    const window = this.restartWindows.get(processId);
+    const window = this.restartWindows.get(slotId);
     const attempt = window ? window.restarts : 1;
 
     const { initial, max, factor, jitter } = this.strategy.backoff;
@@ -264,13 +349,13 @@ export class Supervisor {
 
     if (jitter !== undefined) {
       const jitterAmount = delay * (jitter / 100);
-      delay += (Math.random() - 0.5) * 2 * jitterAmount;
+      delay += (this.random() - 0.5) * 2 * jitterAmount;
       delay = Math.max(0, delay);
     }
 
     this.emit?.({
       type: "supervisor:restart",
-      id: processId,
+      id: slotId,
       attempt,
       delayMs: delay,
     });
@@ -281,57 +366,97 @@ export class Supervisor {
   private async createSupervisedProcess<TMsg, TState, TCtx>(
     spec: ProcessSpec<TMsg, TState, TCtx>,
     ctx: TCtx,
+    slotId: ProcessId,
   ): Promise<ProcessRef<TMsg>> {
-    const process = new ProcessImpl(spec, ctx, this.clock, this.createFailureMonitor());
+    const process = new ProcessImpl(spec, ctx, this.clock, this.createFailureMonitor(slotId));
     await process.start();
-
-    // Record spec+ctx for restart re-spawning.
-    this.processSpecs.set(process.id, spec as ProcessSpec<unknown, unknown, unknown>);
-    this.processCtxs.set(process.id, ctx);
-
     return process;
   }
 
-  private createFailureMonitor(): EmitFn {
+  /**
+   * One monitor per incarnation, closed over the slot it belongs to rather
+   * than looking the slot up from the failed incarnation's own id: there is
+   * no map from incarnation id back to slot, on purpose. A failed re-init
+   * inside `handleProcessFailure`'s own retry loop raises `process:fail`
+   * through this very monitor before that loop's `await` on
+   * `createSupervisedProcess` has a chance to observe the rejection; the
+   * `restarting` guard in `handleProcessFailure` is what makes that re-entrant
+   * call a no-op instead of a second, racing handler for the same slot.
+   */
+  private createFailureMonitor(slotId: ProcessId): EmitFn {
     return (event: ProcessEvent) => {
       this.emit?.(event);
 
-      if (event.type === "process:fail" && event.id) {
-        const failedId = event.id;
-        const spec = this.processSpecs.get(failedId);
-        const ctx = this.processCtxs.get(failedId);
-        if (spec) {
-          this.handleProcessFailure(failedId, spec, ctx).catch((error) => {
-            this.emit?.({
-              type: "supervisor:restart:failed",
-              supervisorId: this.id,
-              processId: failedId,
-              error,
-              timestamp: this.clock.now().wallMs,
-            });
+      if (event.type === "process:fail") {
+        this.handleProcessFailure(slotId).catch((error) => {
+          this.emit?.({
+            type: "supervisor:restart:failed",
+            supervisorId: this.id,
+            processId: slotId,
+            error,
+            timestamp: this.clock.now().wallMs,
           });
-        }
+        });
       }
     };
   }
 
-  private async handleProcessFailure<TMsg, TState, TCtx>(
-    processId: ProcessId,
-    spec: ProcessSpec<TMsg, TState, TCtx>,
-    ctx: TCtx,
-  ): Promise<void> {
-    const action = this.supervisionActions.get(processId) ?? "restart";
+  private async handleProcessFailure(slotId: ProcessId): Promise<void> {
+    const slot = this.slots.get(slotId);
+    if (!slot) return; // already retired (e.g. by shutdown, or a stale re-entrant signal)
 
-    await this.cleanupProcess(processId);
+    if (slot.action === "stop") {
+      this.retireSlot(slotId);
+      this.emit?.({
+        type: "supervisor:child:stopped",
+        supervisorId: this.id,
+        processId: slotId,
+        timestamp: this.clock.now().wallMs,
+      });
+      return;
+    }
 
-    if (action === "restart") {
-      const decision = this.decideRestart(processId);
+    if (slot.action === "escalate") {
+      this.retireSlot(slotId);
+      this.emit?.({
+        type: "supervisor:escalated",
+        supervisorId: this.id,
+        processId: slotId,
+        timestamp: this.clock.now().wallMs,
+      });
+      return;
+    }
+
+    // action === "restart"
+    if (this.restarting.has(slotId)) return; // re-entrant: the in-flight loop below owns this failure
+    this.restarting.add(slotId);
+
+    try {
+      await this.restartLoop(slotId, slot);
+    } finally {
+      this.restarting.delete(slotId);
+    }
+  }
+
+  /**
+   * Keep trying to bring the slot back up until the budget says stop. A
+   * failed re-init (`createSupervisedProcess` rejecting) is just another
+   * failure of the same child: it counts against the same budget and is
+   * retried with the same backoff, instead of ending supervision after a
+   * single `supervisor:restart:failed` the way it used to.
+   */
+  private async restartLoop(slotId: ProcessId, slot: Slot): Promise<void> {
+    const failedIncarnationId = slot.ref.current.id;
+
+    while (true) {
+      const decision = this.decideRestart(slotId);
       if (decision.kind === "declined") {
-        this.emitDeclinedRestart(processId, decision);
+        this.emitDeclinedRestart(slotId, decision);
+        this.retireSlot(slotId);
         return;
       }
 
-      const delay = this.getRestartDelay(processId);
+      const delay = this.getRestartDelay(slotId);
       if (delay > 0) {
         await this.clock.sleep(delay);
       }
@@ -341,76 +466,43 @@ export class Supervisor {
       // child on a decision that says the opposite: the one drop in this
       // method that left no trace of itself.
       if (this.stopped) {
-        this.emitDeclinedRestart(processId, { kind: "declined", because: "supervisor-stopping" });
+        this.emitDeclinedRestart(slotId, { kind: "declined", because: "supervisor-stopping" });
+        this.retireSlot(slotId);
         return;
       }
 
       try {
-        const newProcess = await this.createSupervisedProcess(spec, ctx);
-        this.children.push(newProcess as ProcessRef<unknown>);
-        this.supervisionActions.set(newProcess.id, action);
+        const newProcess = await this.createSupervisedProcess(slot.spec, slot.ctx, slotId);
+        slot.ref.current = newProcess;
 
-        // Bump the restart counter against the original id for observability.
-        this.restartCounts.set(processId, (this.restartCounts.get(processId) ?? 0) + 1);
+        this.restartCounts.set(slotId, (this.restartCounts.get(slotId) ?? 0) + 1);
 
         this.emit?.({
           type: "supervisor:child:restarted",
           supervisorId: this.id,
-          oldProcessId: processId,
+          oldProcessId: failedIncarnationId,
           newProcessId: newProcess.id,
           timestamp: this.clock.now().wallMs,
         });
+        return;
       } catch (error) {
         this.emit?.({
           type: "supervisor:restart:failed",
           supervisorId: this.id,
-          processId,
+          processId: slotId,
           error,
           timestamp: this.clock.now().wallMs,
         });
+        // Loop again: decideRestart runs once more and spends more of the
+        // same budget, rather than ending supervision here.
       }
-      return;
-    }
-
-    if (action === "stop") {
-      this.emit?.({
-        type: "supervisor:child:stopped",
-        supervisorId: this.id,
-        processId,
-        timestamp: this.clock.now().wallMs,
-      });
-      return;
-    }
-
-    if (action === "escalate") {
-      this.emit?.({
-        type: "supervisor:escalated",
-        supervisorId: this.id,
-        processId,
-        timestamp: this.clock.now().wallMs,
-      });
     }
   }
 
-  private async cleanupProcess(processId: ProcessId): Promise<void> {
-    const index = this.children.findIndex((child) => child.id === processId);
-    if (index >= 0) {
-      const process = this.children[index];
-      if (process) {
-        try {
-          const state = process.status();
-          if (state === "running" || state === "starting") {
-            await process.stop();
-          }
-        } catch {
-          // Failed process's own stop failures don't propagate here.
-        }
-      }
-      this.children.splice(index, 1);
-    }
-
-    this.supervisionActions.delete(processId);
-    this.processSpecs.delete(processId);
-    this.processCtxs.delete(processId);
+  private retireSlot(slotId: ProcessId): void {
+    this.slots.delete(slotId);
+    this.restartWindows.delete(slotId);
+    // restartCounts is intentionally NOT cleared: it is the final tally a
+    // caller can still read (via the slot id it already holds) after giveup.
   }
 }
