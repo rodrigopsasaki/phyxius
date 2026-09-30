@@ -142,6 +142,7 @@ class SupervisedRef<TMsg> implements ProcessRef<TMsg> {
   constructor(
     readonly id: ProcessId,
     current: ProcessRef<unknown>,
+    private readonly retire: () => void,
   ) {
     this.current = current;
   }
@@ -158,7 +159,15 @@ class SupervisedRef<TMsg> implements ProcessRef<TMsg> {
     return this.current.ask(build, timeout);
   }
 
+  /**
+   * Stopping a child through its ref is final, and the slot is retired before
+   * the stop begins. Otherwise the stop could be undone: a restart already
+   * asleep in backoff would wake and bring the child back, and an `onStop`
+   * that throws is reported as `process:fail`, the same event a crash is, and
+   * would be restarted as one.
+   */
   stop(reason?: StopReason): Promise<void> {
+    this.retire();
     return this.current.stop(reason);
   }
 }
@@ -256,7 +265,7 @@ export class Supervisor {
 
     try {
       const process = await this.createSupervisedProcess(spec, ctx, slotId);
-      const ref = new SupervisedRef<TMsg>(slotId, process);
+      const ref = new SupervisedRef<TMsg>(slotId, process, () => this.retireSlot(slotId));
 
       this.slots.set(slotId, { ref, spec, ctx, action: "restart" });
 
@@ -310,21 +319,7 @@ export class Supervisor {
       timestamp: this.clock.now().wallMs,
     });
 
-    const stopPromises = [...this.slots.values()].map(async (slot) => {
-      try {
-        await slot.ref.stop();
-      } catch (error) {
-        this.emit?.({
-          type: "supervisor:child:stop:error",
-          supervisorId: this.id,
-          processId: slot.ref.id,
-          error,
-          timestamp: this.clock.now().wallMs,
-        });
-      }
-    });
-
-    await Promise.all(stopPromises);
+    await Promise.all([...this.slots.values()].map((slot) => this.stopQuietly(slot.ref.id, slot.ref)));
     this.slots.clear();
 
     this.emit?.({
@@ -363,8 +358,9 @@ export class Supervisor {
       return { kind: "declined", because: "strategy-none" };
     }
 
-    if (this.stopped) {
-      return { kind: "declined", because: "supervisor-stopping" };
+    const gone = this.whyNoLongerSupervised(slotId);
+    if (gone) {
+      return { kind: "declined", because: gone };
     }
 
     const budget = this.strategy.maxRestarts;
@@ -395,6 +391,19 @@ export class Supervisor {
     recent.push(now);
     this.restartWindows.set(slotId, recent);
     return { kind: "restart", attempt: recent.length };
+  }
+
+  /**
+   * A restart that is decided and then has to wait (a backoff sleep, a
+   * replacement that is still starting) can outlive the thing it was for.
+   * Says which of the two ended it, or `undefined` if it is still wanted:
+   * the supervisor shut down, or the caller stopped the child through its ref
+   * and the slot is gone.
+   */
+  private whyNoLongerSupervised(slotId: ProcessId): "supervisor-stopping" | "child-stopped" | undefined {
+    if (this.stopped) return "supervisor-stopping";
+    if (!this.slots.has(slotId)) return "child-stopped";
+    return undefined;
   }
 
   /** The one place a declined restart becomes an event. */
@@ -545,18 +554,32 @@ export class Supervisor {
         await this.clock.sleep(delay);
       }
 
-      // Shutdown can land inside that sleep. The restart was already decided
-      // and its budget already spent, so returning here silently retired a
-      // child on a decision that says the opposite: the one drop in this
-      // method that left no trace of itself.
-      if (this.stopped) {
-        this.emitDeclinedRestart(slotId, { kind: "declined", because: "supervisor-stopping" });
+      // Shutdown, or the caller stopping the child through its ref, can land
+      // inside that sleep. The restart was already decided and its budget
+      // already spent, so returning here silently retired a child on a
+      // decision that says the opposite: the one drop in this method that
+      // left no trace of itself.
+      const goneAfterSleep = this.whyNoLongerSupervised(slotId);
+      if (goneAfterSleep) {
+        this.emitDeclinedRestart(slotId, { kind: "declined", because: goneAfterSleep });
         this.retireSlot(slotId);
         return;
       }
 
       try {
         const newProcess = await this.createSupervisedProcess(slot.spec, slot.ctx, slotId);
+
+        // The same two things can land while the replacement is starting. It
+        // is unowned by then, and installing it would leave a running child
+        // that nothing supervises and nothing will stop: stop it instead.
+        const goneWhileStarting = this.whyNoLongerSupervised(slotId);
+        if (goneWhileStarting) {
+          await this.stopQuietly(slotId, newProcess);
+          this.emitDeclinedRestart(slotId, { kind: "declined", because: goneWhileStarting });
+          this.retireSlot(slotId);
+          return;
+        }
+
         slot.ref.current = newProcess;
 
         this.restartCounts.set(slotId, (this.restartCounts.get(slotId) ?? 0) + 1);
@@ -581,6 +604,21 @@ export class Supervisor {
         // Loop again: decideRestart runs once more and spends more of the
         // same budget, rather than ending supervision here.
       }
+    }
+  }
+
+  /** Stop a process, reporting a failed stop as an event instead of throwing it. */
+  private async stopQuietly(slotId: ProcessId, process: ProcessRef<unknown>): Promise<void> {
+    try {
+      await process.stop();
+    } catch (error) {
+      this.emit?.({
+        type: "supervisor:child:stop:error",
+        supervisorId: this.id,
+        processId: slotId,
+        error,
+        timestamp: this.clock.now().wallMs,
+      });
     }
   }
 

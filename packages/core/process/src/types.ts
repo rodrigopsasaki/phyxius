@@ -16,12 +16,14 @@ export type StopReason = "normal" | "shutdown" | "error";
 
 /**
  * Why a decided restart did not happen. A boolean could say only "not
- * restarting", never which of these it was, so two of the three left no
- * trace at all. `restart-budget-exhausted` keeps its own long-standing
- * `supervisor:giveup` event; the other two are why
- * `supervisor:restart:abandoned` exists.
+ * restarting", never which of these it was, so most of them left no trace at
+ * all. `restart-budget-exhausted` keeps its own long-standing
+ * `supervisor:giveup` event; the rest are why `supervisor:restart:abandoned`
+ * exists. `child-stopped` is the caller stopping the child through its own
+ * ref: that retires the slot for good, so a restart already waiting in
+ * backoff (or starting) finds nothing left to restart.
  */
-export type RestartDeclined = "strategy-none" | "supervisor-stopping" | "restart-budget-exhausted";
+export type RestartDeclined = "strategy-none" | "supervisor-stopping" | "child-stopped" | "restart-budget-exhausted";
 
 // ── Supervision ─────────────────────────────────────────────────────────────
 
