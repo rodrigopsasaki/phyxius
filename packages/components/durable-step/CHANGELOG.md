@@ -1,5 +1,12 @@
 # @phyxiusjs/durable-step
 
+## 0.1.2
+
+### Patch Changes
+
+- @phyxiusjs/handler@0.4.2
+- @phyxiusjs/migration@0.3.2
+
 ## 0.1.1
 
 ### Patch Changes

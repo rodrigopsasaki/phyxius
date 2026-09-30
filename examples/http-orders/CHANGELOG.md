@@ -1,5 +1,12 @@
 # @phyxiusjs/example-http-orders
 
+## 0.0.4
+
+### Patch Changes
+
+- @phyxiusjs/handler@0.4.2
+- @phyxiusjs/http@0.3.3
+
 ## 0.0.3
 
 ### Patch Changes
