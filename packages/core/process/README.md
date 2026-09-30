@@ -269,7 +269,13 @@ interface ProcessRef<TMsg> {
 
 ```ts
 class Supervisor {
-  constructor(options: { clock: Clock; id?: ProcessId; emit?: EmitFn; strategy?: SupervisionStrategy });
+  constructor(options: {
+    clock: Clock;
+    id?: ProcessId;
+    emit?: EmitFn;
+    strategy?: SupervisionStrategy;
+    random?: () => number;
+  });
   spawn<TMsg, TState, TCtx>(spec: ProcessSpec<TMsg, TState, TCtx>, ctx?: TCtx): Promise<ProcessRef<TMsg>>;
   supervise<TMsg>(ref: ProcessRef<TMsg>, action: "restart" | "stop" | "escalate"): void;
   getChildren(): ProcessRef<unknown>[];
@@ -279,6 +285,16 @@ class Supervisor {
 ```
 
 `restartCount` lives on the Supervisor, not on individual `ProcessRef`s — it's bookkeeping that only the supervisor can honestly track.
+
+**Restart budget.** `maxRestarts: { count, within }` is a sliding window: no trailing `within` milliseconds ever holds more than `count` restarts (one exactly `within` old still counts), measured on the clock's monotonic reading, and `count: 0` allows none. The backoff attempt is the number of restarts still inside the window, so the curve relaxes as they leave. A child that fails to start again counts against the same budget and is retried with the same backoff. Without `maxRestarts` there is no limit and no window, and the backoff attempt counts since the child last started: a crash of a running child is attempt 1, and each consecutive failed re-init after it is the next, backing off along the curve up to `backoff.max`. A successful start resets the count, so a child that crashes once in a while waits `backoff.initial` every time. A failed re-init is never retried sooner than 1 ms after the last try, whatever the curve computes to.
+
+**Jitter needs `random`.** `backoff.jitter` (a percentage) spreads each delay by up to ±jitter% using `random`, which is injected the way the clock is, so a controlled clock and a fixed `random` reproduce every delay. `random` is optional unless the strategy declares jitter: a strategy literal with a nonzero `jitter` and no `random` does not compile, and a strategy typed as `SupervisionStrategy` that carries jitter without one throws from the constructor. `jitter: 0` needs none.
+
+**Refs and stopping.** The ref `spawn` returns is a stable address for the child: it follows whichever incarnation is live across restarts. While a restart is waiting in backoff there is no live incarnation, so `send` rejects with `ProcessError`, as it does for any failed process. `ref.stop()` is final: the child is retired (it leaves `getChildren()`) and is never restarted, including a restart already waiting or starting.
+
+**How a restart ends.** `supervisor:giveup` when the budget is spent; otherwise `supervisor:restart:abandoned`, whose `because` is `strategy-none`, `supervisor-stopping`, `child-stopped` (stopped through its ref), or `supervisor-fault` (the supervisor's own machinery threw; the event carries the `error`).
+
+**A throwing `emit`.** What the supervisor does about a failure does not depend on the sink taking the event that reports it: a sink that throws on a child's `process:fail` still gets the child restarted, and its error is reported as `supervisor:restart:failed`. A sink that throws on one of the supervisor's own restart events is reported the same way when a replacement is already running, and otherwise retires the child with `supervisor:restart:abandoned` (`supervisor-fault`).
 
 ---
 
