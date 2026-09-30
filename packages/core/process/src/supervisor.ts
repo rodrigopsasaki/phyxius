@@ -14,11 +14,6 @@ import { elapsedSince, ms } from "@phyxiusjs/clock";
 import { ProcessImpl } from "./process.js";
 import { createProcessId } from "./process-id.js";
 
-export interface RestartWindow {
-  startTime: MonoMs;
-  restarts: number;
-}
-
 export type SupervisionAction = "restart" | "stop" | "escalate";
 
 /**
@@ -34,7 +29,12 @@ export type RestartDeclinedDecision =
       spent: { attempts: number; withinMs: number };
     };
 
-export type RestartDecision = { kind: "restart" } | RestartDeclinedDecision;
+/**
+ * `attempt` is which restart this is, counting the ones still inside the
+ * budget window: the input to the backoff curve, decided next to the
+ * bookkeeping it is read from.
+ */
+export type RestartDecision = { kind: "restart"; attempt: number } | RestartDeclinedDecision;
 
 type Backoff = NonNullable<SupervisionStrategy["backoff"]>;
 
@@ -183,7 +183,8 @@ export class Supervisor {
    * the identity when the strategy has none). See `jitterFrom`.
    */
   private readonly jittered: (delay: number) => number;
-  private readonly restartWindows = new Map<ProcessId, RestartWindow>();
+  /** Per slot, when each restart inside the trailing budget window was decided. */
+  private readonly restartWindows = new Map<ProcessId, MonoMs[]>();
   private readonly restartCounts = new Map<ProcessId, number>();
   private readonly slots = new Map<ProcessId, Slot>();
   /** Slot ids currently inside their own restart-retry loop. Guards against
@@ -354,34 +355,31 @@ export class Supervisor {
       return { kind: "declined", because: "supervisor-stopping" };
     }
 
-    if (!this.strategy.maxRestarts) {
-      return { kind: "restart" }; // no limit
+    const budget = this.strategy.maxRestarts;
+    if (!budget) {
+      return { kind: "restart", attempt: 1 }; // no limit
     }
 
+    // The window slides: it holds the restarts decided at most `within` ago,
+    // and each one leaves it on its own schedule. One that is exactly `within`
+    // old is still inside. A window that restarted from scratch when it
+    // "expired" would let a burst straddling that moment spend the budget
+    // twice over.
     const now = this.clock.now().monoMs;
-    const window = this.restartWindows.get(slotId);
+    const recent = (this.restartWindows.get(slotId) ?? []).filter((at) => elapsedSince(now, at) <= budget.within);
 
-    if (!window) {
-      this.restartWindows.set(slotId, { startTime: now, restarts: 1 });
-      return { kind: "restart" };
-    }
-
-    const windowElapsed = elapsedSince(now, window.startTime);
-
-    if (windowElapsed > this.strategy.maxRestarts.within) {
-      // Window expired — fresh budget.
-      this.restartWindows.set(slotId, { startTime: now, restarts: 1 });
-      return { kind: "restart" };
-    }
-
-    if (window.restarts >= this.strategy.maxRestarts.count) {
-      const spent = { attempts: window.restarts, withinMs: windowElapsed };
-      this.restartWindows.delete(slotId);
+    if (recent.length >= budget.count) {
+      const oldest = recent[0];
+      const spent = {
+        attempts: recent.length,
+        withinMs: oldest === undefined ? 0 : elapsedSince(now, oldest),
+      };
       return { kind: "declined", because: "restart-budget-exhausted", spent };
     }
 
-    window.restarts++;
-    return { kind: "restart" };
+    recent.push(now);
+    this.restartWindows.set(slotId, recent);
+    return { kind: "restart", attempt: recent.length };
   }
 
   /** The one place a declined restart becomes an event. */
@@ -411,11 +409,8 @@ export class Supervisor {
     });
   }
 
-  private getRestartDelay(slotId: ProcessId): Millis {
+  private getRestartDelay(slotId: ProcessId, attempt: number): Millis {
     if (!this.strategy.backoff) return ms(0);
-
-    const window = this.restartWindows.get(slotId);
-    const attempt = window ? window.restarts : 1;
 
     const { initial, max, factor } = this.strategy.backoff;
     const delay = this.jittered(Math.min(initial * Math.pow(factor, attempt - 1), max));
@@ -523,7 +518,7 @@ export class Supervisor {
         return;
       }
 
-      const delay = this.getRestartDelay(slotId);
+      const delay = this.getRestartDelay(slotId, decision.attempt);
       if (delay > 0) {
         await this.clock.sleep(delay);
       }

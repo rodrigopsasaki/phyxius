@@ -417,3 +417,196 @@ describe("Supervisor: restart budget and backoff follow the supervised child", (
     expect(() => new Supervisor({ clock, strategy, random: () => 0.5 })).not.toThrow();
   });
 });
+
+/**
+ * A child that throws on every message, supervised with no backoff, so each
+ * crash is restarted the moment it is decided and the only thing moving time
+ * is the test. The window's own arithmetic is what these scenarios isolate.
+ */
+function crashingChild(): ProcessSpec<unknown> {
+  return {
+    name: "always-crashes",
+    handle: () => {
+      throw new Error("boom");
+    },
+  };
+}
+
+describe("Supervisor: the restart window slides on monotonic time", () => {
+  it("counts restarts inside the trailing window, so a burst straddling an old start cannot double the budget", async () => {
+    const clock = createControlledClock();
+    const watcher = eventWaiter();
+
+    const supervisor = new Supervisor({
+      clock,
+      emit: watcher.emit,
+      strategy: { type: "one-for-one", maxRestarts: { count: 3, within: ms(10_000) } },
+    });
+
+    const ref = await supervisor.spawn(crashingChild());
+
+    // Crashes at 0, 9000, 10001 and 10002 ms. The one at 0 has left the
+    // window by 10001, so the trailing window holds {9000, 10001, 10002}:
+    // exactly `count`, and all four restarts are granted.
+    const crashAt = [0, 9_000, 10_001, 10_002];
+    for (const [i, at] of crashAt.entries()) {
+      clock.advanceTo(at);
+      await ref.send({ type: "poke" });
+      await watcher.waitForCount("supervisor:child:restarted", i + 1);
+    }
+
+    // The fifth crash, at 10003, finds three restarts inside the last 10s.
+    // A window that restarts from scratch once it "expires" (tumbling) would
+    // have opened a fresh one at 10001 and granted this a fifth restart.
+    clock.advanceTo(10_003);
+    await ref.send({ type: "poke" });
+    await clock.flush();
+
+    expect(watcher.countOf("supervisor:child:restarted")).toBe(4);
+    expect(watcher.countOf("supervisor:giveup")).toBe(1);
+    expect(watcher.events.find((e) => e.type === "supervisor:giveup")?.attempts).toBe(3);
+    expect(supervisor.getChildren()).toHaveLength(0);
+
+    await supervisor.stop();
+  });
+
+  it("backoff attempt counts the restarts still inside the trailing window", async () => {
+    const clock = createControlledClock();
+    const watcher = eventWaiter();
+
+    const supervisor = new Supervisor({
+      clock,
+      emit: watcher.emit,
+      strategy: {
+        type: "one-for-one",
+        maxRestarts: { count: 100, within: ms(10_000) },
+        backoff: { initial: ms(1), max: ms(1_000), factor: 2 },
+      },
+    });
+
+    const ref = await supervisor.spawn(crashingChild());
+
+    // Crashes at 0, 5000 and 10500. By the third, the first has left the
+    // window but the second has not: the curve relaxes by one step, it does
+    // not start over (attempt 2, not 1).
+    const crashAt = [0, 5_000, 10_500];
+    for (const [i, at] of crashAt.entries()) {
+      clock.advanceTo(at);
+      await ref.send({ type: "poke" });
+      await watcher.waitForCount("supervisor:restart", i + 1);
+      const restart = watcher.events.filter((e) => e.type === "supervisor:restart").at(-1);
+      clock.advanceBy(ms(restart?.delayMs ?? 0));
+      await watcher.waitForCount("supervisor:child:restarted", i + 1);
+    }
+
+    const attempts = watcher.events.filter((e) => e.type === "supervisor:restart").map((e) => e.attempt);
+    expect(attempts).toEqual([1, 2, 2]);
+
+    await supervisor.stop();
+  });
+
+  it("count 0 grants no restarts", async () => {
+    const clock = createControlledClock();
+    const watcher = eventWaiter();
+
+    const supervisor = new Supervisor({
+      clock,
+      emit: watcher.emit,
+      strategy: { type: "one-for-one", maxRestarts: { count: 0, within: ms(10_000) } },
+    });
+
+    const ref = await supervisor.spawn(crashingChild());
+    await ref.send({ type: "poke" });
+    await watcher.waitForCount("supervisor:giveup", 1);
+
+    expect(watcher.countOf("supervisor:child:restarted")).toBe(0);
+    expect(watcher.events.find((e) => e.type === "supervisor:giveup")?.attempts).toBe(0);
+    expect(supervisor.getChildren()).toHaveLength(0);
+
+    await supervisor.stop();
+  });
+
+  it.each([
+    { elapsed: 100, outcome: "still counts, so the budget is spent" },
+    { elapsed: 101, outcome: "has left the window, so the restart is granted" },
+  ])("a restart exactly `within` ago vs one ms older: at $elapsed ms it $outcome", async ({ elapsed }) => {
+    const clock = createControlledClock();
+    const watcher = eventWaiter();
+
+    const supervisor = new Supervisor({
+      clock,
+      emit: watcher.emit,
+      strategy: { type: "one-for-one", maxRestarts: { count: 1, within: ms(100) } },
+    });
+
+    const ref = await supervisor.spawn(crashingChild());
+
+    await ref.send({ type: "poke" });
+    await watcher.waitForCount("supervisor:child:restarted", 1);
+
+    clock.advanceBy(ms(elapsed));
+    await ref.send({ type: "poke" });
+    await clock.flush();
+
+    // `within` is inclusive: a restart `within` ms old is still in the window.
+    expect(watcher.countOf("supervisor:giveup")).toBe(elapsed === 100 ? 1 : 0);
+    expect(watcher.countOf("supervisor:child:restarted")).toBe(elapsed === 100 ? 1 : 2);
+
+    await supervisor.stop();
+  });
+
+  it("a wall-clock jump forward does not close the window", async () => {
+    const clock = createControlledClock();
+    const watcher = eventWaiter();
+
+    const supervisor = new Supervisor({
+      clock,
+      emit: watcher.emit,
+      strategy: { type: "one-for-one", maxRestarts: { count: 1, within: ms(100) } },
+    });
+
+    const ref = await supervisor.spawn(crashingChild());
+
+    await ref.send({ type: "poke" });
+    await watcher.waitForCount("supervisor:child:restarted", 1);
+
+    // No monotonic time passes, so the window is still open. Measured on
+    // `wallMs` this reads as 1,000,000 ms elapsed and grants a second restart.
+    clock.jumpWallTime(1_000_000);
+    await ref.send({ type: "poke" });
+    await clock.flush();
+
+    expect(watcher.countOf("supervisor:giveup")).toBe(1);
+    expect(watcher.countOf("supervisor:child:restarted")).toBe(1);
+
+    await supervisor.stop();
+  });
+
+  it("a wall-clock jump backward does not hold the window open", async () => {
+    const clock = createControlledClock({ initialTime: 1_000_000 });
+    const watcher = eventWaiter();
+
+    const supervisor = new Supervisor({
+      clock,
+      emit: watcher.emit,
+      strategy: { type: "one-for-one", maxRestarts: { count: 1, within: ms(100) } },
+    });
+
+    const ref = await supervisor.spawn(crashingChild());
+
+    await ref.send({ type: "poke" });
+    await watcher.waitForCount("supervisor:child:restarted", 1);
+
+    // 200 ms of monotonic time pass, so the window has closed. Measured on
+    // `wallMs`, the backward jump reads as negative elapsed time, which clamps
+    // to 0 and keeps the window open: the budget is spent when it should not be.
+    clock.advanceBy(ms(200));
+    clock.jumpWallTime(500_000);
+    await ref.send({ type: "poke" });
+    await watcher.waitForCount("supervisor:child:restarted", 2);
+
+    expect(watcher.countOf("supervisor:giveup")).toBe(0);
+
+    await supervisor.stop();
+  });
+});
