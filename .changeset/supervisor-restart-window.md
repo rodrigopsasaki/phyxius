@@ -65,10 +65,10 @@ restart was pending) and `supervisor-fault` (the supervisor's own machinery
 threw; the event carries the `error`). Code that switches over `because`
 exhaustively needs the two new cases.
 
-Backoff jitter took its randomness from `Math.random`, against this
-package's own "time and randomness are injected" rule. `Supervisor` now takes
-an optional `random: () => number`, and nothing in this package's source reads
-the global `Math.random` anymore. With a controlled clock and a fixed `random`
+Backoff jitter took its randomness from the global `Math.random`, so a
+controlled clock alone could not reproduce a backoff delay. `Supervisor` now
+takes an optional `random: () => number`, injected the way the clock is, and
+nothing in this package's source reads the global `Math.random` anymore. With a controlled clock and a fixed `random`
 every backoff delay is reproducible; process and slot ids still come from
 `createProcessId`, which is not injected, so they are not.
 
