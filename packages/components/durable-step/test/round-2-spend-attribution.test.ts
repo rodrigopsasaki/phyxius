@@ -40,7 +40,8 @@ import { createMemoryJournalStore } from "@phyxiusjs/migration";
 import { machine } from "@phyxiusjs/state-machine";
 import { observe } from "@phyxiusjs/observe";
 
-import { createMemoryStateStore, createRetryLedger, defineDurableStep, isStepRefusal, spend } from "../src/index.js";
+import { createMemoryStateStore, defineDurableStep, isStepRefusal, spend } from "../src/index.js";
+import { unlimitedLedger } from "./helpers.js";
 
 function setup() {
   const clock = createControlledClock({ initialTime: 0 });
@@ -91,7 +92,7 @@ describe("round 2 — spend is required, and an unattributed cent refuses to com
           return { receiptId: "receipt-infer-standards-1" };
         },
       },
-      { clock, stateStore, retryLedger: createRetryLedger(Number.POSITIVE_INFINITY), journalStore },
+      { clock, stateStore, retryLedger: await unlimitedLedger(), journalStore },
     );
 
     const handler = await spawn(inferStandardsSpec, runtime);
@@ -133,7 +134,7 @@ describe("round 2 — spend is required, and an unattributed cent refuses to com
           return { receiptId: "receipt-should-not-land" };
         },
       },
-      { clock, stateStore, retryLedger: createRetryLedger(Number.POSITIVE_INFINITY), journalStore },
+      { clock, stateStore, retryLedger: await unlimitedLedger(), journalStore },
     );
 
     const handler = await spawn(spec, runtime);
@@ -178,7 +179,7 @@ describe("round 2 — spend is required, and an unattributed cent refuses to com
           return { receiptId: "receipt" };
         },
       },
-      { clock, stateStore, retryLedger: createRetryLedger(Number.POSITIVE_INFINITY), journalStore },
+      { clock, stateStore, retryLedger: await unlimitedLedger(), journalStore },
     );
 
     const handler = await spawn(spec, runtime);
@@ -222,7 +223,7 @@ describe("round 2 — spend is required, and an unattributed cent refuses to com
           return { receiptId: "unverified-receipt" }; // nobody checked this is real
         },
       },
-      { clock, stateStore, retryLedger: createRetryLedger(Number.POSITIVE_INFINITY), journalStore },
+      { clock, stateStore, retryLedger: await unlimitedLedger(), journalStore },
     );
 
     const handler = await spawn(spec, runtime);

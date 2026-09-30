@@ -6,6 +6,7 @@ import { runWithRetry } from "@phyxiusjs/retry";
 import { machine as machineOps } from "@phyxiusjs/state-machine";
 import type { Machine, MachineEvent, MachineState } from "@phyxiusjs/state-machine";
 
+import { LedgerNotInitializedError } from "./retry-ledger.js";
 import type { DurableStepDeps, DurableStepSpec, StepRefusal } from "./types.js";
 
 // ── StepRefusalThrown — the thrown envelope ─────────────────────────────────
@@ -49,14 +50,20 @@ export function isStepRefusal(x: unknown): x is StepRefusalThrown {
  *      executes, so an illegal call never spends the work it would gate.
  *   3. Runs `spec.run` with `tools.currentState` + `tools.spend` attached,
  *      retrying under `spec.retry`'s shape (delay/shouldRetry) but capped
- *      to `1 + deps.retryLedger.draw(spec.retry.maxAttempts - 1)` extra
- *      attempts — the step's own declared ceiling is a REQUEST, the
- *      ledger's remaining balance is the GRANT. `spec.retry` never reaches
- *      the underlying handler (it's always spawned with `retry.none()`):
- *      retry now happens once, in this wrapper, where the shared ledger
- *      can see and cap it. This is the deliberate tradeoff this round
- *      surfaced — see the doc's round-3 write-up for the friction it
- *      leaves on `HandlerEvent.attempts`.
+ *      to `1 + (await deps.retryLedger.draw(spec.retry.maxAttempts - 1))`
+ *      extra attempts — the step's own declared ceiling is a REQUEST, the
+ *      ledger's remaining balance is the GRANT, drawn from a durable store
+ *      keyed by the operation's own identity rather than an in-memory
+ *      object (see `DurableRetryLedger`) — a step resumed by a different
+ *      worker draws from the SAME pool, not a fresh one. A ledger with no
+ *      record at all for its operation refuses the step
+ *      (`LEDGER_NOT_INITIALIZED`) rather than guessing. `spec.retry` never
+ *      reaches the underlying handler (it's always spawned with
+ *      `retry.none()`): retry now happens once, in this wrapper, where the
+ *      shared ledger can see and cap it. This is a deliberate tradeoff,
+ *      disclosed, not hidden: `HandlerEvent.attempts` on the underlying
+ *      handler always reads 1; the true count lives in
+ *      `observed.retryAttemptsUsed`.
  *   4. If `spec.spend.kind === "metered"` and `tools.spend.record(...)` was
  *      never called, refuses (`SPEND_UNACCOUNTED`) — a metered step cannot
  *      complete without attributing its cost, the same way an illegal
@@ -159,10 +166,22 @@ export function defineDurableStep<S extends MachineState, E extends MachineEvent
 
       // The step's own ceiling is a REQUEST; the ledger's remaining
       // balance is the GRANT. Decomposing work into more steps cannot
-      // mint more retry capacity — every step sharing this ledger draws
-      // from the exact same conserved pool.
+      // mint more retry capacity — every step drawing from the same
+      // `operationId`, anywhere in the tree, in any process, competes for
+      // the exact same durable pool. `LedgerNotInitializedError` means the
+      // operation's budget was never declared anywhere reachable from
+      // here — the `unknown` state — and is refused rather than silently
+      // read as either 0 or unlimited.
       const requestedExtra = Math.max(0, spec.retry.maxAttempts - 1);
-      const grantedExtra = deps.retryLedger.draw(requestedExtra);
+      let grantedExtra: number;
+      try {
+        grantedExtra = await deps.retryLedger.draw(requestedExtra);
+      } catch (drawError) {
+        if (drawError instanceof LedgerNotInitializedError) {
+          throw new StepRefusalThrown({ type: "LEDGER_NOT_INITIALIZED", operationId: drawError.operationId });
+        }
+        throw drawError;
+      }
       transitionFields.retryBudgeted.set(requestedExtra);
       transitionFields.retryGranted.set(grantedExtra);
 

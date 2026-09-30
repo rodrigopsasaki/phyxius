@@ -25,6 +25,15 @@
 //              different kind of intervention (lint rule, orchestrator
 //              boundary, code review), out of scope for what these four
 //              packages compose into.
+//
+// RETROFIT NOTE (2026-08-17, retry-budget find-shape, round 4): `runClimb`
+// gained `operationId` + `deps.ledgerStore` + `deps.retryBudget` — the
+// climb now owns its conserved retry budget's declaration, not just its
+// unaccounted-time measurement. This file's own scenario (unaccounted
+// time) doesn't exercise conservation, so it declares
+// `Number.POSITIVE_INFINITY` — "this climb's steps aren't conserved
+// against each other" — same as the `unlimitedLedger()` each stage already
+// used. Nothing else about this file's meaning changed.
 
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
@@ -36,7 +45,8 @@ import { createMemoryJournalStore } from "@phyxiusjs/migration";
 import { machine } from "@phyxiusjs/state-machine";
 import { observe } from "@phyxiusjs/observe";
 
-import { createMemoryStateStore, createRetryLedger, defineDurableStep, runClimb, spend } from "../src/index.js";
+import { createMemoryLedgerStore, createMemoryStateStore, defineDurableStep, runClimb, spend } from "../src/index.js";
+import { unlimitedLedger } from "./helpers.js";
 
 function setup() {
   const clock = createControlledClock({ initialTime: 0 });
@@ -54,7 +64,7 @@ const stageMachine = machine.define<StageState, StageEvent>({
   transitions: { pending: { complete: () => ({ kind: "done" }) }, done: {} },
 });
 
-function makeStage(opts: {
+async function makeStage(opts: {
   clock: ReturnType<typeof createControlledClock>;
   runtime: HandlerRuntime;
   journalStore: ReturnType<typeof createMemoryJournalStore>;
@@ -85,7 +95,7 @@ function makeStage(opts: {
     {
       clock: opts.clock,
       stateStore,
-      retryLedger: createRetryLedger(Number.POSITIVE_INFINITY),
+      retryLedger: await unlimitedLedger(),
       journalStore: opts.journalStore,
     },
   );
@@ -95,27 +105,38 @@ describe("round 5 — the invisible minute becomes a journaled number, not a pre
   it("reproduces corpus item 3 exactly: a 35-minute climb with 10 minutes of declared stages journals 25 unaccounted minutes", async () => {
     const { clock, runtime, journal, journalStore } = setup();
 
-    const clone = makeStage({ clock, runtime, journalStore, name: "clone", durationMs: 4 * 60_000 });
-    const extract = makeStage({ clock, runtime, journalStore, name: "file-level-extraction", durationMs: 6 * 60_000 });
+    const clone = await makeStage({ clock, runtime, journalStore, name: "clone", durationMs: 4 * 60_000 });
+    const extract = await makeStage({
+      clock,
+      runtime,
+      journalStore,
+      name: "file-level-extraction",
+      durationMs: 6 * 60_000,
+    });
 
     const cloneHandler = await spawn(clone, runtime);
     const extractHandler = await spawn(extract, runtime);
 
-    const climbResult = await runClimb("mycelium-run", { clock, journal, journalStore }, async () => {
-      // The 25 invisible minutes: clone, extraction, queuing happen as
-      // plain code BEFORE the first declared stage even starts — exactly
-      // the corpus's own shape (04:13:15 climb start, 04:38:07 first
-      // recorded stage). No step wraps this; nothing could have noticed
-      // it under rounds 1-4 either.
-      clock.advanceBy(ms(25 * 60_000));
+    const climbResult = await runClimb(
+      "mycelium-run",
+      "op-mycelium-run",
+      { clock, journal, journalStore, ledgerStore: createMemoryLedgerStore(), retryBudget: Number.POSITIVE_INFINITY },
+      async () => {
+        // The 25 invisible minutes: clone, extraction, queuing happen as
+        // plain code BEFORE the first declared stage even starts — exactly
+        // the corpus's own shape (04:13:15 climb start, 04:38:07 first
+        // recorded stage). No step wraps this; nothing could have noticed
+        // it under rounds 1-4 either.
+        clock.advanceBy(ms(25 * 60_000));
 
-      await cloneHandler.invoke({});
-      await extractHandler.invoke({});
+        await cloneHandler.invoke({});
+        await extractHandler.invoke({});
 
-      await cloneHandler.stop();
-      await extractHandler.stop();
-      return { done: true };
-    });
+        await cloneHandler.stop();
+        await extractHandler.stop();
+        return { done: true };
+      },
+    );
 
     expect(climbResult.totalMs).toBe(35 * 60_000);
     expect(climbResult.accountedMs).toBe(10 * 60_000); // clone (4) + extraction (6)
@@ -129,14 +150,25 @@ describe("round 5 — the invisible minute becomes a journaled number, not a pre
 
   it("a climb built entirely from declared steps has zero unaccounted time — the good case, verified", async () => {
     const { clock, runtime, journal, journalStore } = setup();
-    const infer = makeStage({ clock, runtime, journalStore, name: "infer-standards", durationMs: 4 * 60_000 + 23_000 });
+    const infer = await makeStage({
+      clock,
+      runtime,
+      journalStore,
+      name: "infer-standards",
+      durationMs: 4 * 60_000 + 23_000,
+    });
     const inferHandler = await spawn(infer, runtime);
 
-    const climbResult = await runClimb("infer-standards-only", { clock, journal, journalStore }, async () => {
-      await inferHandler.invoke({});
-      await inferHandler.stop();
-      return { done: true };
-    });
+    const climbResult = await runClimb(
+      "infer-standards-only",
+      "op-infer-standards-only",
+      { clock, journal, journalStore, ledgerStore: createMemoryLedgerStore(), retryBudget: Number.POSITIVE_INFINITY },
+      async () => {
+        await inferHandler.invoke({});
+        await inferHandler.stop();
+        return { done: true };
+      },
+    );
 
     expect(climbResult.unaccountedMs).toBe(0);
     expect(climbResult.accountedMs).toBe(climbResult.totalMs);
