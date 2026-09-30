@@ -203,10 +203,6 @@ export class Supervisor {
   private readonly unwindowedAttempts = new Map<ProcessId, number>();
   private readonly restartCounts = new Map<ProcessId, number>();
   private readonly slots = new Map<ProcessId, Slot>();
-  /** Slot ids currently inside their own restart-retry loop. Guards against
-   * the re-entrant `process:fail` a failed re-init raises through the very
-   * failure monitor that loop is already handling. See `handleProcessFailure`. */
-  private readonly restarting = new Set<ProcessId>();
   private stopped = false;
 
   constructor(options: SupervisorOptionsNoJitter);
@@ -437,31 +433,31 @@ export class Supervisor {
     return ms(this.jittered(Math.min(initial * Math.pow(factor, attempt - 1), max)));
   }
 
+  /**
+   * Build one incarnation and start it. Its failures reach the supervisor's
+   * failure handling only once it has come up: a failure while starting
+   * (`init` throwing) is `start()`'s rejection, and belongs to whoever
+   * awaited it, `spawn` or the restart loop, each of which already decides
+   * what a failed start means. Routing it through the monitor as well handed
+   * the same failure to two handlers, and the guard that stopped them racing
+   * (a per-slot flag held for the whole loop) also swallowed a genuine
+   * failure signalled in the instant after a restart succeeded.
+   *
+   * The monitor is closed over the slot it belongs to rather than looking the
+   * slot up from the failed incarnation's own id: there is no map from
+   * incarnation id back to slot, on purpose.
+   */
   private async createSupervisedProcess<TMsg, TState, TCtx>(
     spec: ProcessSpec<TMsg, TState, TCtx>,
     ctx: TCtx,
     slotId: ProcessId,
   ): Promise<ProcessRef<TMsg>> {
-    const process = new ProcessImpl(spec, ctx, this.clock, this.createFailureMonitor(slotId));
-    await process.start();
-    return process;
-  }
+    let hasStarted = false;
 
-  /**
-   * One monitor per incarnation, closed over the slot it belongs to rather
-   * than looking the slot up from the failed incarnation's own id: there is
-   * no map from incarnation id back to slot, on purpose. A failed re-init
-   * inside `handleProcessFailure`'s own retry loop raises `process:fail`
-   * through this very monitor before that loop's `await` on
-   * `createSupervisedProcess` has a chance to observe the rejection; the
-   * `restarting` guard in `handleProcessFailure` is what makes that re-entrant
-   * call a no-op instead of a second, racing handler for the same slot.
-   */
-  private createFailureMonitor(slotId: ProcessId): EmitFn {
-    return (event: ProcessEvent) => {
+    const process = new ProcessImpl(spec, ctx, this.clock, (event: ProcessEvent) => {
       this.emit?.(event);
 
-      if (event.type === "process:fail") {
+      if (hasStarted && event.type === "process:fail") {
         this.handleProcessFailure(slotId).catch((error) => {
           this.emit?.({
             type: "supervisor:restart:failed",
@@ -472,12 +468,16 @@ export class Supervisor {
           });
         });
       }
-    };
+    });
+
+    await process.start();
+    hasStarted = true;
+    return process;
   }
 
   private async handleProcessFailure(slotId: ProcessId): Promise<void> {
     const slot = this.slots.get(slotId);
-    if (!slot) return; // already retired (e.g. by shutdown, or a stale re-entrant signal)
+    if (!slot) return; // already retired, e.g. by shutdown
 
     if (slot.action === "stop") {
       this.retireSlot(slotId);
@@ -502,14 +502,7 @@ export class Supervisor {
     }
 
     // action === "restart"
-    if (this.restarting.has(slotId)) return; // re-entrant: the in-flight loop below owns this failure
-    this.restarting.add(slotId);
-
-    try {
-      await this.restartLoop(slotId, slot);
-    } finally {
-      this.restarting.delete(slotId);
-    }
+    await this.restartLoop(slotId, slot);
   }
 
   /**
