@@ -592,6 +592,91 @@ function unrestartableChild(): ProcessSpec<unknown> {
   };
 }
 
+/**
+ * A child that crashes on every message, and whose re-init throws on the
+ * numbered starts in `failingStarts`. Start 1 is the spawn, so the first
+ * restart is start 2.
+ */
+function crashingChildWhoseStartsFail(failingStarts: ReadonlySet<number>): ProcessSpec<unknown> {
+  let starts = 0;
+  return {
+    name: "flaky-restarts",
+    init: () => {
+      starts++;
+      if (failingStarts.has(starts)) throw new Error("re-init boom");
+    },
+    handle: () => {
+      throw new Error("boom");
+    },
+  };
+}
+
+describe("Supervisor: with no restart budget, the backoff attempt counts since the child last started", () => {
+  const backoff = { initial: ms(10), max: ms(80), factor: 2 };
+
+  it("waits `initial` after every occasional crash of a healthy child", async () => {
+    const clock = createControlledClock();
+    const watcher = eventWaiter();
+
+    const supervisor = new Supervisor({ clock, emit: watcher.emit, strategy: { type: "one-for-one", backoff } });
+    const ref = await supervisor.spawn(crashingChildWhoseStartsFail(new Set()));
+
+    for (let crash = 1; crash <= 5; crash++) {
+      await ref.send({ type: "poke" });
+      await watcher.waitForCount("supervisor:restart", crash);
+      const pending = watcher.events.filter((e) => e.type === "supervisor:restart").at(-1);
+      clock.advanceBy(ms(pending?.delayMs ?? 0));
+      await watcher.waitForCount("supervisor:child:restarted", crash);
+
+      // The child then runs for an hour before it crashes again.
+      clock.advanceBy(ms(3_600_000));
+    }
+
+    // Each crash is a fresh attempt 1: a child that crashes once an hour does
+    // not back off further every time, the way a failing re-init does.
+    const restarts = watcher.events.filter((e) => e.type === "supervisor:restart");
+    expect(restarts.map((e) => e.attempt)).toEqual([1, 1, 1, 1, 1]);
+    expect(restarts.map((e) => e.delayMs)).toEqual([10, 10, 10, 10, 10]);
+
+    await supervisor.stop();
+  });
+
+  it("grows with each consecutive failed re-init and starts over from attempt 1 after a successful start", async () => {
+    const clock = createControlledClock();
+    const watcher = eventWaiter();
+
+    // Starts 2 and 3 fail (the first restart takes three tries), start 4
+    // succeeds, and then the next crash's first try, start 5, fails again.
+    const supervisor = new Supervisor({ clock, emit: watcher.emit, strategy: { type: "one-for-one", backoff } });
+    const ref = await supervisor.spawn(crashingChildWhoseStartsFail(new Set([2, 3, 5])));
+
+    // Waits out the next `count` restarts, each for the delay it announced.
+    let waitedOut = 0;
+    const waitOutRestarts = async (count: number) => {
+      for (let i = 0; i < count; i++) {
+        await watcher.waitForCount("supervisor:restart", ++waitedOut);
+        const pending = watcher.events.filter((e) => e.type === "supervisor:restart").at(-1);
+        clock.advanceBy(ms(pending?.delayMs ?? 0));
+      }
+    };
+
+    await ref.send({ type: "poke" });
+    await waitOutRestarts(3);
+    await watcher.waitForCount("supervisor:child:restarted", 1);
+
+    // The third try came up. The next crash is a crash of a running child.
+    await ref.send({ type: "poke" });
+    await waitOutRestarts(2);
+    await watcher.waitForCount("supervisor:child:restarted", 2);
+
+    const restarts = watcher.events.filter((e) => e.type === "supervisor:restart");
+    expect(restarts.map((e) => e.attempt)).toEqual([1, 2, 3, 1, 2]);
+    expect(restarts.map((e) => e.delayMs)).toEqual([10, 20, 40, 10, 20]);
+
+    await supervisor.stop();
+  });
+});
+
 describe("Supervisor: a failed re-init with no restart budget", () => {
   it("is retried with backoff that keeps growing per the curve, capped at max", async () => {
     const clock = createControlledClock();

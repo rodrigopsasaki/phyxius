@@ -30,7 +30,12 @@ backoff, until the budget says stop. With no `maxRestarts` the budget never
 does: the retry backs off along the curve, capped at `backoff.max`, for as long
 as re-init keeps failing, and waits at least 1 ms between tries, whatever the
 curve computes to (an overflowed curve included), so it can never spin without
-yielding to the event loop.
+yielding to the event loop. With no `maxRestarts` there is no window to count
+in, so the backoff attempt counts since the child last started: a crash of a
+running child is attempt 1, each consecutive failed re-init after it is the
+next, and a successful start resets the count. A child that crashes once in a
+while waits `backoff.initial` every time, as it did before this change, rather
+than backing off further with each crash.
 
 The ref `spawn` returns is a stable address for the slot, not a snapshot of
 one incarnation: `send` / `ask` / `stop` / `status` follow whichever

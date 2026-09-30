@@ -30,9 +30,11 @@ export type RestartDeclinedDecision =
     };
 
 /**
- * `attempt` is which restart this is, counting the ones still inside the
- * budget window: the input to the backoff curve, decided next to the
- * bookkeeping it is read from.
+ * `attempt` is the input to the backoff curve, decided next to the bookkeeping
+ * it is read from. With a budget it is which restart this is, counting the ones
+ * still inside the budget window. Without one there is no window, and it is
+ * the tries since the child last started: a crash of a running child is
+ * attempt 1, and each failed re-init after it is the next.
  */
 export type RestartDecision = { kind: "restart"; attempt: number } | RestartDeclinedDecision;
 
@@ -204,10 +206,13 @@ export class Supervisor {
   /** Per slot, when each restart inside the trailing budget window was decided. */
   private readonly restartWindows = new Map<ProcessId, MonoMs[]>();
   /**
-   * Per slot, restarts decided when the strategy has no `maxRestarts`. There
-   * is no window to count them in, and nothing leaves one, so the count only
-   * grows: it is the backoff curve's input, and the curve's own `max` is what
-   * bounds the wait.
+   * Per slot, the restarts decided since the child last started, when the
+   * strategy has no `maxRestarts`. There is no window to count them in, so the
+   * count is reset by the one thing that ends a failing streak: a successful
+   * start. It is the backoff curve's input: a child that keeps failing to
+   * re-init backs off along the curve (the curve's own `max` bounds the wait),
+   * and one that crashes once in a while waits `initial` every time, because
+   * each crash finds the count back at zero.
    */
   private readonly unwindowedAttempts = new Map<ProcessId, number>();
   private readonly restartCounts = new Map<ProcessId, number>();
@@ -365,7 +370,8 @@ export class Supervisor {
 
     const budget = this.strategy.maxRestarts;
     if (!budget) {
-      // No limit: restarting never stops, but backoff still has to grow.
+      // No limit: restarting never stops, but a run of failed re-inits still
+      // has to back off. A successful start resets the count (see restartLoop).
       const attempt = (this.unwindowedAttempts.get(slotId) ?? 0) + 1;
       this.unwindowedAttempts.set(slotId, attempt);
       return { kind: "restart", attempt };
@@ -526,7 +532,8 @@ export class Supervisor {
    *
    * With no `maxRestarts` the budget never says stop, and that is honoured:
    * "no limit" is what the strategy declares, so the loop backs off along the
-   * curve for as long as re-init keeps failing, bounded only by `backoff.max`.
+   * curve for as long as re-init keeps failing, bounded only by `backoff.max`,
+   * and starts the curve over once a start succeeds.
    * Ending it after some number of tries would retire a child the caller
    * asked to have restarted without limit, on a limit nobody configured. What
    * it may not do is spin: a failed re-init always waits at least
@@ -604,6 +611,8 @@ export class Supervisor {
 
       slot.ref.current = newProcess;
       this.restartCounts.set(slotId, (this.restartCounts.get(slotId) ?? 0) + 1);
+      // The child is running again, so its next crash is a new attempt 1.
+      this.unwindowedAttempts.delete(slotId);
 
       this.emit?.({
         type: "supervisor:child:restarted",
