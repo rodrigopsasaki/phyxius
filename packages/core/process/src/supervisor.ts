@@ -433,13 +433,24 @@ export class Supervisor {
     });
   }
 
-  /** The backoff curve at `attempt`: `initial * factor^(attempt-1)`, capped at `max`, then jittered. */
-  private restartDelay(attempt: number): Millis {
+  /**
+   * The wait before a restart: the backoff curve at `attempt`
+   * (`initial * factor^(attempt-1)`, capped at `max`, then jittered), and never
+   * less than `floor`. Total: the result is always a finite number of at least
+   * `floor`, whatever the curve computes to. A curve that overflows
+   * (`factor^(attempt-1)` is Infinity from attempt 1025 at factor 2) is capped
+   * by `max`, but with `initial` 0 it is `0 * Infinity`, which is NaN, and NaN
+   * slips past `Math.max` and every `> 0` check. The comparison is written so
+   * that it cannot: a NaN or infinite delay, or one below the floor, is the
+   * floor.
+   */
+  private restartDelay(attempt: number, floor: Millis): Millis {
     const { backoff } = this.strategy;
-    if (!backoff) return ms(0);
+    if (!backoff) return floor;
 
     const { initial, max, factor } = backoff;
-    return ms(this.jittered(Math.min(initial * Math.pow(factor, attempt - 1), max)));
+    const delay = this.jittered(Math.min(initial * Math.pow(factor, attempt - 1), max));
+    return Number.isFinite(delay) && delay >= floor ? ms(delay) : floor;
   }
 
   /**
@@ -533,8 +544,7 @@ export class Supervisor {
         return;
       }
 
-      const curve = this.restartDelay(decision.attempt);
-      const delay = reinitFailed ? ms(Math.max(curve, MIN_REINIT_RETRY_DELAY)) : curve;
+      const delay = this.restartDelay(decision.attempt, reinitFailed ? MIN_REINIT_RETRY_DELAY : ms(0));
       this.emit?.({
         type: "supervisor:restart",
         id: slotId,

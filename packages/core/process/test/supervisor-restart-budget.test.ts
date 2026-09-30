@@ -672,4 +672,55 @@ describe("Supervisor: a failed re-init with no restart budget", () => {
 
     await supervisor.stop();
   });
+
+  it.each([
+    // 0 * Infinity is NaN once the curve overflows: nothing to cap, so the floor.
+    { initial: 0, waitsAfterOverflow: 1 },
+    // 10 * Infinity is Infinity: over the cap, so the cap.
+    { initial: 10, waitsAfterOverflow: 80 },
+  ])(
+    "keeps waiting once the backoff curve overflows, with initial $initial: $waitsAfterOverflow ms",
+    async ({ initial, waitsAfterOverflow }) => {
+      const clock = createControlledClock();
+      const watcher = eventWaiter();
+
+      // `Math.pow(2, attempt - 1)` is Infinity from the 1025th attempt on. The
+      // driver pays one clock advance per failure, so a retry that does not
+      // wait shows up as a failure nobody paid for: throw from inside the loop
+      // rather than let it spin, which on this clock nothing could interrupt.
+      const FAILURES = 1_030;
+      const supervisor = new Supervisor({
+        clock,
+        emit: (event) => {
+          watcher.emit(event);
+          if (event.type === "supervisor:restart:failed" && watcher.countOf(event.type) > FAILURES + 1) {
+            throw new Error("re-init retry is spinning without yielding");
+          }
+        },
+        strategy: { type: "one-for-one", backoff: { initial: ms(initial), max: ms(80), factor: 2 } },
+      });
+
+      const ref = await supervisor.spawn(unrestartableChild());
+      await ref.send({ type: "poke" });
+
+      const abandoned = watcher.waitForCount("supervisor:restart:abandoned", 1);
+      for (let n = 1; n <= FAILURES; n++) {
+        await watcher.waitForCount("supervisor:restart", n);
+        const pending = watcher.events.filter((e) => e.type === "supervisor:restart").at(-1);
+        clock.advanceBy(ms(pending?.delayMs ?? 0));
+        await Promise.race([watcher.waitForCount("supervisor:restart:failed", n), abandoned]);
+      }
+
+      expect(watcher.countOf("supervisor:restart:abandoned")).toBe(0);
+
+      const restarts = watcher.events.filter((e) => e.type === "supervisor:restart");
+      const pastOverflow = restarts.filter((e) => (e.attempt ?? 0) >= 1_025);
+      expect(pastOverflow.length).toBeGreaterThan(0);
+      expect(pastOverflow.map((e) => e.delayMs)).toEqual(pastOverflow.map(() => waitsAfterOverflow));
+
+      await supervisor.stop();
+      clock.advanceBy(ms(80));
+      await watcher.waitForCount("supervisor:restart:abandoned", 1);
+    },
+  );
 });

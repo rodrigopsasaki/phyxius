@@ -28,8 +28,9 @@ A failed re-init used to end supervision after a single
 `supervisor:giveup`. It is retried now, under the same budget and the same
 backoff, until the budget says stop. With no `maxRestarts` the budget never
 does: the retry backs off along the curve, capped at `backoff.max`, for as long
-as re-init keeps failing, and waits at least 1 ms between tries so it can never
-spin without yielding to the event loop.
+as re-init keeps failing, and waits at least 1 ms between tries, whatever the
+curve computes to (an overflowed curve included), so it can never spin without
+yielding to the event loop.
 
 The ref `spawn` returns is a stable address for the slot, not a snapshot of
 one incarnation: `send` / `ask` / `stop` / `status` follow whichever
