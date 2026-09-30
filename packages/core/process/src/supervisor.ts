@@ -39,6 +39,15 @@ export type RestartDecision = { kind: "restart"; attempt: number } | RestartDecl
 type Backoff = NonNullable<SupervisionStrategy["backoff"]>;
 
 /**
+ * The shortest wait before a failed re-init is tried again. A retry driven by
+ * the supervisor itself, with no message behind it, that waits nothing is a
+ * loop that never yields: it starves every other timer on the event loop, and
+ * on a controlled clock nothing can interrupt it. One millisecond is the
+ * smallest wait the clock will actually park on.
+ */
+const MIN_REINIT_RETRY_DELAY = ms(1);
+
+/**
  * A backoff the type can see needs no `random`: one that does not mention
  * `jitter`, or pins it to the literal `0`, an explicit "off". Computing it
  * never touches randomness.
@@ -185,6 +194,13 @@ export class Supervisor {
   private readonly jittered: (delay: number) => number;
   /** Per slot, when each restart inside the trailing budget window was decided. */
   private readonly restartWindows = new Map<ProcessId, MonoMs[]>();
+  /**
+   * Per slot, restarts decided when the strategy has no `maxRestarts`. There
+   * is no window to count them in, and nothing leaves one, so the count only
+   * grows: it is the backoff curve's input, and the curve's own `max` is what
+   * bounds the wait.
+   */
+  private readonly unwindowedAttempts = new Map<ProcessId, number>();
   private readonly restartCounts = new Map<ProcessId, number>();
   private readonly slots = new Map<ProcessId, Slot>();
   /** Slot ids currently inside their own restart-retry loop. Guards against
@@ -357,7 +373,10 @@ export class Supervisor {
 
     const budget = this.strategy.maxRestarts;
     if (!budget) {
-      return { kind: "restart", attempt: 1 }; // no limit
+      // No limit: restarting never stops, but backoff still has to grow.
+      const attempt = (this.unwindowedAttempts.get(slotId) ?? 0) + 1;
+      this.unwindowedAttempts.set(slotId, attempt);
+      return { kind: "restart", attempt };
     }
 
     // The window slides: it holds the restarts decided at most `within` ago,
@@ -409,20 +428,13 @@ export class Supervisor {
     });
   }
 
-  private getRestartDelay(slotId: ProcessId, attempt: number): Millis {
-    if (!this.strategy.backoff) return ms(0);
+  /** The backoff curve at `attempt`: `initial * factor^(attempt-1)`, capped at `max`, then jittered. */
+  private restartDelay(attempt: number): Millis {
+    const { backoff } = this.strategy;
+    if (!backoff) return ms(0);
 
-    const { initial, max, factor } = this.strategy.backoff;
-    const delay = this.jittered(Math.min(initial * Math.pow(factor, attempt - 1), max));
-
-    this.emit?.({
-      type: "supervisor:restart",
-      id: slotId,
-      attempt,
-      delayMs: delay,
-    });
-
-    return ms(delay);
+    const { initial, max, factor } = backoff;
+    return ms(this.jittered(Math.min(initial * Math.pow(factor, attempt - 1), max)));
   }
 
   private async createSupervisedProcess<TMsg, TState, TCtx>(
@@ -506,9 +518,18 @@ export class Supervisor {
    * failure of the same child: it counts against the same budget and is
    * retried with the same backoff, instead of ending supervision after a
    * single `supervisor:restart:failed` the way it used to.
+   *
+   * With no `maxRestarts` the budget never says stop, and that is honoured:
+   * "no limit" is what the strategy declares, so the loop backs off along the
+   * curve for as long as re-init keeps failing, bounded only by `backoff.max`.
+   * Ending it after some number of tries would retire a child the caller
+   * asked to have restarted without limit, on a limit nobody configured. What
+   * it may not do is spin: a failed re-init always waits at least
+   * `MIN_REINIT_RETRY_DELAY`, whatever the curve says.
    */
   private async restartLoop(slotId: ProcessId, slot: Slot): Promise<void> {
     const failedIncarnationId = slot.ref.current.id;
+    let reinitFailed = false;
 
     while (true) {
       const decision = this.decideRestart(slotId);
@@ -518,7 +539,15 @@ export class Supervisor {
         return;
       }
 
-      const delay = this.getRestartDelay(slotId, decision.attempt);
+      const curve = this.restartDelay(decision.attempt);
+      const delay = reinitFailed ? ms(Math.max(curve, MIN_REINIT_RETRY_DELAY)) : curve;
+      this.emit?.({
+        type: "supervisor:restart",
+        id: slotId,
+        attempt: decision.attempt,
+        delayMs: delay,
+      });
+
       if (delay > 0) {
         await this.clock.sleep(delay);
       }
@@ -555,6 +584,7 @@ export class Supervisor {
           error,
           timestamp: this.clock.now().wallMs,
         });
+        reinitFailed = true;
         // Loop again: decideRestart runs once more and spends more of the
         // same budget, rather than ending supervision here.
       }
@@ -564,6 +594,7 @@ export class Supervisor {
   private retireSlot(slotId: ProcessId): void {
     this.slots.delete(slotId);
     this.restartWindows.delete(slotId);
+    this.unwindowedAttempts.delete(slotId);
     // restartCounts is intentionally NOT cleared: it is the final tally a
     // caller can still read (via the slot id it already holds) after giveup.
   }

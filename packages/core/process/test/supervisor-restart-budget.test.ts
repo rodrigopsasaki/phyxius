@@ -610,3 +610,104 @@ describe("Supervisor: the restart window slides on monotonic time", () => {
     await supervisor.stop();
   });
 });
+
+/**
+ * A child that comes up once and then can never be brought up again: every
+ * re-init throws. Crashing it once starts the supervisor's own retry loop,
+ * the one thing here that runs without a message to drive it.
+ */
+function unrestartableChild(): ProcessSpec<unknown> {
+  let inits = 0;
+  return {
+    name: "unrestartable",
+    init: () => {
+      inits++;
+      if (inits > 1) throw new Error("re-init boom");
+    },
+    handle: () => {
+      throw new Error("boom");
+    },
+  };
+}
+
+describe("Supervisor: a failed re-init with no restart budget", () => {
+  it("is retried with backoff that keeps growing per the curve, capped at max", async () => {
+    const clock = createControlledClock();
+    const watcher = eventWaiter();
+
+    const supervisor = new Supervisor({
+      clock,
+      emit: watcher.emit,
+      // No `maxRestarts`: nothing here ever declares the budget spent.
+      strategy: { type: "one-for-one", backoff: { initial: ms(10), max: ms(80), factor: 2 } },
+    });
+
+    const ref = await supervisor.spawn(unrestartableChild());
+    await ref.send({ type: "poke" });
+
+    const expectedDelays = [10, 20, 40, 80, 80, 80];
+    for (const [i, expectedDelay] of expectedDelays.entries()) {
+      const n = i + 1;
+      await watcher.waitForCount("supervisor:restart", n);
+      expect(watcher.events.filter((e) => e.type === "supervisor:restart").at(-1)?.delayMs).toBe(expectedDelay);
+      clock.advanceBy(ms(expectedDelay));
+      await watcher.waitForCount("supervisor:restart:failed", n);
+    }
+
+    // The attempt count is the slot's own, so it grows per failed re-init
+    // even though there is no budget window to count them in. The seventh is
+    // already decided and asleep on its capped 80 ms: the sixth failure ended
+    // one wait and began the next.
+    const restarts = watcher.events.filter((e) => e.type === "supervisor:restart");
+    expect(restarts.map((e) => e.attempt)).toEqual([1, 2, 3, 4, 5, 6, 7]);
+    expect(restarts.at(-1)?.delayMs).toBe(80);
+    expect(watcher.countOf("supervisor:giveup")).toBe(0);
+
+    // Shutdown ends the retry loop with a recorded reason, not a silent stop.
+    await supervisor.stop();
+    clock.advanceBy(ms(80));
+    await watcher.waitForCount("supervisor:restart:abandoned", 1);
+    expect(watcher.countOf("supervisor:giveup")).toBe(0);
+  });
+
+  it("never retries in the same tick, even with no backoff to pace it", async () => {
+    const clock = createControlledClock();
+    const watcher = eventWaiter();
+
+    // A retry loop that never waits would starve the event loop, and on this
+    // clock nothing would ever interrupt it. If the loop spins, fail the test
+    // from inside it rather than hanging the run.
+    const SPIN_LIMIT = 50;
+    const supervisor = new Supervisor({
+      clock,
+      emit: (event) => {
+        watcher.emit(event);
+        if (event.type === "supervisor:restart:failed" && watcher.countOf(event.type) > SPIN_LIMIT) {
+          throw new Error("re-init retry is spinning without yielding");
+        }
+      },
+      strategy: { type: "one-for-one" },
+    });
+
+    const ref = await supervisor.spawn(unrestartableChild());
+    await ref.send({ type: "poke" });
+
+    await watcher.waitForCount("supervisor:restart:failed", 1);
+    await clock.flush();
+
+    // The loop is parked on the clock, waiting, rather than retrying again.
+    expect(watcher.countOf("supervisor:restart:failed")).toBe(1);
+    expect(clock.getPendingTimerCount()).toBe(1);
+
+    clock.advanceBy(ms(1));
+    await watcher.waitForCount("supervisor:restart:failed", 2);
+    await clock.flush();
+    expect(watcher.countOf("supervisor:restart:failed")).toBe(2);
+
+    // The first restart follows the crash at once; every retry waits its 1 ms.
+    const delays = watcher.events.filter((e) => e.type === "supervisor:restart").map((e) => e.delayMs);
+    expect(delays).toEqual([0, 1, 1]);
+
+    await supervisor.stop();
+  });
+});
