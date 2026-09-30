@@ -333,12 +333,12 @@ export class Supervisor {
 
   /**
    * Decide whether a failed child is restarted, and when it is not, say which
-   * of the three reasons it was. This returned a bare boolean: "no" was
-   * indistinguishable across a policy of never restarting, a shutdown already
-   * under way, and a spent restart budget. Only the last of those emitted
-   * anything, so the other two ended a child's life with no record at all.
-   * `ProcessEvent`'s own contract is that a state transition a consumer would
-   * care about MUST produce an event; two of these three did not.
+   * reason it was. This returned a bare boolean: "no" was indistinguishable
+   * across a policy of never restarting, a shutdown already under way, and a
+   * spent restart budget. Only the last of those emitted anything, so the
+   * other two ended a child's life with no record at all. `ProcessEvent`'s
+   * own contract is that a state transition a consumer would care about MUST
+   * produce an event; two of those three did not.
    *
    * Emitting stays with the caller (the `supervisor:giveup` event this used to
    * fire from in here now fires there), so this function decides and the
@@ -467,15 +467,7 @@ export class Supervisor {
       this.emit?.(event);
 
       if (hasStarted && event.type === "process:fail") {
-        this.handleProcessFailure(slotId).catch((error) => {
-          this.emit?.({
-            type: "supervisor:restart:failed",
-            supervisorId: this.id,
-            processId: slotId,
-            error,
-            timestamp: this.clock.now().wallMs,
-          });
-        });
+        this.handleProcessFailure(slotId).catch((error) => this.settleAfterFault(slotId, error));
       }
     });
 
@@ -536,8 +528,8 @@ export class Supervisor {
     while (true) {
       const decision = this.decideRestart(slotId);
       if (decision.kind === "declined") {
-        this.emitDeclinedRestart(slotId, decision);
         this.retireSlot(slotId);
+        this.emitDeclinedRestart(slotId, decision);
         return;
       }
 
@@ -561,37 +553,20 @@ export class Supervisor {
       // left no trace of itself.
       const goneAfterSleep = this.whyNoLongerSupervised(slotId);
       if (goneAfterSleep) {
-        this.emitDeclinedRestart(slotId, { kind: "declined", because: goneAfterSleep });
         this.retireSlot(slotId);
+        this.emitDeclinedRestart(slotId, { kind: "declined", because: goneAfterSleep });
         return;
       }
 
+      // Only the create is guarded. It is the one step whose failure means
+      // "this incarnation would not start", which is what earns another
+      // attempt. Anything else that throws (an emit sink, the clock, the
+      // backoff arithmetic) is not a failed re-init: retrying would create a
+      // second replacement while the first is still installed. Those leave
+      // through `settleAfterFault` instead.
+      let newProcess: ProcessRef<unknown>;
       try {
-        const newProcess = await this.createSupervisedProcess(slot.spec, slot.ctx, slotId);
-
-        // The same two things can land while the replacement is starting. It
-        // is unowned by then, and installing it would leave a running child
-        // that nothing supervises and nothing will stop: stop it instead.
-        const goneWhileStarting = this.whyNoLongerSupervised(slotId);
-        if (goneWhileStarting) {
-          await this.stopQuietly(slotId, newProcess);
-          this.emitDeclinedRestart(slotId, { kind: "declined", because: goneWhileStarting });
-          this.retireSlot(slotId);
-          return;
-        }
-
-        slot.ref.current = newProcess;
-
-        this.restartCounts.set(slotId, (this.restartCounts.get(slotId) ?? 0) + 1);
-
-        this.emit?.({
-          type: "supervisor:child:restarted",
-          supervisorId: this.id,
-          oldProcessId: failedIncarnationId,
-          newProcessId: newProcess.id,
-          timestamp: this.clock.now().wallMs,
-        });
-        return;
+        newProcess = await this.createSupervisedProcess(slot.spec, slot.ctx, slotId);
       } catch (error) {
         this.emit?.({
           type: "supervisor:restart:failed",
@@ -603,7 +578,75 @@ export class Supervisor {
         reinitFailed = true;
         // Loop again: decideRestart runs once more and spends more of the
         // same budget, rather than ending supervision here.
+        continue;
       }
+
+      // The same two things can land while the replacement is starting. It is
+      // unowned by then, and installing it would leave a running child that
+      // nothing supervises and nothing will stop: stop it instead.
+      const goneWhileStarting = this.whyNoLongerSupervised(slotId);
+      if (goneWhileStarting) {
+        await this.stopQuietly(slotId, newProcess);
+        this.retireSlot(slotId);
+        this.emitDeclinedRestart(slotId, { kind: "declined", because: goneWhileStarting });
+        return;
+      }
+
+      slot.ref.current = newProcess;
+      this.restartCounts.set(slotId, (this.restartCounts.get(slotId) ?? 0) + 1);
+
+      this.emit?.({
+        type: "supervisor:child:restarted",
+        supervisorId: this.id,
+        oldProcessId: failedIncarnationId,
+        newProcessId: newProcess.id,
+        timestamp: this.clock.now().wallMs,
+      });
+      return;
+    }
+  }
+
+  /**
+   * Something other than the guarded create threw while a failure was being
+   * handled: a backoff computation, the clock, or an emit sink. Nothing is
+   * dropped, and the slot ends in one of exactly two states.
+   *
+   * If a replacement had already been installed and is running, the child is
+   * fine and stays supervised; the fault is reported on its own, as
+   * `supervisor:restart:failed`. Otherwise nothing is running for the slot
+   * and no restart is coming, so it is retired with a typed reason
+   * (`supervisor-fault`) rather than left in `getChildren()` as a failed child
+   * that is waiting for something that will not happen.
+   *
+   * The report goes through the same sink that may be the fault. If it throws
+   * again there is no channel left to say so on, and the retired slot is the
+   * record.
+   */
+  private settleAfterFault(slotId: ProcessId, error: unknown): void {
+    const isRunning = this.slots.get(slotId)?.ref.status() === "running";
+    if (!isRunning) this.retireSlot(slotId);
+
+    try {
+      this.emit?.(
+        isRunning
+          ? {
+              type: "supervisor:restart:failed",
+              supervisorId: this.id,
+              processId: slotId,
+              error,
+              timestamp: this.clock.now().wallMs,
+            }
+          : {
+              type: "supervisor:restart:abandoned",
+              supervisorId: this.id,
+              processId: slotId,
+              because: "supervisor-fault",
+              error,
+              timestamp: this.clock.now().wallMs,
+            },
+      );
+    } catch {
+      // See above: the sink is what is broken.
     }
   }
 

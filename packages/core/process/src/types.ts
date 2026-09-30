@@ -21,9 +21,17 @@ export type StopReason = "normal" | "shutdown" | "error";
  * `supervisor:giveup` event; the rest are why `supervisor:restart:abandoned`
  * exists. `child-stopped` is the caller stopping the child through its own
  * ref: that retires the slot for good, so a restart already waiting in
- * backoff (or starting) finds nothing left to restart.
+ * backoff (or starting) finds nothing left to restart. `supervisor-fault` is
+ * the supervisor's own machinery (a backoff computation, the clock, an emit
+ * sink) throwing while it handled the failure: the slot is retired and the
+ * event carries the error.
  */
-export type RestartDeclined = "strategy-none" | "supervisor-stopping" | "child-stopped" | "restart-budget-exhausted";
+export type RestartDeclined =
+  | "strategy-none"
+  | "supervisor-stopping"
+  | "child-stopped"
+  | "supervisor-fault"
+  | "restart-budget-exhausted";
 
 // ── Supervision ─────────────────────────────────────────────────────────────
 

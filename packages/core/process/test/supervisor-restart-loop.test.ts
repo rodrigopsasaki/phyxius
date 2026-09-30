@@ -1,7 +1,8 @@
 import { describe, it, expect, vi } from "vitest";
 import { createControlledClock, ms } from "@phyxiusjs/clock";
+import type { Clock, Millis } from "@phyxiusjs/clock";
 import { Supervisor } from "../src/index.js";
-import type { ProcessRef, ProcessSpec } from "../src/index.js";
+import type { ProcessEvent, ProcessRef, ProcessSpec, SupervisionStrategy } from "../src/index.js";
 import { eventWaiter } from "./event-waiter.js";
 
 /** A child that throws on every message it is sent. */
@@ -203,4 +204,129 @@ describe("Supervisor: what the restart loop does with the failures it meets", ()
       await supervisor.stop();
     },
   );
+  it("does not count a throwing emit sink as a failed re-init, or leak a replacement for it", async () => {
+    const clock = createControlledClock();
+    const watcher = eventWaiter();
+    const sinkError = new Error("sink boom");
+
+    let inits = 0;
+    const spec: ProcessSpec<unknown> = {
+      name: "observed-restart",
+      init: () => {
+        inits++;
+      },
+      handle: () => {
+        throw new Error("boom");
+      },
+    };
+
+    const supervisor = new Supervisor({
+      clock,
+      emit: (event) => {
+        watcher.emit(event);
+        if (event.type === "supervisor:child:restarted") throw sinkError;
+      },
+      strategy: { type: "one-for-one", maxRestarts: { count: 5, within: ms(10_000) }, backoff: fastBackoff },
+    });
+
+    const ref = await supervisor.spawn(spec);
+    await ref.send({ type: "poke" });
+    await watcher.waitForCount("supervisor:restart", 1);
+    clock.advanceBy(ms(5));
+    await watcher.waitForCount("supervisor:restart:failed", 1);
+
+    // Room for a wrongly scheduled retry to fire, if there is one.
+    clock.advanceBy(ms(5));
+    await clock.flush();
+
+    // The replacement came up, and the sink throwing about it does not change
+    // that: no second re-init, the child is installed and running...
+    expect(inits).toBe(2);
+    expect(ref.status()).toBe("running");
+    expect(supervisor.getChildren()).toHaveLength(1);
+    expect(supervisor.getRestartCount(ref.id)).toBe(1);
+
+    // ...and the sink's failure is reported, not swallowed.
+    expect(watcher.events.find((e) => e.type === "supervisor:restart:failed")?.error).toBe(sinkError);
+
+    await supervisor.stop();
+  });
+
+  describe("a fault outside the guarded create", () => {
+    const fault = new Error("fault boom");
+
+    interface FaultCase {
+      readonly source: string;
+      readonly clock: () => Clock;
+      readonly strategy: SupervisionStrategy;
+      /** An event type the sink throws on, for the case where the sink is the fault. */
+      readonly sinkThrowsOn?: string;
+    }
+
+    const cases: FaultCase[] = [
+      {
+        source: "an emit sink",
+        clock: () => createControlledClock(),
+        strategy: { type: "one-for-one", backoff: fastBackoff },
+        sinkThrowsOn: "supervisor:restart",
+      },
+      {
+        source: "the backoff computation",
+        clock: () => createControlledClock(),
+        strategy: {
+          type: "one-for-one",
+          backoff: {
+            get initial(): Millis {
+              throw fault;
+            },
+            max: ms(5),
+            factor: 1,
+          },
+        },
+      },
+      {
+        source: "the clock's sleep",
+        clock: () => {
+          const clock = createControlledClock();
+          return {
+            now: () => clock.now(),
+            // The process pump sleeps 0; only the supervisor's backoff wait is positive.
+            sleep: (delay) => (delay > 0 ? Promise.reject(fault) : clock.sleep(delay)),
+            timeout: (delay) => clock.timeout(delay),
+            deadline: (target) => clock.deadline(target),
+            interval: (every, callback) => clock.interval(every, callback),
+          };
+        },
+        strategy: { type: "one-for-one", backoff: fastBackoff },
+      },
+    ];
+
+    it.each(cases)("retires the slot with a typed reason instead of stranding it: $source", async (faultCase) => {
+      const watcher = eventWaiter();
+
+      const supervisor = new Supervisor({
+        clock: faultCase.clock(),
+        emit: (event: ProcessEvent) => {
+          watcher.emit(event);
+          if (event.type === faultCase.sinkThrowsOn) throw fault;
+        },
+        strategy: faultCase.strategy,
+      });
+
+      const ref = await supervisor.spawn(crashingChild());
+      await ref.send({ type: "poke" });
+      await watcher.waitForCount("supervisor:restart:abandoned", 1);
+
+      const abandoned = watcher.events.find((e) => e.type === "supervisor:restart:abandoned");
+      expect(abandoned?.because).toBe("supervisor-fault");
+      expect(abandoned?.error).toBe(fault);
+      expect(abandoned?.processId).toBe(ref.id);
+
+      // Not left in `getChildren()` as a failed child that no restart is coming for.
+      expect(supervisor.getChildren()).toHaveLength(0);
+      expect(watcher.countOf("supervisor:child:restarted")).toBe(0);
+
+      await supervisor.stop();
+    });
+  });
 });

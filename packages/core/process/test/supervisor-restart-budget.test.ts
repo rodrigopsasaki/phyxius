@@ -364,7 +364,7 @@ describe("Supervisor: restart budget and backoff follow the supervised child", (
     await supervisor.stop();
   });
 
-  it("jitter in a strategy typed as SupervisionStrategy, without random, is refused at construction", () => {
+  it("jitter in a SupervisionStrategy-typed value, without random, is refused at construction", () => {
     const clock = createControlledClock();
 
     // The type says only `jitter?: number`, so this compiles: the constructor's
