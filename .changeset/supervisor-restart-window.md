@@ -57,7 +57,12 @@ running the child stays supervised and the fault is reported as
 `supervisor:restart:failed`; otherwise the slot is retired and
 `supervisor:restart:abandoned` reports it. A sink that throws on
 `supervisor:child:restarted` is no longer counted as a failed re-init, which
-had created a second replacement alongside the first.
+had created a second replacement alongside the first. A sink that throws on a
+child's own `process:fail` no longer stops the failure being handled: the child
+is restarted as usual and the sink's error is reported as
+`supervisor:restart:failed`. It used to leave the child `failed` in
+`getChildren()` with no restart and no supervisor event, and the throw as an
+unhandled rejection.
 
 `RestartDeclined`, the `because` on `supervisor:restart:abandoned`, gains two
 reasons: `child-stopped` (the caller stopped the child through its ref while a

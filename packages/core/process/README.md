@@ -294,6 +294,8 @@ class Supervisor {
 
 **How a restart ends.** `supervisor:giveup` when the budget is spent; otherwise `supervisor:restart:abandoned`, whose `because` is `strategy-none`, `supervisor-stopping`, `child-stopped` (stopped through its ref), or `supervisor-fault` (the supervisor's own machinery threw; the event carries the `error`).
 
+**A throwing `emit`.** What the supervisor does about a failure does not depend on the sink taking the event that reports it: a sink that throws on a child's `process:fail` still gets the child restarted, and its error is reported as `supervisor:restart:failed`. A sink that throws on one of the supervisor's own restart events is reported the same way when a replacement is already running, and otherwise retires the child with `supervisor:restart:abandoned` (`supervisor-fault`).
+
 ---
 
 ## Installation

@@ -481,16 +481,45 @@ export class Supervisor {
     let hasStarted = false;
 
     const process = new ProcessImpl(spec, ctx, this.clock, (event: ProcessEvent) => {
-      this.emit?.(event);
-
       if (hasStarted && event.type === "process:fail") {
-        this.handleProcessFailure(slotId).catch((error) => this.settleAfterFault(slotId, error));
+        this.receiveFailure(slotId, event);
+      } else {
+        this.emit?.(event);
       }
     });
 
     await process.start();
     hasStarted = true;
     return process;
+  }
+
+  /**
+   * A child that had come up has failed. The sink is told first, so the event
+   * that says what happened still precedes the supervisor events that follow
+   * from it, and the failure is handled whatever the sink does with it: what
+   * the supervisor does about a crash does not depend on the sink taking the
+   * event. A sink that threw here used to end the job, leaving the child
+   * `failed` in `getChildren()` with no restart and no supervisor event, and
+   * the throw as an unhandled rejection. It is reported instead, as
+   * `supervisor:restart:failed`, the event a sink fault during a restart
+   * already is (see `settleAfterFault`), and the restart goes ahead:
+   * `reportFault` cannot throw, so nothing in the `catch` can stand in the
+   * way of the handling below it.
+   */
+  private receiveFailure(slotId: ProcessId, failure: ProcessEvent): void {
+    try {
+      this.emit?.(failure);
+    } catch (error) {
+      this.reportFault(() => ({
+        type: "supervisor:restart:failed",
+        supervisorId: this.id,
+        processId: slotId,
+        error,
+        timestamp: this.clock.now().wallMs,
+      }));
+    }
+
+    this.handleProcessFailure(slotId).catch((error) => this.settleAfterFault(slotId, error));
   }
 
   private async handleProcessFailure(slotId: ProcessId): Promise<void> {
@@ -637,33 +666,44 @@ export class Supervisor {
    * (`supervisor-fault`) rather than left in `getChildren()` as a failed child
    * that is waiting for something that will not happen.
    *
-   * The report goes through the same sink that may be the fault. If it throws
-   * again there is no channel left to say so on, and the retired slot is the
-   * record.
+   * The report goes through the same sink that may be the fault (see
+   * `reportFault`), and the retired slot is the record if it cannot.
    */
   private settleAfterFault(slotId: ProcessId, error: unknown): void {
     const isRunning = this.slots.get(slotId)?.ref.status() === "running";
     if (!isRunning) this.retireSlot(slotId);
 
+    this.reportFault(() =>
+      isRunning
+        ? {
+            type: "supervisor:restart:failed",
+            supervisorId: this.id,
+            processId: slotId,
+            error,
+            timestamp: this.clock.now().wallMs,
+          }
+        : {
+            type: "supervisor:restart:abandoned",
+            supervisorId: this.id,
+            processId: slotId,
+            because: "supervisor-fault",
+            error,
+            timestamp: this.clock.now().wallMs,
+          },
+    );
+  }
+
+  /**
+   * Say that the supervisor's own machinery threw. The report goes through the
+   * same sink that may be the fault, and if that throws again there is no
+   * channel left to say so on: the state the fault left behind (a retired
+   * slot, a child still running) is the record. The event is built inside the
+   * guard too, as it was before this was shared, so a clock that is itself the
+   * fault cannot escape it.
+   */
+  private reportFault(build: () => ProcessEvent): void {
     try {
-      this.emit?.(
-        isRunning
-          ? {
-              type: "supervisor:restart:failed",
-              supervisorId: this.id,
-              processId: slotId,
-              error,
-              timestamp: this.clock.now().wallMs,
-            }
-          : {
-              type: "supervisor:restart:abandoned",
-              supervisorId: this.id,
-              processId: slotId,
-              because: "supervisor-fault",
-              error,
-              timestamp: this.clock.now().wallMs,
-            },
-      );
+      this.emit?.(build());
     } catch {
       // See above: the sink is what is broken.
     }

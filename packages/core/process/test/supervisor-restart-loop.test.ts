@@ -252,6 +252,56 @@ describe("Supervisor: what the restart loop does with the failures it meets", ()
     await supervisor.stop();
   });
 
+  it("restarts a child even when the sink throws on the process:fail that reports its crash", async () => {
+    const clock = createControlledClock();
+    const watcher = eventWaiter();
+    const sinkError = new Error("sink boom");
+
+    let inits = 0;
+    const spec: ProcessSpec<unknown> = {
+      name: "crash-the-sink-rejects",
+      init: () => {
+        inits++;
+      },
+      handle: () => {
+        throw new Error("boom");
+      },
+    };
+
+    const supervisor = new Supervisor({
+      clock,
+      emit: (event) => {
+        watcher.emit(event);
+        if (event.type === "process:fail") throw sinkError;
+      },
+      strategy: { type: "one-for-one", maxRestarts: { count: 5, within: ms(10_000) }, backoff: fastBackoff },
+    });
+
+    const ref = await supervisor.spawn(spec);
+    await ref.send({ type: "poke" });
+
+    // The crash is decided whatever the sink did with the event that reported it.
+    await vi.waitFor(() => expect(watcher.countOf("supervisor:restart")).toBe(1));
+    clock.advanceBy(ms(5));
+    await watcher.waitForCount("supervisor:child:restarted", 1);
+
+    expect(inits).toBe(2);
+    expect(ref.status()).toBe("running");
+    expect(supervisor.getChildren()).toHaveLength(1);
+
+    // The cause still precedes what follows from it: the sink saw the failure
+    // before the restart was announced, even though it threw on it.
+    const order = watcher.events.map((e) => e.type);
+    expect(order.indexOf("process:fail")).toBeLessThan(order.indexOf("supervisor:restart"));
+
+    // And the sink's failure is reported, not swallowed into an unhandled rejection.
+    const fault = watcher.events.find((e) => e.type === "supervisor:restart:failed");
+    expect(fault?.error).toBe(sinkError);
+    expect(fault?.processId).toBe(ref.id);
+
+    await supervisor.stop();
+  });
+
   describe("a fault outside the guarded create", () => {
     const fault = new Error("fault boom");
 
