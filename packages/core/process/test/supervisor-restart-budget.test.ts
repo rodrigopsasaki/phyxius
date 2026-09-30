@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { createControlledClock, ms } from "@phyxiusjs/clock";
 import { Supervisor } from "../src/index.js";
-import type { ProcessSpec, ProcessEvent } from "../src/index.js";
+import type { ProcessSpec, ProcessEvent, SupervisionStrategy } from "../src/index.js";
 
 /**
  * Event-driven rather than sleep-driven, same rationale as
@@ -363,18 +363,57 @@ describe("Supervisor: restart budget and backoff follow the supervised child", (
     await supervisor.stop();
   });
 
-  it("a strategy with real jitter does not typecheck without an injected random source", () => {
+  it("jitter pinned to 0 needs no injected random and restarts normally", async () => {
     const clock = createControlledClock();
+    const watcher = eventWaiter();
 
-    // @ts-expect-error — backoff.jitter is a nonzero magnitude, so the
-    // constructor overload that accepts this strategy also requires
-    // `random`. Omitting it is a compile error, not a Math.random fallback.
-    new Supervisor({
+    const spec: ProcessSpec<unknown> = {
+      name: "always-crashes",
+      handle: () => {
+        throw new Error("boom");
+      },
+    };
+
+    // No `random`: `jitter: 0` is an explicit "off", so computing the delay
+    // must not reach for a source of randomness the caller did not inject.
+    const supervisor = new Supervisor({
       clock,
+      emit: watcher.emit,
       strategy: {
         type: "one-for-one",
-        backoff: { initial: ms(20), max: ms(20), factor: 1, jitter: 50 },
+        maxRestarts: { count: 3, within: ms(10_000) },
+        backoff: { initial: ms(5), max: ms(5), factor: 1, jitter: 0 },
       },
     });
+
+    const ref = await supervisor.spawn(spec);
+    await ref.send({ type: "poke" });
+    await watcher.waitForCount("supervisor:restart", 1);
+
+    const restartEvent = watcher.events.find((e) => e.type === "supervisor:restart");
+    expect(restartEvent?.delayMs).toBe(5);
+
+    clock.advanceBy(ms(5));
+    await watcher.waitForCount("supervisor:child:restarted", 1);
+
+    expect(watcher.countOf("supervisor:restart:failed")).toBe(0);
+    expect(ref.status()).toBe("running");
+
+    await supervisor.stop();
+  });
+
+  it("jitter in a strategy typed as SupervisionStrategy, without random, is refused at construction", () => {
+    const clock = createControlledClock();
+
+    // The type says only `jitter?: number`, so this compiles: the constructor's
+    // types cannot see the jitter in it. The refusal is here instead, at
+    // construction and by name, not on the first restart of a crashing child.
+    const strategy: SupervisionStrategy = {
+      type: "one-for-one",
+      backoff: { initial: ms(20), max: ms(20), factor: 1, jitter: 50 },
+    };
+
+    expect(() => new Supervisor({ clock, strategy })).toThrow(/random/);
+    expect(() => new Supervisor({ clock, strategy, random: () => 0.5 })).not.toThrow();
   });
 });

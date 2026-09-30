@@ -10,7 +10,7 @@ import type {
   RestartDeclined,
 } from "./types.js";
 import type { Clock, Millis, MonoMs } from "@phyxiusjs/clock";
-import { elapsedSince } from "@phyxiusjs/clock";
+import { elapsedSince, ms } from "@phyxiusjs/clock";
 import { ProcessImpl } from "./process.js";
 import { createProcessId } from "./process-id.js";
 
@@ -39,44 +39,72 @@ export type RestartDecision = { kind: "restart" } | RestartDeclinedDecision;
 type Backoff = NonNullable<SupervisionStrategy["backoff"]>;
 
 /**
- * A backoff whose jitter is absent, or pinned to the literal `0` — an
- * explicit "off", not an absence left to default. Computing it never
- * touches randomness, so a supervisor built with one needs no injected
- * `random`.
+ * A backoff the type can see needs no `random`: one that does not mention
+ * `jitter`, or pins it to the literal `0`, an explicit "off". Computing it
+ * never touches randomness.
+ *
+ * The union is what tells a written-out literal from a value that is merely
+ * typed as `SupervisionStrategy`. A fresh literal that writes `jitter: 50`
+ * matches neither member (50 is not `0`, and the first member has no such
+ * key), so it falls through to the overload that requires `random`. A value
+ * already typed as `SupervisionStrategy` has no literal to inspect, only the
+ * wide `jitter?: number`, and is accepted on its shape: the type cannot say
+ * whether it carries jitter, and does not pretend to. `jitterFrom` refuses
+ * that case at construction instead. test/supervisor-options.types.ts pins
+ * both sides.
  */
-type NoJitterBackoff = Backoff & { jitter?: 0 };
+type BackoffWithoutJitter = Omit<Backoff, "jitter">;
+type NoJitterBackoff = BackoffWithoutJitter | (BackoffWithoutJitter & { jitter?: 0 });
 
 /**
- * A backoff whose jitter is a real, nonzero magnitude. There is no way to
- * turn "jitter: 50" into an actual delay without a source of randomness.
- */
-type JitteredBackoff = Backoff & { jitter: number };
-
-/**
- * `random` stays optional exactly when the strategy's backoff cannot draw on
- * it. See `SupervisorOptionsWithJitter` below for the strategy shape that
- * requires it.
+ * `random` is optional here: nothing the type can see draws on it.
  */
 interface SupervisorOptionsNoJitter {
   id?: ProcessId;
   clock: Clock;
   emit?: EmitFn;
-  strategy?: SupervisionStrategy & { backoff?: NoJitterBackoff };
+  strategy?: Omit<SupervisionStrategy, "backoff"> & { backoff?: NoJitterBackoff };
   random?: () => number;
 }
 
 /**
- * The moment a strategy's backoff declares real jitter, this is the only
- * constructor overload that matches it, and it makes `random` required —
- * "jitter but no injected random" is a compile error here, not a silent
- * fallback to the runtime's own global RNG.
+ * Any `SupervisionStrategy`, with the randomness it might need injected. A
+ * literal that declares a real jitter magnitude lands here, since it cannot be
+ * turned into a delay without a source of randomness, and is a compile error
+ * without `random`: never a silent fallback to the runtime's own global RNG.
  */
-interface SupervisorOptionsWithJitter {
+interface SupervisorOptionsWithRandom {
   id?: ProcessId;
   clock: Clock;
   emit?: EmitFn;
-  strategy: SupervisionStrategy & { backoff: JitteredBackoff };
+  strategy?: SupervisionStrategy;
   random: () => number;
+}
+
+/**
+ * Resolve the backoff's jitter into a total function, once, at construction.
+ * The alternative is a `random` field that is sometimes a stand-in and a
+ * check at every delay computation; here "jitter declared but no randomness"
+ * cannot be constructed, so nothing downstream can meet it. The overloads on
+ * the constructor keep a written-out literal from compiling; this is the same
+ * refusal for the callers the overloads cannot see: a value typed as the wide
+ * `SupervisionStrategy`, and JavaScript. It fails here, at the composition
+ * root, rather than on the first restart of a child that is already crashing.
+ */
+function jitterFrom(backoff: Backoff | undefined, random: (() => number) | undefined): (delay: number) => number {
+  const percent = backoff?.jitter;
+  if (percent === undefined || percent === 0) return (delay) => delay;
+
+  if (random === undefined) {
+    throw new Error(
+      `Supervisor: strategy.backoff.jitter is ${percent}, which needs an injected \`random\`; pass \`random: () => number\` or set jitter to 0.`,
+    );
+  }
+
+  return (delay) => {
+    const jitterAmount = delay * (percent / 100);
+    return Math.max(0, delay + (random() - 0.5) * 2 * jitterAmount);
+  };
 }
 
 /**
@@ -151,15 +179,10 @@ export class Supervisor {
   private readonly clock: Clock;
   private readonly emit?: EmitFn;
   /**
-   * Jitter's source of entropy. Injected so backoff stays deterministic
-   * under a ControlledClock. The constructor overloads below make a
-   * strategy with real jitter uncompilable without one, so by the time a
-   * jittered `getRestartDelay` reads this field it is always the caller's
-   * own source — never the runtime's own global RNG. A strategy with no
-   * jitter never reads it; the throwing stub the constructor stores in
-   * that case exists only to fail loudly if that guarantee is ever bypassed.
+   * The backoff's jitter, already bound to the caller's own `random` (or to
+   * the identity when the strategy has none). See `jitterFrom`.
    */
-  private readonly random: () => number;
+  private readonly jittered: (delay: number) => number;
   private readonly restartWindows = new Map<ProcessId, RestartWindow>();
   private readonly restartCounts = new Map<ProcessId, number>();
   private readonly slots = new Map<ProcessId, Slot>();
@@ -170,7 +193,7 @@ export class Supervisor {
   private stopped = false;
 
   constructor(options: SupervisorOptionsNoJitter);
-  constructor(options: SupervisorOptionsWithJitter);
+  constructor(options: SupervisorOptionsWithRandom);
   constructor(options: {
     id?: ProcessId;
     clock: Clock;
@@ -181,18 +204,12 @@ export class Supervisor {
     this.id = options.id ?? createProcessId();
     this.clock = options.clock;
     if (options.emit) this.emit = options.emit;
-    this.random =
-      options.random ??
-      (() => {
-        throw new Error(
-          "Supervisor: backoff jitter needs an injected `random`; this strategy declared none, so jitter is never computed and this call is unreachable by construction.",
-        );
-      });
     this.strategy = options.strategy ?? {
       type: "one-for-one",
-      maxRestarts: { count: 3, within: 10_000 as Millis },
-      backoff: { initial: 1_000 as Millis, max: 30_000 as Millis, factor: 2 },
+      maxRestarts: { count: 3, within: ms(10_000) },
+      backoff: { initial: ms(1_000), max: ms(30_000), factor: 2 },
     };
+    this.jittered = jitterFrom(this.strategy.backoff, options.random);
   }
 
   /** Number of times the supervisor has successfully restarted this child. */
@@ -395,20 +412,13 @@ export class Supervisor {
   }
 
   private getRestartDelay(slotId: ProcessId): Millis {
-    if (!this.strategy.backoff) return 0 as Millis;
+    if (!this.strategy.backoff) return ms(0);
 
     const window = this.restartWindows.get(slotId);
     const attempt = window ? window.restarts : 1;
 
-    const { initial, max, factor, jitter } = this.strategy.backoff;
-    let delay = initial * Math.pow(factor, attempt - 1);
-    delay = Math.min(delay, max);
-
-    if (jitter !== undefined) {
-      const jitterAmount = delay * (jitter / 100);
-      delay += (this.random() - 0.5) * 2 * jitterAmount;
-      delay = Math.max(0, delay);
-    }
+    const { initial, max, factor } = this.strategy.backoff;
+    const delay = this.jittered(Math.min(initial * Math.pow(factor, attempt - 1), max));
 
     this.emit?.({
       type: "supervisor:restart",
@@ -417,7 +427,7 @@ export class Supervisor {
       delayMs: delay,
     });
 
-    return delay as Millis;
+    return ms(delay);
   }
 
   private async createSupervisedProcess<TMsg, TState, TCtx>(
