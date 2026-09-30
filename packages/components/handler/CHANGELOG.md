@@ -1,5 +1,12 @@
 # @phyxiusjs/handler
 
+## 0.4.2
+
+### Patch Changes
+
+- Updated dependencies [a93478e]
+  - @phyxiusjs/process@0.4.0
+
 ## 0.4.1
 
 ### Patch Changes
