@@ -1,3 +1,4 @@
+# Pinned release: rodrigopsasaki/preston-action@a56da426, which runs ghcr.io/rodrigopsasaki/preston-runner runner-v0.1.1.
 # preston.yml: the workflow a repository adds at .github/workflows/preston.yml to have Preston read it.
 #
 # What it does, in three jobs that share one image and one brain:
