@@ -1,0 +1,249 @@
+# preston.yml: the workflow a repository adds at .github/workflows/preston.yml to have Preston read it.
+#
+# What it does, in three jobs that share one image and one brain:
+#   review       reads the brain, reads the pull request, posts at most one COMMENT review per head,
+#                or nothing when it has nothing new. It holds a read-only credential for the brain.
+#   writer       once a day, only if the default branch moved (and by hand): brings the brain up to the
+#                tip of the default branch and swaps the pointer. Its write credential lives in the
+#                `preston-brain` Environment, whose deployment branch policy is `main` only, so a pull
+#                request that edits this file still cannot run a job that holds it. Run by hand with
+#                the action fresh-climb, it starts the notes over from the tip instead of catching them
+#                up: the way out when history was rewritten, the default branch moved back or the
+#                repository was renamed. It still waits for a hold to be released, and a rollback can
+#                return to the notes it replaced until newer ones push them out of the seven kept.
+#   brain-admin  rollback, hold and release by hand, from the same Environment.
+#
+# Every job starts with the same step: a network firewall (StepSecurity's Harden-Runner, in block mode, pinned
+# by commit) that lets the job reach only the hosts in PRESTON_EGRESS_ALLOW below: GitHub, the image registry, the
+# model provider's endpoint and your brain store. It sits outside Preston's own code, so a model reading a hostile
+# pull request cannot send your key or your code anywhere else. Preston checks the firewall from inside the
+# container on every run, by asking for a host that is on no list, and refuses to run when that request goes
+# through. The firewall skips itself on some runners (a container job, a runner it does not support, a repository
+# property set to skip it) and only its own log says so; that check is how you find out. In the review job the
+# firewall is a default and not a wall: a same-repository pull request that edits this file can remove the step,
+# as it can read the model key (see PRESTON_LLM_API_KEY). The writer's and the admin job's sit behind the
+# `preston-brain` Environment.
+#
+# The action pinned below does the one thing a workflow file cannot do for itself: it verifies the
+# image's cosign signature, then runs that image (by digest) as a non-root user, and refuses to run
+# anything it could not verify. The image digest and the signing key are the action's, so one pin
+# (the action's commit) selects both. Replace the placeholders marked REPLACE_ before first use.
+#
+# Never add: pull_request_target, a checkout of a pull request's head in a privileged job, or any
+# step that runs code from a pull request. The review job has no checkout on purpose: the engine reads
+# the pull request's head through the API with the run's token and never executes it.
+#
+# Since June 2026 the workflow runs of a pull request that a workflow opens or updates with GITHUB_TOKEN (a
+# changesets or release bot, for example) are held for a maintainer's approval. This file cannot filter those
+# runs out, and every workflow in the repository shows the "awaiting approval" banner for them. Once a run is
+# approved, the review condition below declines a pull request that a workflow opened, and the runner declines it
+# again with a sentence in the job summary: Preston reviews pull requests people open. The author test never
+# declines a pull request a person opened, and a workflow's push to one is a synchronize event, so it is reviewed
+# only when PRESTON_REREVIEW_ON_PUSH is on, once a maintainer approves that run. Open bot pull requests (or push to
+# them) with a GitHub App token or a personal token if the banner bothers you.
+#
+# Secrets (Settings > Secrets and variables > Actions):
+#   PRESTON_LLM_API_KEY      a key made for Preston alone, with a small prepaid balance: the balance is
+#                            the only cap across runs, and any same-repo pull request that edits this
+#                            file can read it. Never a key you use anywhere else.
+#   PRESTON_AGE_IDENTITY     the runner's age identity (the private half). Deleted inside the run
+#                            before any model is asked anything.
+#   PRESTON_R2_READ_KEY_ID, PRESTON_R2_READ_SECRET
+#                            an object-read-only token for this repository's brain bucket.
+# Environment `preston-brain` secrets (deployment branch policy: main only):
+#   PRESTON_R2_WRITE_KEY_ID, PRESTON_R2_WRITE_SECRET
+#                            the read-and-write token for the same bucket.
+# Variables:
+#   PRESTON_R2_ENDPOINT, PRESTON_R2_BUCKET   where the brain lives.
+#   PRESTON_R2_HOST          the host part of PRESTON_R2_ENDPOINT, for the firewall's list (an expression cannot
+#                            cut a host out of a URL). If the two disagree, Preston stops with a sentence that
+#                            names the host to add to the list.
+#   PRESTON_AGE_RECIPIENTS   two age public keys, comma separated: the runner's and the offline recovery key.
+#   PRESTON_PROVIDER         which hands (deepseek or anthropic-api). The engine fixes the model for every tier,
+#                            so there is no model variable: a model for one surface is a surfaces line, and only
+#                            an owner's own config carries those. It also picks the model endpoint on the
+#                            firewall's list.
+#   PRESTON_REVIEW_CEILING_USD, PRESTON_WRITER_CEILING_USD   the most one review may spend and the most one writer
+#                            run may spend, in dollars. Both are optional: a review defaults to 0.60, two and a
+#                            half times the dearest review measured off-peak and above the dearest at peak, and a
+#                            writer run to 0.40, about twice the dearest catch-up measured at peak. A run that
+#                            reaches its ceiling stops, posts or publishes nothing and says so. A call is
+#                            admitted against what the run has spent, plus what its calls in flight hold, plus
+#                            that call's worst case, so a very large pull request at peak can stop a little
+#                            earlier than its final cost suggests. A catch-up on a repository the size of phyxius or
+#                            interlock costs about $0.17 to $0.24 off-peak and about twice that at peak, so a writer
+#                            run dispatched inside a peak window (01:00-04:00 and 06:00-10:00 UTC, Monday to Friday)
+#                            is expected to stop at 0.40, with its calls in flight adding to what it has spent:
+#                            dispatch it outside the peak hours or raise the variable. The scheduled run is outside
+#                            them. Each job hands its own to the runner as the one PRESTON_RUN_CEILING_USD it reads.
+#   PRESTON_RUNNER           optional: ubuntu-24.04-arm for free arm minutes on a public repository.
+#   PRESTON_REVIEWS          optional: "off" installs the writer only. The review job never starts, so no review
+#                            is paid for; for a repository whose pull requests merge before a review could land
+#                            (interlock: 61 of 66 merged within a minute).
+#   PRESTON_REREVIEW_ON_PUSH optional: "true" to review again on every push (a pause lets the next push cancel it).
+
+name: Preston
+
+on:
+  pull_request:
+    types: [opened, ready_for_review, synchronize]
+  issue_comment:
+    types: [created]
+  schedule:
+    # A fixed time outside the model provider's weekday peak windows (01:00-04:00 and 06:00-10:00 UTC, Monday to
+    # Friday; every other hour is off-peak), and away from the top of the hour, where GitHub drops scheduled runs
+    # first. 20:43 UTC leaves more than four hours before the next peak even when GitHub starts the run late.
+    # Change it only to another time outside those windows.
+    - cron: "43 20 * * *"
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "climb catches the brain up (or makes the first one); fresh-climb starts it over from the tip; the rest are by hand"
+        type: choice
+        options: [climb, fresh-climb, rollback, hold, release]
+        default: climb
+      generation:
+        description: "rollback only: the generation to move the pointer back to"
+        type: string
+        default: ""
+      reason:
+        description: "rollback and hold: why, in a sentence"
+        type: string
+        default: ""
+
+permissions: {}
+
+env:
+  # The one list of hosts a job may reach, as host:port entries, no wildcards. The firewall step of every job
+  # reads it, and the action hands it to the container so the runner can print it in the receipt, refuse a
+  # store or model endpoint that is not on it, and ask for a host that is not. Add a host only when the firewall's
+  # own log names it as blocked.
+  PRESTON_EGRESS_ALLOW: >-
+    github.com:443
+    api.github.com:443
+    ghcr.io:443
+    pkg-containers.githubusercontent.com:443
+    objects.githubusercontent.com:443
+    release-assets.githubusercontent.com:443
+    ${{ vars.PRESTON_PROVIDER == 'anthropic-api' && 'api.anthropic.com:443' || 'api.deepseek.com:443' }}
+    ${{ vars.PRESTON_R2_HOST }}:443
+
+jobs:
+  review:
+    # Same-repository pull requests that are ready, from someone other than a dependency bot or a workflow, or a
+    # maintainer's "/preston review" comment. Pushes review again only when PRESTON_REREVIEW_ON_PUSH is on.
+    # Nothing runs when PRESTON_REVIEWS is "off" (a writer-only install).
+    if: >-
+      vars.PRESTON_REVIEWS != 'off'
+      && ((github.event_name == 'pull_request'
+      && github.event.pull_request.head.repo.full_name == github.repository
+      && github.event.pull_request.draft == false
+      && github.event.pull_request.user.login != 'github-actions[bot]'
+      && github.actor != 'dependabot[bot]'
+      && (github.event.action != 'synchronize' || vars.PRESTON_REREVIEW_ON_PUSH == 'true'))
+      || (github.event_name == 'issue_comment'
+      && github.event.issue.pull_request != null
+      && github.event.issue.user.login != 'github-actions[bot]'
+      && startsWith(github.event.comment.body, '/preston review')
+      && contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association)))
+    runs-on: ${{ vars.PRESTON_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      pull-requests: write
+    concurrency:
+      group: preston-review-${{ github.repository_id }}-${{ github.event.pull_request.number || github.event.issue.number }}
+      cancel-in-progress: true
+    steps:
+      # First, always: nothing below runs until the firewall is in.
+      - uses: step-security/harden-runner@ccd8616d44fd3846e67624a50d5aad6d37bf2d25 # v2.22.1
+        with:
+          egress-policy: block
+          disable-telemetry: true
+          allowed-endpoints: ${{ env.PRESTON_EGRESS_ALLOW }}
+      - uses: rodrigopsasaki/preston-action@a56da426318d374037396f71d6ef307808fc6fd1
+        with:
+          job: review
+        env:
+          PRESTON_LLM_API_KEY: ${{ secrets.PRESTON_LLM_API_KEY }}
+          PRESTON_AGE_IDENTITY: ${{ secrets.PRESTON_AGE_IDENTITY }}
+          PRESTON_R2_READ_KEY_ID: ${{ secrets.PRESTON_R2_READ_KEY_ID }}
+          PRESTON_R2_READ_SECRET: ${{ secrets.PRESTON_R2_READ_SECRET }}
+          PRESTON_R2_ENDPOINT: ${{ vars.PRESTON_R2_ENDPOINT }}
+          PRESTON_R2_BUCKET: ${{ vars.PRESTON_R2_BUCKET }}
+          PRESTON_AGE_RECIPIENTS: ${{ vars.PRESTON_AGE_RECIPIENTS }}
+          PRESTON_PROVIDER: ${{ vars.PRESTON_PROVIDER }}
+          PRESTON_RUN_CEILING_USD: ${{ vars.PRESTON_REVIEW_CEILING_USD || '0.60' }}
+          PRESTON_REREVIEW_ON_PUSH: ${{ vars.PRESTON_REREVIEW_ON_PUSH }}
+
+  writer:
+    if: >-
+      github.event_name == 'schedule'
+      || (github.event_name == 'workflow_dispatch' && (inputs.action == 'climb' || inputs.action == 'fresh-climb'))
+    runs-on: ${{ vars.PRESTON_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 45
+    environment: preston-brain
+    permissions:
+      contents: read
+      issues: write
+    # One writer per repository, GitHub-enforced. A queued run waits; it is never cancelled mid-climb.
+    concurrency:
+      group: preston-brain-${{ github.repository_id }}
+      cancel-in-progress: false
+    steps:
+      # First, always: nothing below runs until the firewall is in.
+      - uses: step-security/harden-runner@ccd8616d44fd3846e67624a50d5aad6d37bf2d25 # v2.22.1
+        with:
+          egress-policy: block
+          disable-telemetry: true
+          allowed-endpoints: ${{ env.PRESTON_EGRESS_ALLOW }}
+      # The whole history, so the run can tell whether the brain's commit is an ancestor of the tip.
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: rodrigopsasaki/preston-action@a56da426318d374037396f71d6ef307808fc6fd1
+        with:
+          job: writer
+          # Empty on the schedule; climb or fresh-climb by hand.
+          action: ${{ inputs.action }}
+        env:
+          PRESTON_LLM_API_KEY: ${{ secrets.PRESTON_LLM_API_KEY }}
+          PRESTON_AGE_IDENTITY: ${{ secrets.PRESTON_AGE_IDENTITY }}
+          PRESTON_R2_WRITE_KEY_ID: ${{ secrets.PRESTON_R2_WRITE_KEY_ID }}
+          PRESTON_R2_WRITE_SECRET: ${{ secrets.PRESTON_R2_WRITE_SECRET }}
+          PRESTON_R2_ENDPOINT: ${{ vars.PRESTON_R2_ENDPOINT }}
+          PRESTON_R2_BUCKET: ${{ vars.PRESTON_R2_BUCKET }}
+          PRESTON_AGE_RECIPIENTS: ${{ vars.PRESTON_AGE_RECIPIENTS }}
+          PRESTON_PROVIDER: ${{ vars.PRESTON_PROVIDER }}
+          PRESTON_RUN_CEILING_USD: ${{ vars.PRESTON_WRITER_CEILING_USD || '0.40' }}
+
+  brain-admin:
+    if: github.event_name == 'workflow_dispatch' && inputs.action != 'climb' && inputs.action != 'fresh-climb'
+    runs-on: ${{ vars.PRESTON_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 10
+    environment: preston-brain
+    permissions:
+      contents: read
+      issues: write
+    concurrency:
+      group: preston-brain-${{ github.repository_id }}
+      cancel-in-progress: false
+    steps:
+      # First, always: nothing below runs until the firewall is in.
+      - uses: step-security/harden-runner@ccd8616d44fd3846e67624a50d5aad6d37bf2d25 # v2.22.1
+        with:
+          egress-policy: block
+          disable-telemetry: true
+          allowed-endpoints: ${{ env.PRESTON_EGRESS_ALLOW }}
+      - uses: rodrigopsasaki/preston-action@a56da426318d374037396f71d6ef307808fc6fd1
+        with:
+          job: brain-admin
+          action: ${{ inputs.action }}
+          generation: ${{ inputs.generation }}
+          reason: ${{ inputs.reason }}
+        env:
+          PRESTON_R2_WRITE_KEY_ID: ${{ secrets.PRESTON_R2_WRITE_KEY_ID }}
+          PRESTON_R2_WRITE_SECRET: ${{ secrets.PRESTON_R2_WRITE_SECRET }}
+          PRESTON_R2_ENDPOINT: ${{ vars.PRESTON_R2_ENDPOINT }}
+          PRESTON_R2_BUCKET: ${{ vars.PRESTON_R2_BUCKET }}
