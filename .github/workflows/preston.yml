@@ -1,4 +1,4 @@
-# Pinned release: rodrigopsasaki/preston-action@a56da426, which runs ghcr.io/rodrigopsasaki/preston-runner runner-v0.1.1.
+# Pinned release: rodrigopsasaki/preston-action@022d1c79, which runs ghcr.io/rodrigopsasaki/preston-runner runner-v0.1.2.
 # preston.yml: the workflow a repository adds at .github/workflows/preston.yml to have Preston read it.
 #
 # What it does, in three jobs that share one image and one brain:
@@ -162,7 +162,7 @@ jobs:
           egress-policy: block
           disable-telemetry: true
           allowed-endpoints: ${{ env.PRESTON_EGRESS_ALLOW }}
-      - uses: rodrigopsasaki/preston-action@a56da426318d374037396f71d6ef307808fc6fd1
+      - uses: rodrigopsasaki/preston-action@022d1c79132540cc9c58d8a0b6a717f7b67d8b29
         with:
           job: review
         env:
@@ -203,7 +203,7 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-      - uses: rodrigopsasaki/preston-action@a56da426318d374037396f71d6ef307808fc6fd1
+      - uses: rodrigopsasaki/preston-action@022d1c79132540cc9c58d8a0b6a717f7b67d8b29
         with:
           job: writer
           # Empty on the schedule; climb or fresh-climb by hand.
@@ -237,7 +237,7 @@ jobs:
           egress-policy: block
           disable-telemetry: true
           allowed-endpoints: ${{ env.PRESTON_EGRESS_ALLOW }}
-      - uses: rodrigopsasaki/preston-action@a56da426318d374037396f71d6ef307808fc6fd1
+      - uses: rodrigopsasaki/preston-action@022d1c79132540cc9c58d8a0b6a717f7b67d8b29
         with:
           job: brain-admin
           action: ${{ inputs.action }}
