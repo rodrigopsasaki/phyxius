@@ -264,17 +264,18 @@ The framework is one composition of the primitives. Nothing stops you from dropp
 
 ### Components — composed primitives
 
-| Package                                                 | What it is                                                                                                             |
-| ------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
-| [`@phyxiusjs/handler`](packages/components/handler)     | **The universal work-unit.** Validated, supervised, budget-bounded, retry-aware, breaker-guarded, backpressure-shaped. |
-| [`@phyxiusjs/connector`](packages/components/connector) | 3rd-party integration primitive. `ConnectorSpec extends HandlerSpec` + typed `ConnectorError` + HTTP deepdive.         |
-| [`@phyxiusjs/migration`](packages/components/migration) | Evidence-gated expand-and-contract. Phases require proof to advance; wrong-until-proven-otherwise by construction.     |
-| [`@phyxiusjs/db`](packages/components/db)               | Database boundary. Transaction-as-context, typed errors, driver-agnostic.                                              |
-| [`@phyxiusjs/observe`](packages/components/observe)     | Typed field handles. `core` vs `extra` tiers. Snapshots into every journal entry.                                      |
-| [`@phyxiusjs/context`](packages/components/context)     | Typed `AsyncLocalStorage`. A scope is a value.                                                                         |
-| [`@phyxiusjs/drain`](packages/components/drain)         | Journal-to-sink pump with declarative filtering.                                                                       |
-| [`@phyxiusjs/stats`](packages/components/stats)         | Poor-man's APM. Rolling percentiles, error rates, edge-triggered alerts.                                               |
-| [`@phyxiusjs/handle`](packages/components/handle)       | Scoped observable handle — the low-level building block behind `handler`.                                              |
+| Package                                                       | What it is                                                                                                             |
+| ------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| [`@phyxiusjs/handler`](packages/components/handler)           | **The universal work-unit.** Validated, supervised, budget-bounded, retry-aware, breaker-guarded, backpressure-shaped. |
+| [`@phyxiusjs/connector`](packages/components/connector)       | 3rd-party integration primitive. `ConnectorSpec extends HandlerSpec` + typed `ConnectorError` + HTTP deepdive.         |
+| [`@phyxiusjs/migration`](packages/components/migration)       | Evidence-gated expand-and-contract. Phases require proof to advance; wrong-until-proven-otherwise by construction.     |
+| [`@phyxiusjs/db`](packages/components/db)                     | Database boundary. Transaction-as-context, typed errors, driver-agnostic.                                              |
+| [`@phyxiusjs/observe`](packages/components/observe)           | Typed field handles. `core` vs `extra` tiers. Snapshots into every journal entry.                                      |
+| [`@phyxiusjs/context`](packages/components/context)           | Typed `AsyncLocalStorage`. A scope is a value.                                                                         |
+| [`@phyxiusjs/drain`](packages/components/drain)               | Journal-to-sink pump with declarative filtering.                                                                       |
+| [`@phyxiusjs/stats`](packages/components/stats)               | Poor-man's APM. Rolling percentiles, error rates, edge-triggered alerts.                                               |
+| [`@phyxiusjs/handle`](packages/components/handle)             | Scoped observable handle — the low-level building block behind `handler`.                                              |
+| [`@phyxiusjs/durable-step`](packages/components/durable-step) | Exploratory and unpublished: one durable step composed from state-machine, migration and handler.                      |
 
 ### Core — the primitive layer
 
