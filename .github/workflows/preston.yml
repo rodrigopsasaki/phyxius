@@ -162,7 +162,7 @@ jobs:
           egress-policy: block
           disable-telemetry: true
           allowed-endpoints: ${{ env.PRESTON_EGRESS_ALLOW }}
-      - uses: rodrigopsasaki/preston-action@022d1c79132540cc9c58d8a0b6a717f7b67d8b29
+      - uses: rodrigopsasaki/preston-action@9958cd31c1e2cc27f67e57b4b5bc69da85e7a23e
         with:
           job: review
         env:
@@ -203,7 +203,7 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-      - uses: rodrigopsasaki/preston-action@022d1c79132540cc9c58d8a0b6a717f7b67d8b29
+      - uses: rodrigopsasaki/preston-action@9958cd31c1e2cc27f67e57b4b5bc69da85e7a23e
         with:
           job: writer
           # Empty on the schedule; climb or fresh-climb by hand.
@@ -237,7 +237,7 @@ jobs:
           egress-policy: block
           disable-telemetry: true
           allowed-endpoints: ${{ env.PRESTON_EGRESS_ALLOW }}
-      - uses: rodrigopsasaki/preston-action@022d1c79132540cc9c58d8a0b6a717f7b67d8b29
+      - uses: rodrigopsasaki/preston-action@9958cd31c1e2cc27f67e57b4b5bc69da85e7a23e
         with:
           job: brain-admin
           action: ${{ inputs.action }}
