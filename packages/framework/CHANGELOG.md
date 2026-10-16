@@ -1,5 +1,15 @@
 # @phyxiusjs/framework
 
+## 2.0.2
+
+### Patch Changes
+
+- @phyxiusjs/handler@0.4.2
+- @phyxiusjs/http@0.3.3
+- @phyxiusjs/queue@0.3.3
+- @phyxiusjs/scheduler@0.3.2
+- @phyxiusjs/stats@0.2.4
+
 ## 2.0.1
 
 ### Patch Changes
