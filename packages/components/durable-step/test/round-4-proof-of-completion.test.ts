@@ -45,7 +45,8 @@ import { attestation, createMemoryJournalStore } from "@phyxiusjs/migration";
 import { machine } from "@phyxiusjs/state-machine";
 import { observe } from "@phyxiusjs/observe";
 
-import { createMemoryStateStore, createRetryLedger, defineDurableStep, isStepRefusal, spend } from "../src/index.js";
+import { createMemoryStateStore, defineDurableStep, isStepRefusal, spend } from "../src/index.js";
+import { unlimitedLedger } from "./helpers.js";
 
 function setup() {
   const clock = createControlledClock({ initialTime: 0 });
@@ -98,7 +99,7 @@ describe("round 4 — a step's output claim and its proof become the same fact",
           return { receiptId: "receipt-infer-standards-1" };
         },
       },
-      { clock, stateStore, retryLedger: createRetryLedger(Number.POSITIVE_INFINITY), journalStore },
+      { clock, stateStore, retryLedger: await unlimitedLedger(), journalStore },
     );
 
     const handler = await spawn(spec, runtime);
@@ -141,7 +142,7 @@ describe("round 4 — a step's output claim and its proof become the same fact",
         },
         run: async () => ({ receiptId: "unverified-receipt" }),
       },
-      { clock, stateStore, retryLedger: createRetryLedger(Number.POSITIVE_INFINITY), journalStore },
+      { clock, stateStore, retryLedger: await unlimitedLedger(), journalStore },
     );
 
     const handler = await spawn(spec, runtime);
@@ -185,7 +186,7 @@ describe("round 4 — a step's output claim and its proof become the same fact",
         proof: {}, // deliberate, not missing — TypeScript would refuse to compile without this field at all
         run: async () => ({ receiptId: "r" }),
       },
-      { clock, stateStore, retryLedger: createRetryLedger(Number.POSITIVE_INFINITY), journalStore },
+      { clock, stateStore, retryLedger: await unlimitedLedger(), journalStore },
     );
 
     const handler = await spawn(spec, runtime);

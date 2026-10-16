@@ -26,6 +26,18 @@
 // sharing the SAME ledger instance; nothing stops an author from spawning
 // a raw `@phyxiusjs/handler` spec with its own unconserved `retry.fixed(...)`
 // alongside it. Declaring through this composition is still a choice.
+//
+// RETROFIT NOTE (2026-08-17, retry-budget find-shape, round 1): the sync,
+// closure-backed `RetryLedger` this file originally exercised
+// (`createRetryLedger(n)`, `ledger.remaining(): number`) could not survive
+// a process hop by construction — see
+// `docs/notes/2026-08-17-retry-budget-find-shape.md`. It was replaced by
+// `DurableRetryLedger` / `createDurableRetryLedger(store, operationId)`,
+// async and keyed by operation identity instead of object reference. The
+// scenario and assertions below are UNCHANGED from what round 3 of the
+// PRIOR find-shape proved; only the construction and the now-`await`ed
+// reads were updated so this file keeps compiling and keeps meaning what
+// it always meant.
 
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
@@ -38,7 +50,21 @@ import { createMemoryJournalStore, type JournalStore } from "@phyxiusjs/migratio
 import { machine } from "@phyxiusjs/state-machine";
 import { observe } from "@phyxiusjs/observe";
 
-import { createMemoryStateStore, createRetryLedger, defineDurableStep, spend } from "../src/index.js";
+import {
+  createDurableRetryLedger,
+  createMemoryLedgerStore,
+  createMemoryStateStore,
+  defineDurableStep,
+  spend,
+  type DurableRetryLedger,
+} from "../src/index.js";
+
+/** One fresh, finite, durable ledger — test-local convenience for a scenario that doesn't need to share a store across processes. */
+async function finiteLedger(totalExtraAttempts: number, operationId: string): Promise<DurableRetryLedger> {
+  const store = createMemoryLedgerStore();
+  await store.initialize(operationId, totalExtraAttempts);
+  return createDurableRetryLedger(store, operationId);
+}
 
 function setup() {
   const clock = createControlledClock({ initialTime: 0 });
@@ -65,7 +91,7 @@ function makeFlakyItem(opts: {
   journal: Journal<HandlerEvent>;
   journalStore: JournalStore;
   runtime: HandlerRuntime;
-  retryLedger: ReturnType<typeof createRetryLedger>;
+  retryLedger: DurableRetryLedger;
   name: string;
   failTimes: number;
 }) {
@@ -111,7 +137,7 @@ describe("round 3 — retry allowance is drawn from a conserved, shared parent b
     // from one durable action, each wanting up to 2 extra attempts (6 max
     // if unconserved), but the WHOLE action only trusts 3 extra attempts
     // total — the number an operator actually budgeted for the run.
-    const sharedLedger = createRetryLedger(3);
+    const sharedLedger = await finiteLedger(3, "op-round3-siblings");
 
     const itemA = makeFlakyItem({
       clock,
@@ -165,7 +191,7 @@ describe("round 3 — retry allowance is drawn from a conserved, shared parent b
     // is what decides.
     expect(isErr(resultC)).toBe(true);
 
-    expect(sharedLedger.remaining()).toBe(0);
+    await expect(sharedLedger.remaining()).resolves.toBe(0);
 
     const { entries } = journal.getSnapshot();
     const forItem = (name: string) => entries.filter((e) => e.data.name === name);
@@ -176,7 +202,7 @@ describe("round 3 — retry allowance is drawn from a conserved, shared parent b
 
   it("attributability: retryBudgeted/retryGranted/retryAttemptsUsed land in the journal with zero extra author code", async () => {
     const { clock, runtime, journal, journalStore } = setup();
-    const ledger = createRetryLedger(10);
+    const ledger = await finiteLedger(10, "op-round3-solo-attributability");
     const { spec } = makeFlakyItem({
       clock,
       journal,
@@ -196,7 +222,7 @@ describe("round 3 — retry allowance is drawn from a conserved, shared parent b
     expect(entry.observed["retryBudgeted"]).toBe(2); // declared maxAttempts 3 => 2 extra requested
     expect(entry.observed["retryGranted"]).toBe(2); // plenty in the ledger
     expect(entry.observed["retryAttemptsUsed"]).toBe(2); // 1 failure + 1 success
-    expect(ledger.remaining()).toBe(8);
+    await expect(ledger.remaining()).resolves.toBe(8);
   });
 
   it("honest limit: the underlying HandlerEvent.attempts field is no longer informative once retry moved into this layer", async () => {
@@ -207,7 +233,7 @@ describe("round 3 — retry allowance is drawn from a conserved, shared parent b
     // native field alone would conclude every step ran once, which is
     // false whenever the ledger granted extra attempts.
     const { clock, runtime, journal, journalStore } = setup();
-    const ledger = createRetryLedger(10);
+    const ledger = await finiteLedger(10, "op-round3-attempts-friction");
     const { spec } = makeFlakyItem({
       clock,
       journal,
