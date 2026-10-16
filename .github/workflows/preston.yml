@@ -1,9 +1,11 @@
-# Pinned release: rodrigopsasaki/preston-action@022d1c79, which runs ghcr.io/rodrigopsasaki/preston-runner runner-v0.1.2.
+# Pinned release: rodrigopsasaki/preston-action@9af977b0, which runs ghcr.io/rodrigopsasaki/preston-runner runner-v0.1.4.
 # preston.yml: the workflow a repository adds at .github/workflows/preston.yml to have Preston read it.
 #
 # What it does, in three jobs that share one image and one brain:
-#   review       reads the brain, reads the pull request, posts at most one COMMENT review per head,
-#                or nothing when it has nothing new. It holds a read-only credential for the brain.
+#   review       reads the brain, reads the pull request, posts a COMMENT review: at most one per head on its
+#                own events, and one more for each /preston review comment. On a push with nothing new it
+#                stays silent; a review someone asks for always replies once it reaches a verdict. It holds
+#                a read-only credential for the brain.
 #   writer       once a day, only if the default branch moved (and by hand): brings the brain up to the
 #                tip of the default branch and swaps the pointer. Its write credential lives in the
 #                `preston-brain` Environment, whose deployment branch policy is `main` only, so a pull
@@ -162,7 +164,7 @@ jobs:
           egress-policy: block
           disable-telemetry: true
           allowed-endpoints: ${{ env.PRESTON_EGRESS_ALLOW }}
-      - uses: rodrigopsasaki/preston-action@9958cd31c1e2cc27f67e57b4b5bc69da85e7a23e
+      - uses: rodrigopsasaki/preston-action@9af977b0720b531e92aec2ef46eb5f251d10fe0a
         with:
           job: review
         env:
@@ -203,7 +205,7 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-      - uses: rodrigopsasaki/preston-action@9958cd31c1e2cc27f67e57b4b5bc69da85e7a23e
+      - uses: rodrigopsasaki/preston-action@9af977b0720b531e92aec2ef46eb5f251d10fe0a
         with:
           job: writer
           # Empty on the schedule; climb or fresh-climb by hand.
@@ -237,7 +239,7 @@ jobs:
           egress-policy: block
           disable-telemetry: true
           allowed-endpoints: ${{ env.PRESTON_EGRESS_ALLOW }}
-      - uses: rodrigopsasaki/preston-action@9958cd31c1e2cc27f67e57b4b5bc69da85e7a23e
+      - uses: rodrigopsasaki/preston-action@9af977b0720b531e92aec2ef46eb5f251d10fe0a
         with:
           job: brain-admin
           action: ${{ inputs.action }}
