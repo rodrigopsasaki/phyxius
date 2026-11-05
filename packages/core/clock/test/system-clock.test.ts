@@ -109,23 +109,34 @@ describe("SystemClock", () => {
   });
 
   describe("interval()", () => {
+    // These tests run on real timers, and a loaded CI runner can stretch a 20ms interval well past 20ms. So each test
+    // waits for the ticks it needs (with a generous ceiling) instead of counting what a fixed wall-clock window held,
+    // and checks the property that does hold under load: an interval never fires sooner than it was asked to.
+    const until = async (check: () => boolean, ceilingMs = 2000): Promise<void> => {
+      const deadline = Date.now() + ceilingMs;
+      while (!check() && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 5));
+    };
+
     it("should call callback at intervals", async () => {
       const callbacks: number[] = [];
       const handle = clock.interval(20 as Millis, () => {
-        callbacks.push(Date.now());
+        callbacks.push(performance.now());
       });
 
-      await new Promise((resolve) => setTimeout(resolve, 65));
+      await until(() => callbacks.length >= 3);
       handle.cancel();
 
-      expect(callbacks.length).toBeGreaterThanOrEqual(2);
-      expect(callbacks.length).toBeLessThanOrEqual(4);
+      expect(callbacks.length).toBeGreaterThanOrEqual(3);
+      // Node may fire a timer up to ~1ms early by its own rounding; anything less than that apart is not an interval.
+      for (let i = 1; i < callbacks.length; i++) {
+        expect((callbacks[i] ?? 0) - (callbacks[i - 1] ?? 0)).toBeGreaterThanOrEqual(18);
+      }
     });
 
     it("should emit interval events", async () => {
       const handle = clock.interval(20 as Millis, () => {});
 
-      await new Promise((resolve) => setTimeout(resolve, 45));
+      await until(() => events.some((e: ClockEvent) => e.type === "time:interval:tick"));
       handle.cancel();
 
       const setEvent = events.find((e: ClockEvent) => e.type === "time:interval:set");
@@ -146,7 +157,8 @@ describe("SystemClock", () => {
         }
       });
 
-      await new Promise((resolve) => setTimeout(resolve, 65));
+      // The tick after the one that threw is the point of the test: wait for it, however slow the runner is.
+      await until(() => callCount >= 3);
       handle.cancel();
 
       expect(callCount).toBeGreaterThanOrEqual(3);
