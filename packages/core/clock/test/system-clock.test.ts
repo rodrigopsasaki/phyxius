@@ -109,23 +109,40 @@ describe("SystemClock", () => {
   });
 
   describe("interval()", () => {
+    // These tests run on real timers, and a loaded CI runner can stretch a 20ms interval well past 20ms. So each test
+    // waits for the ticks it needs (with a generous ceiling) instead of counting what a fixed wall-clock window held,
+    // and checks the property that does hold under load: an interval never fires sooner than it was asked to.
+    const INTERVAL_MS = 20;
+    // Node keeps timers in whole milliseconds and may fire one up to 1ms early by that rounding, and
+    // performance.now() can read the two ticks up to 1ms apart the other way. So two ticks are at least
+    // INTERVAL_MS - 2 apart; anything closer is not an interval.
+    const EARLIEST_GAP_MS = INTERVAL_MS - 2;
+    const until = async (what: string, check: () => boolean, ceilingMs = 2000): Promise<void> => {
+      const deadline = Date.now() + ceilingMs;
+      while (!check() && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 5));
+      // A wait that gives up says so, so a stalled timer fails as "the ticks never came", not as a later assertion.
+      if (!check()) throw new Error(`gave up after ${ceilingMs}ms waiting for ${what}`);
+    };
+
     it("should call callback at intervals", async () => {
       const callbacks: number[] = [];
-      const handle = clock.interval(20 as Millis, () => {
-        callbacks.push(Date.now());
+      const handle = clock.interval(INTERVAL_MS as Millis, () => {
+        callbacks.push(performance.now());
       });
 
-      await new Promise((resolve) => setTimeout(resolve, 65));
+      await until("three ticks", () => callbacks.length >= 3);
       handle.cancel();
 
-      expect(callbacks.length).toBeGreaterThanOrEqual(2);
-      expect(callbacks.length).toBeLessThanOrEqual(4);
+      expect(callbacks.length).toBeGreaterThanOrEqual(3);
+      for (let i = 1; i < callbacks.length; i++) {
+        expect((callbacks[i] ?? 0) - (callbacks[i - 1] ?? 0)).toBeGreaterThanOrEqual(EARLIEST_GAP_MS);
+      }
     });
 
     it("should emit interval events", async () => {
-      const handle = clock.interval(20 as Millis, () => {});
+      const handle = clock.interval(INTERVAL_MS as Millis, () => {});
 
-      await new Promise((resolve) => setTimeout(resolve, 45));
+      await until("a tick event", () => events.some((e: ClockEvent) => e.type === "time:interval:tick"));
       handle.cancel();
 
       const setEvent = events.find((e: ClockEvent) => e.type === "time:interval:set");
@@ -139,14 +156,15 @@ describe("SystemClock", () => {
 
     it("should continue on callback errors", async () => {
       let callCount = 0;
-      const handle = clock.interval(20 as Millis, () => {
+      const handle = clock.interval(INTERVAL_MS as Millis, () => {
         callCount++;
         if (callCount === 2) {
           throw new Error("Test error");
         }
       });
 
-      await new Promise((resolve) => setTimeout(resolve, 65));
+      // The tick after the one that threw is the point of the test: wait for it, however slow the runner is.
+      await until("the tick after the one that threw", () => callCount >= 3);
       handle.cancel();
 
       expect(callCount).toBeGreaterThanOrEqual(3);
