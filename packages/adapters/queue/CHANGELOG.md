@@ -1,5 +1,11 @@
 # @phyxiusjs/queue
 
+## 0.3.3
+
+### Patch Changes
+
+- @phyxiusjs/handler@0.4.2
+
 ## 0.3.2
 
 ### Patch Changes
