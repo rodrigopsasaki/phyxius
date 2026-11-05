@@ -1,0 +1,29 @@
+// ── FROZEN — the RetryLedger published on main (0.1.0/0.1.1) ──────────────
+//
+// Verbatim copy of `src/retry-ledger.ts` as it existed BEFORE this find-
+// shape's round 1 replaced it with the durable, operation-keyed
+// `DurableRetryLedger`. Kept here, local to the round-0 baseline test,
+// deliberately: round 0 must stay reproducible on its own terms even after
+// later rounds change the package's public API out from under it. Do not
+// "fix" this file to use the new shape — that would defeat the point of a
+// frozen baseline. See docs/notes/2026-08-17-retry-budget-find-shape.md,
+// Round 0.
+
+export interface RetryLedger {
+  remaining(): number;
+  draw(want: number): number;
+}
+
+export function createRetryLedger(totalExtraAttempts: number): RetryLedger {
+  let remaining = totalExtraAttempts;
+
+  return {
+    remaining: () => remaining,
+    draw(want: number): number {
+      if (want <= 0) return 0;
+      const granted = Math.min(want, remaining);
+      remaining -= granted;
+      return granted;
+    },
+  };
+}

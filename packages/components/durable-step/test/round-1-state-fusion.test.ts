@@ -35,7 +35,8 @@ import { createMemoryJournalStore } from "@phyxiusjs/migration";
 import { machine } from "@phyxiusjs/state-machine";
 import { observe } from "@phyxiusjs/observe";
 
-import { createMemoryStateStore, createRetryLedger, defineDurableStep, isStepRefusal, spend } from "../src/index.js";
+import { createMemoryStateStore, defineDurableStep, isStepRefusal, spend } from "../src/index.js";
+import { unlimitedLedger } from "./helpers.js";
 
 function setup() {
   const clock = createControlledClock({ initialTime: 0 });
@@ -98,7 +99,7 @@ describe("round 1 — state-machine fused into the handler invocation", () => {
           return { receiptId: "receipt-infer-standards-1" };
         },
       },
-      { clock, stateStore, retryLedger: createRetryLedger(Number.POSITIVE_INFINITY), journalStore },
+      { clock, stateStore, retryLedger: await unlimitedLedger(), journalStore },
     );
 
     const handler = await spawn(inferStandardsSpec, runtime);
@@ -150,7 +151,7 @@ describe("round 1 — state-machine fused into the handler invocation", () => {
           return { receiptId: "should-not-happen" };
         },
       },
-      { clock, stateStore, retryLedger: createRetryLedger(Number.POSITIVE_INFINITY), journalStore },
+      { clock, stateStore, retryLedger: await unlimitedLedger(), journalStore },
     );
 
     const handler = await spawn(spec, runtime);
@@ -206,7 +207,7 @@ describe("round 1 — state-machine fused into the handler invocation", () => {
         proof: {},
         run: async () => ({ receiptId: "r" }), // a real model call would spend real dollars here
       },
-      { clock, stateStore, retryLedger: createRetryLedger(Number.POSITIVE_INFINITY), journalStore },
+      { clock, stateStore, retryLedger: await unlimitedLedger(), journalStore },
     );
 
     const handler = await spawn(spec, runtime);
